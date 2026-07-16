@@ -1,0 +1,49 @@
+# Local conversation and working notes (not part of the product)
+/chatgpt/
+
+# Runtime data and uploaded documents
+/storage/
+
+# Local environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Go build and test artifacts
+/backend/bin/
+/backend/tmp/
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Python virtual environments, caches, builds, and test artifacts
+/ai/.venv/
+/ai/venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*~
+
+# IDE and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
