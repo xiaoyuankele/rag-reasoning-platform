@@ -2,28 +2,67 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 
 	"rag-reasoning-platform/backend/internal/api"
 	"rag-reasoning-platform/backend/internal/config"
+	"rag-reasoning-platform/backend/internal/infrastructure/database"
 )
 
-// main 读取配置、创建路由并启动 HTTP 服务。
+// main 调用 run，并统一处理应用程序最终返回的错误。
 func main() {
-	// 使用 appConfig 作为变量名，避免遮挡导入的 config 包。
+	if err := run(); err != nil {
+		log.Fatalf("application stopped: %v", err)
+	}
+}
+
+// run 按顺序完成读取配置、连接数据库和启动 HTTP 服务。
+func run() error {
+	// Background 创建应用程序的根 context。
+	// 后续数据库超时 context 都以它为父级。
+	ctx := context.Background()
+
 	appConfig, err := config.Load()
 	if err != nil {
-		// 配置无效时输出原因并立即终止，避免服务带着错误配置运行。
-		log.Fatalf("load configuration: %v", err)
+		return fmt.Errorf(
+			"load application configuration: %w",
+			err,
+		)
 	}
 
-	// 创建已经注册好所有 HTTP 接口的 Gin 路由。
+	databaseConfig, err := config.LoadDatabase()
+	if err != nil {
+		return fmt.Errorf(
+			"load database configuration: %w",
+			err,
+		)
+	}
+
+	// ConnectionString 包含密码，只传给数据库层，不写入日志。
+	databasePool, err := database.Open(
+		ctx,
+		databaseConfig.ConnectionString(),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"open database: %w",
+			err,
+		)
+	}
+
+	// run 返回前关闭连接池。
+	defer databasePool.Close()
+
 	router := api.NewRouter()
 
-	// 根据配置启动服务，例如监听 ":8080" 或 ":9090"。
-	err = router.Run(appConfig.ServerAddress())
-	if err != nil {
-		// 端口被占用等错误会导致服务启动失败。
-		log.Fatalf("run server: %v", err)
+	if err := router.Run(appConfig.ServerAddress()); err != nil {
+		return fmt.Errorf(
+			"run HTTP server: %w",
+			err,
+		)
 	}
+
+	return nil
 }
