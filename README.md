@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端，以 Python 承担 PDF 解析、文本分块和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P1（最小后端骨架，进行中）。Go 模块、Gin 服务和 `/health` 接口已经完成，并通过真实 HTTP 请求与自动化测试验证；PostgreSQL 和文档接口尚未实现。
+> 当前状态：P1（最小后端骨架，进行中）。Go 模块、Gin 服务、`/health` 接口和 PostgreSQL 开发容器已经完成并验证；Go 数据库连接、迁移和文档接口尚未实现。
 
 ## 项目目标
 
@@ -121,7 +121,9 @@ rag_reasoning_platform_individual/
 
 Go 后端已经可以运行，目前提供 `GET /health` 健康检查接口。该接口已通过真实 HTTP 请求和 Go 自动化测试验证。
 
-Python 项目、PostgreSQL、文档管理和解析链路尚未实现。后端端口配置已完成，下一步将接入 Docker 中的 PostgreSQL。
+PostgreSQL 开发容器已通过 Docker Compose 启动，使用本机 `5433` 端口、256 MiB 内存上限和独立数据卷，并已通过健康检查与真实 SQL 验证。
+
+Python 项目、Go 数据库连接、数据库迁移、文档管理和解析链路尚未实现。下一步是让 Go 后端连接 PostgreSQL。
 
 ## 配置与安全约定
 
@@ -130,16 +132,34 @@ Go 后端当前支持以下环境变量：
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `APP_PORT` | `8080` | Go HTTP 服务监听端口，有效范围为 1 到 65535 |
+| `DB_HOST` | `localhost` | Go 连接 PostgreSQL 时使用的主机 |
+| `DB_PORT` | `5433` | PostgreSQL 映射到本机的端口 |
+| `DB_NAME` | `rag_platform` | 数据库名称 |
+| `DB_USER` | `rag_user` | 数据库用户 |
+| `DB_PASSWORD` | 无 | 本机私有密码，必须在 `.env` 中设置 |
+| `DB_SSLMODE` | `disable` | 本地开发时的 PostgreSQL SSL 模式 |
 
 `.env.example` 是可以提交到 Git 的配置模板，不得包含密码或真实密钥。`.env` 用于保存本机配置和密钥，已被 Git 忽略。
 
-当前 Go 程序通过 `os.Getenv` 读取操作系统环境变量，不会自动加载 `.env` 文件。在 PowerShell 中可以这样临时设置端口：
+Docker Compose 会自动读取项目根目录的 `.env`。当前 Go 程序通过 `os.Getenv` 读取操作系统环境变量，不会自动加载 `.env` 文件。
+
+在 PowerShell 中可以这样临时设置 Go 服务端口：
 
 ```powershell
 $env:APP_PORT = "9090"
 go run ./cmd/server
 Remove-Item Env:APP_PORT
 ```
+
+本地 PostgreSQL 常用命令：
+
+```powershell
+docker compose up -d postgres
+docker compose ps
+docker compose stop postgres
+```
+
+`docker compose stop postgres` 只停止容器，不会删除数据卷中的数据。
 
 其他安全约定：
 
