@@ -121,12 +121,28 @@ rag_reasoning_platform_individual/
 
 Go 后端已经可以运行，目前提供 `GET /health` 健康检查接口。该接口已通过真实 HTTP 请求和 Go 自动化测试验证。
 
-Python 项目、PostgreSQL、文档管理和解析链路尚未实现。下一步将完善后端配置，再接入 Docker 中的 PostgreSQL。
+Python 项目、PostgreSQL、文档管理和解析链路尚未实现。后端端口配置已完成，下一步将接入 Docker 中的 PostgreSQL。
 
 ## 配置与安全约定
 
-- 密钥和本地配置写入 `.env`，不得提交到 Git。
-- 可公开的配置模板使用 `.env.example` 并提交到 Git。
+Go 后端当前支持以下环境变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `APP_PORT` | `8080` | Go HTTP 服务监听端口，有效范围为 1 到 65535 |
+
+`.env.example` 是可以提交到 Git 的配置模板，不得包含密码或真实密钥。`.env` 用于保存本机配置和密钥，已被 Git 忽略。
+
+当前 Go 程序通过 `os.Getenv` 读取操作系统环境变量，不会自动加载 `.env` 文件。在 PowerShell 中可以这样临时设置端口：
+
+```powershell
+$env:APP_PORT = "9090"
+go run ./cmd/server
+Remove-Item Env:APP_PORT
+```
+
+其他安全约定：
+
 - 上传文件和运行数据统一存放在 `storage/`。
 - 不提交虚拟环境、缓存、日志、测试覆盖率文件和编译后二进制。
 - `go.sum` 和后续采用的 Python 依赖锁文件应提交，以保证依赖可复现。
