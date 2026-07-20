@@ -7,8 +7,10 @@ import (
 	"log"
 
 	"rag-reasoning-platform/backend/internal/api"
+	documentapplication "rag-reasoning-platform/backend/internal/application/document"
 	"rag-reasoning-platform/backend/internal/config"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
+	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
 )
 
 // main 调用 run，并统一处理应用程序最终返回的错误。
@@ -55,7 +57,17 @@ func run() error {
 	// run 返回前关闭连接池。
 	defer databasePool.Close()
 
+	// Repository 负责 PostgreSQL 数据访问。
+	documentRepository := postgres.NewDocumentRepository(databasePool)
+
+	// Service 负责文档查询用例和业务参数校验。
+	documentService := documentapplication.NewService(documentRepository)
+
+	// Handler 负责把 HTTP 请求转换成应用服务调用。
+	documentHandler := api.NewDocumentHandler(documentService)
+
 	router := api.NewRouter()
+	documentHandler.RegisterRoutes(router)
 
 	if err := router.Run(appConfig.ServerAddress()); err != nil {
 		return fmt.Errorf(
