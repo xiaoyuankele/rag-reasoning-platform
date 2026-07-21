@@ -57,4 +57,5 @@ type Lister interface {
 type Repository interface {
 	Creator
 	Finder
+	Lister
 }

@@ -134,3 +134,160 @@ func TestDocumentRepositoryCreateAndGetByID(t *testing.T) {
 		)
 	}
 }
+
+// TestDocumentRepositoryList 使用真实 PostgreSQL 验证总数、分页、稳定排序
+// 以及超过末页时返回空切片。测试只清理自己创建的记录。
+func TestDocumentRepositoryList(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+
+	databaseConfig, err := config.LoadDatabase()
+	if err != nil {
+		t.Fatalf("load database configuration: %v", err)
+	}
+
+	pool, err := database.Open(
+		ctx,
+		databaseConfig.ConnectionString(),
+	)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer pool.Close()
+
+	repository := postgresrepository.NewDocumentRepository(pool)
+
+	// 先读取已有记录数，使测试不依赖数据库必须为空。
+	var originalTotal int64
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT COUNT(*) FROM documents",
+	).Scan(&originalTotal); err != nil {
+		t.Fatalf("count existing documents: %v", err)
+	}
+
+	createdDocuments := make([]document.Document, 0, 3)
+	defer func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cleanupCancel()
+
+		for _, createdDocument := range createdDocuments {
+			_, cleanupErr := pool.Exec(
+				cleanupContext,
+				"DELETE FROM documents WHERE id = $1",
+				createdDocument.ID,
+			)
+			if cleanupErr != nil {
+				t.Errorf(
+					"clean up test document %d: %v",
+					createdDocument.ID,
+					cleanupErr,
+				)
+			}
+		}
+	}()
+
+	uniquePrefix := time.Now().UnixNano()
+	for index := 0; index < 3; index++ {
+		createdDocument, err := repository.Create(
+			ctx,
+			document.CreateInput{
+				OriginalName: fmt.Sprintf(
+					"integration-list-%d.pdf",
+					index+1,
+				),
+				StoragePath: fmt.Sprintf(
+					"integration-tests/list-%d-%d.pdf",
+					uniquePrefix,
+					index+1,
+				),
+				MIMEType:  "application/pdf",
+				SizeBytes: int64(index + 1),
+				SHA256: strings.Repeat(
+					string(rune('a'+index)),
+					64,
+				),
+			},
+		)
+		if err != nil {
+			t.Fatalf("create list test document %d: %v", index+1, err)
+		}
+
+		createdDocuments = append(createdDocuments, createdDocument)
+	}
+
+	firstPage, err := repository.List(
+		ctx,
+		document.ListOptions{Limit: 2, Offset: 0},
+	)
+	if err != nil {
+		t.Fatalf("list first page: %v", err)
+	}
+
+	expectedTotal := originalTotal + int64(len(createdDocuments))
+	if firstPage.Total != expectedTotal {
+		t.Fatalf(
+			"expected total %d, got %d",
+			expectedTotal,
+			firstPage.Total,
+		)
+	}
+
+	if len(firstPage.Documents) != 2 {
+		t.Fatalf(
+			"expected 2 documents on first page, got %d",
+			len(firstPage.Documents),
+		)
+	}
+
+	// 三条测试记录最后创建的 ID 最大；created_at 相同的情况下，
+	// SQL 中的 id DESC 仍会保证顺序稳定。
+	if firstPage.Documents[0].ID != createdDocuments[2].ID ||
+		firstPage.Documents[1].ID != createdDocuments[1].ID {
+		t.Fatalf(
+			"unexpected first-page order: got IDs %d, %d",
+			firstPage.Documents[0].ID,
+			firstPage.Documents[1].ID,
+		)
+	}
+
+	emptyPage, err := repository.List(
+		ctx,
+		document.ListOptions{
+			Limit:  2,
+			Offset: expectedTotal + 10,
+		},
+	)
+	if err != nil {
+		t.Fatalf("list page beyond end: %v", err)
+	}
+
+	if emptyPage.Total != expectedTotal {
+		t.Fatalf(
+			"expected empty-page total %d, got %d",
+			expectedTotal,
+			emptyPage.Total,
+		)
+	}
+
+	if emptyPage.Documents == nil {
+		t.Fatal("expected an empty slice, got nil")
+	}
+
+	if len(emptyPage.Documents) != 0 {
+		t.Fatalf(
+			"expected no documents beyond last page, got %d",
+			len(emptyPage.Documents),
+		)
+	}
+}

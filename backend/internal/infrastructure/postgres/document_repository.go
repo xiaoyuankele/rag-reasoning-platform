@@ -107,6 +107,89 @@ func (r *DocumentRepository) GetByID(
 	return foundDocument, nil
 }
 
+// List 按创建时间倒序查询一页文档，并返回文档总数。
+func (r *DocumentRepository) List(
+	ctx context.Context,
+	options document.ListOptions,
+) (document.ListResult, error) {
+	// 总数查询不使用 LIMIT 和 OFFSET，
+	// 因为客户端需要知道全部记录数才能计算总页数。
+	const countQuery = `
+		SELECT COUNT(*)
+		FROM documents
+	`
+
+	var total int64
+	if err := r.pool.QueryRow(ctx, countQuery).Scan(&total); err != nil {
+		return document.ListResult{}, fmt.Errorf(
+			"count documents: %w",
+			err,
+		)
+	}
+
+	const listQuery = `
+		SELECT
+			id,
+			original_name,
+			storage_path,
+			mime_type,
+			size_bytes,
+			sha256,
+			status,
+			error_message,
+			created_at,
+			updated_at
+		FROM documents
+		ORDER BY created_at DESC, id DESC
+		LIMIT $1
+		OFFSET $2
+	`
+
+	rows, err := r.pool.Query(
+		ctx,
+		listQuery,
+		options.Limit,
+		options.Offset,
+	)
+	if err != nil {
+		return document.ListResult{}, fmt.Errorf(
+			"query documents: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	// 初始化为空切片而不是 nil。
+	// 后续转换成 JSON 时，更容易稳定输出 [] 而不是 null。
+	documents := make([]document.Document, 0)
+
+	for rows.Next() {
+		listedDocument, err := scanDocument(rows)
+		if err != nil {
+			return document.ListResult{}, fmt.Errorf(
+				"scan listed document: %w",
+				err,
+			)
+		}
+
+		documents = append(documents, listedDocument)
+	}
+
+	// Next 返回 false 既可能表示正常读完，也可能表示读取过程中出错，
+	// 因此循环结束后必须检查 Err。
+	if err := rows.Err(); err != nil {
+		return document.ListResult{}, fmt.Errorf(
+			"iterate documents: %w",
+			err,
+		)
+	}
+
+	return document.ListResult{
+		Documents: documents,
+		Total:     total,
+	}, nil
+}
+
 // scanDocument 把一行 PostgreSQL 查询结果转换成领域模型。
 func scanDocument(row pgx.Row) (document.Document, error) {
 	var foundDocument document.Document
