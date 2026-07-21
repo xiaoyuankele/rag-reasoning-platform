@@ -78,13 +78,17 @@ func run() error {
 	// Service 负责文档查询用例和业务参数校验。
 	documentService := documentapplication.NewService(documentRepository)
 	documentUploadService := documentapplication.NewUploadService(documentRepository, localFileStorage)
+	documentListService := documentapplication.NewListService(documentRepository)
+
 	// Handler 负责把 HTTP 请求转换成应用服务调用。
 	documentHandler := api.NewDocumentHandler(documentService)
 	documentUploadHandler := api.NewDocumentUploadHandler(documentUploadService, storageConfig.MaxFileSizeBytes)
+	documentListHandler := api.NewDocumentListHandler(documentListService)
 
 	router := api.NewRouter()
 	documentHandler.RegisterRoutes(router)
 	documentUploadHandler.RegisterRoutes(router)
+	documentListHandler.RegisterRoutes(router)
 
 	if err := router.Run(appConfig.ServerAddress()); err != nil {
 		return fmt.Errorf(
