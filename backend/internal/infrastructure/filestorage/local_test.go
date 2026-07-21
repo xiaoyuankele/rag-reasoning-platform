@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
 )
 
 // cancelAfterHeaderReader 第一次读取返回合法 PDF 文件头，
@@ -214,8 +216,8 @@ func TestLocalStorageSaveRejectsFileLargerThanLimit(t *testing.T) {
 		"too-large.pdf",
 		bytes.NewReader([]byte("%PDF-1234")),
 	)
-	if !errors.Is(err, ErrFileTooLarge) {
-		t.Fatalf("expected ErrFileTooLarge, got %v", err)
+	if !errors.Is(err, applicationdocument.ErrFileTooLarge) {
+		t.Fatalf("expected application ErrFileTooLarge, got %v", err)
 	}
 
 	entries, err := os.ReadDir(filepath.Join(rootDir, "documents"))
@@ -315,9 +317,9 @@ func TestLocalStorageSaveRejectsNonPDFContent(t *testing.T) {
 		"fake.pdf",
 		bytes.NewReader([]byte("this is plain text")),
 	)
-	if !errors.Is(err, ErrInvalidPDFContent) {
+	if !errors.Is(err, applicationdocument.ErrInvalidPDFContent) {
 		t.Errorf(
-			"expected ErrInvalidPDFContent, got %v",
+			"expected application ErrInvalidPDFContent, got %v",
 			err,
 		)
 	}
@@ -349,9 +351,9 @@ func TestLocalStorageSaveRejectsTruncatedPDFHeader(t *testing.T) {
 		"truncated.pdf",
 		bytes.NewReader([]byte("%PD")),
 	)
-	if !errors.Is(err, ErrInvalidPDFContent) {
+	if !errors.Is(err, applicationdocument.ErrInvalidPDFContent) {
 		t.Fatalf(
-			"expected ErrInvalidPDFContent, got %v",
+			"expected application ErrInvalidPDFContent, got %v",
 			err,
 		)
 	}

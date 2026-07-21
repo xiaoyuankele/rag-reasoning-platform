@@ -26,14 +26,8 @@ var (
 	// ErrInvalidMaxFileSize 表示最大文件大小不是正整数。
 	ErrInvalidMaxFileSize = errors.New("maximum file size must be positive")
 
-	// ErrFileTooLarge 表示文件内容超过允许的最大字节数。
-	ErrFileTooLarge = errors.New("file exceeds maximum allowed size")
-
 	// ErrInvalidStoragePath 表示存储路径不属于允许的文档目录。
 	ErrInvalidStoragePath = errors.New("invalid storage path")
-
-	// ErrInvalidPDFContent 表示文件不是有效的 PDF 文件。
-	ErrInvalidPDFContent = errors.New("file content is not a PDF")
 )
 
 // LocalStorage 将上传文件保存在本地磁盘。
@@ -103,14 +97,14 @@ func (r *contextReader) Read(p []byte) (int, error) {
 // 返回 bufio.Reader 是为了让 Peek 检查过的字节仍然能被后续保存。
 func validatePDFHeader(content io.Reader) (*bufio.Reader, error) {
 	if content == nil {
-		return nil, ErrInvalidPDFContent
+		return nil, applicationdocument.ErrInvalidPDFContent
 	}
 
 	bufferedContent := bufio.NewReader(content)
 
 	header, err := bufferedContent.Peek(len(pdfHeader))
 	if errors.Is(err, io.EOF) {
-		return nil, ErrInvalidPDFContent
+		return nil, applicationdocument.ErrInvalidPDFContent
 	}
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -120,7 +114,7 @@ func validatePDFHeader(content io.Reader) (*bufio.Reader, error) {
 	}
 
 	if !bytes.Equal(header, []byte(pdfHeader)) {
-		return nil, ErrInvalidPDFContent
+		return nil, applicationdocument.ErrInvalidPDFContent
 	}
 
 	return bufferedContent, nil
@@ -140,7 +134,7 @@ func (s *LocalStorage) Save(
 	}
 
 	if content == nil {
-		return applicationdocument.StoredFile{}, ErrInvalidPDFContent
+		return applicationdocument.StoredFile{}, applicationdocument.ErrInvalidPDFContent
 	}
 
 	contextContent := &contextReader{
@@ -200,7 +194,7 @@ func (s *LocalStorage) Save(
 	}
 
 	if sizeBytes > s.maxSizeBytes {
-		return applicationdocument.StoredFile{}, ErrFileTooLarge
+		return applicationdocument.StoredFile{}, applicationdocument.ErrFileTooLarge
 	}
 
 	// Windows 不能可靠地重命名仍处于打开状态的文件，

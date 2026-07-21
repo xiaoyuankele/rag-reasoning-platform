@@ -10,6 +10,7 @@ import (
 	documentapplication "rag-reasoning-platform/backend/internal/application/document"
 	"rag-reasoning-platform/backend/internal/config"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
+	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
 )
 
@@ -42,6 +43,14 @@ func run() error {
 		)
 	}
 
+	storageConfig, err := config.LoadStorage()
+	if err != nil {
+		return fmt.Errorf(
+			"load storage configuration: %w",
+			err,
+		)
+	}
+
 	// ConnectionString 包含密码，只传给数据库层，不写入日志。
 	databasePool, err := database.Open(
 		ctx,
@@ -59,15 +68,23 @@ func run() error {
 
 	// Repository 负责 PostgreSQL 数据访问。
 	documentRepository := postgres.NewDocumentRepository(databasePool)
-
+	localFileStorage, err := filestorage.NewLocalStorage(storageConfig.RootDir, storageConfig.MaxFileSizeBytes)
+	if err != nil {
+		return fmt.Errorf(
+			"create local file storage: %w",
+			err,
+		)
+	}
 	// Service 负责文档查询用例和业务参数校验。
 	documentService := documentapplication.NewService(documentRepository)
-
+	documentUploadService := documentapplication.NewUploadService(documentRepository, localFileStorage)
 	// Handler 负责把 HTTP 请求转换成应用服务调用。
 	documentHandler := api.NewDocumentHandler(documentService)
+	documentUploadHandler := api.NewDocumentUploadHandler(documentUploadService, storageConfig.MaxFileSizeBytes)
 
 	router := api.NewRouter()
 	documentHandler.RegisterRoutes(router)
+	documentUploadHandler.RegisterRoutes(router)
 
 	if err := router.Run(appConfig.ServerAddress()); err != nil {
 		return fmt.Errorf(

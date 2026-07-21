@@ -35,6 +35,9 @@ type StoredFile struct {
 // 对象存储还是其他位置。
 type FileStorage interface {
 	// Save 流式保存文件，并返回最终存储路径、文件大小和 SHA-256。
+	//
+	// 文件超限时返回 ErrFileTooLarge，内容不是 PDF 时返回
+	// ErrInvalidPDFContent。
 	Save(ctx context.Context, originalName string, content io.Reader) (StoredFile, error)
 
 	// Delete 删除已经保存的文件。
@@ -52,6 +55,12 @@ var (
 
 	// ErrFileContentRequired 表示上传时没有提供文件内容。
 	ErrFileContentRequired = errors.New("file content is required")
+
+	// ErrFileTooLarge 表示上传文件超过应用允许的最大大小。
+	ErrFileTooLarge = errors.New("file exceeds maximum allowed size")
+
+	// ErrInvalidPDFContent 表示上传内容不具有合法的 PDF 文件头。
+	ErrInvalidPDFContent = errors.New("file content is not a PDF")
 )
 
 // UploadService 编排文件保存和文档元数据入库流程。
