@@ -19,12 +19,19 @@ type CreateInput struct {
 	SHA256       string
 }
 
+// Creator 定义创建文档所需的仓储能力
+type Creator interface {
+	Create(ctx context.Context, input CreateInput) (Document, error)
+}
+
+// Finder 定义按 ID 查询文档所需的仓储能力。
+type Finder interface {
+	GetByID(ctx context.Context, id int64) (Document, error)
+}
+
 // Repository 定义文档持久化需要提供的能力。
 // 这里只规定“能做什么”，不规定使用 PostgreSQL、内存还是其他存储。
 type Repository interface {
-	// Create 保存文档元数据，并返回包含 ID、默认状态和时间的完整文档。
-	Create(ctx context.Context, input CreateInput) (Document, error)
-
-	// GetByID 根据主键查询文档；文档不存在时应返回 ErrNotFound。
-	GetByID(ctx context.Context, id int64) (Document, error)
+	Creator
+	Finder
 }

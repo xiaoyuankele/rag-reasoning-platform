@@ -26,15 +26,6 @@ func (f *fakeUploadRepository) Create(
 	return f.createFunc(ctx, input)
 }
 
-// GetByID 只是为了满足完整的 Repository 接口。
-// 上传测试不应该调用查询方法。
-func (f *fakeUploadRepository) GetByID(
-	context.Context,
-	int64,
-) (documentdomain.Document, error) {
-	panic("unexpected call to GetByID")
-}
-
 // fakeFileStorage 是 FileStorage 的测试实现。
 // 函数字段允许每个测试场景自行决定 Save 和 Delete 的行为。
 type fakeFileStorage struct {

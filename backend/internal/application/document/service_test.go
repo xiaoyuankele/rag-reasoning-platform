@@ -14,15 +14,6 @@ type fakeRepository struct {
 	getByIDCalls int
 }
 
-// Create 只是为了满足 documentdomain.Repository 接口。
-// 当前 GetByID 测试不应该调用它。
-func (f *fakeRepository) Create(
-	context.Context,
-	documentdomain.CreateInput,
-) (documentdomain.Document, error) {
-	panic("unexpected call to Create")
-}
-
 // GetByID 记录调用次数，并执行测试场景提供的函数。
 func (f *fakeRepository) GetByID(
 	ctx context.Context,

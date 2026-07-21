@@ -17,11 +17,11 @@ var ErrInvalidID = errors.New("document ID must be positive")
 // Service 依赖领域层定义的 Repository 接口，
 // 不直接依赖 PostgreSQL 或 pgx。
 type Service struct {
-	repository documentdomain.Repository
+	repository documentdomain.Finder
 }
 
 // NewService 创建文档应用服务。
-func NewService(repository documentdomain.Repository) *Service {
+func NewService(repository documentdomain.Finder) *Service {
 	return &Service{
 		repository: repository,
 	}

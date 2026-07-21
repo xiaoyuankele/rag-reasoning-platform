@@ -65,7 +65,7 @@ var (
 
 // UploadService 编排文件保存和文档元数据入库流程。
 type UploadService struct {
-	repository documentdomain.Repository
+	repository documentdomain.Creator
 	storage    FileStorage
 }
 
@@ -73,7 +73,7 @@ type UploadService struct {
 //
 // repository 负责数据库元数据，storage 负责文件内容，
 // 两个依赖都通过构造函数传入。
-func NewUploadService(repository documentdomain.Repository, storage FileStorage) *UploadService {
+func NewUploadService(repository documentdomain.Creator, storage FileStorage) *UploadService {
 	return &UploadService{
 		repository: repository,
 		storage:    storage,
