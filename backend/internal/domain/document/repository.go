@@ -29,6 +29,11 @@ type Finder interface {
 	GetByID(ctx context.Context, id int64) (Document, error)
 }
 
+// Deleter 定义删除文档的能力
+type Deleter interface {
+	Delete(ctx context.Context, id int64) error
+}
+
 // ListOptions 表示仓储查询文档列表时使用的分页参数。
 //
 // Limit 是最多返回多少条记录；Offset 是跳过多少条记录。
@@ -58,4 +63,5 @@ type Repository interface {
 	Creator
 	Finder
 	Lister
+	Deleter
 }

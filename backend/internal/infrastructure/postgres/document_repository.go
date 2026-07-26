@@ -107,6 +107,31 @@ func (r *DocumentRepository) GetByID(
 	return foundDocument, nil
 }
 
+// Delete 根据主键删除文档元数据。
+//
+// 文件内容由应用层协调文件存储删除；仓储只处理数据库记录。
+func (r *DocumentRepository) Delete(
+	ctx context.Context,
+	id int64,
+) error {
+	const query = `
+		DELETE FROM documents
+		WHERE id = $1
+	`
+
+	commandTag, err := r.pool.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("delete document: %w", err)
+	}
+
+	// DELETE 成功执行但没有影响任何记录，说明该 ID 不存在。
+	if commandTag.RowsAffected() == 0 {
+		return document.ErrNotFound
+	}
+
+	return nil
+}
+
 // List 按创建时间倒序查询一页文档，并返回文档总数。
 func (r *DocumentRepository) List(
 	ctx context.Context,

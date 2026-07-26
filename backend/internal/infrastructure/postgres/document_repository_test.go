@@ -135,6 +135,91 @@ func TestDocumentRepositoryCreateAndGetByID(t *testing.T) {
 	}
 }
 
+// TestDocumentRepositoryDelete 使用真实 PostgreSQL 验证删除成功，
+// 并验证重复删除同一 ID 时返回稳定的领域错误。
+func TestDocumentRepositoryDelete(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+
+	databaseConfig, err := config.LoadDatabase()
+	if err != nil {
+		t.Fatalf("load database configuration: %v", err)
+	}
+
+	pool, err := database.Open(
+		ctx,
+		databaseConfig.ConnectionString(),
+	)
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer pool.Close()
+
+	repository := postgresrepository.NewDocumentRepository(pool)
+	storagePath := fmt.Sprintf(
+		"integration-tests/delete-%d.pdf",
+		time.Now().UnixNano(),
+	)
+
+	savedDocument, err := repository.Create(
+		ctx,
+		document.CreateInput{
+			OriginalName: "integration-delete.pdf",
+			StoragePath:  storagePath,
+			MIMEType:     "application/pdf",
+			SizeBytes:    2048,
+			SHA256:       strings.Repeat("d", 64),
+		},
+	)
+	if err != nil {
+		t.Fatalf("create document for deletion: %v", err)
+	}
+
+	// 即使测试中途失败，也只清理本测试创建的记录。
+	defer func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cleanupCancel()
+
+		if _, cleanupErr := pool.Exec(
+			cleanupContext,
+			"DELETE FROM documents WHERE id = $1",
+			savedDocument.ID,
+		); cleanupErr != nil {
+			t.Errorf("clean up delete test document: %v", cleanupErr)
+		}
+	}()
+
+	if err := repository.Delete(ctx, savedDocument.ID); err != nil {
+		t.Fatalf("delete document: %v", err)
+	}
+
+	_, err = repository.GetByID(ctx, savedDocument.ID)
+	if !errors.Is(err, document.ErrNotFound) {
+		t.Fatalf(
+			"GetByID() after Delete() error = %v, want ErrNotFound",
+			err,
+		)
+	}
+
+	err = repository.Delete(ctx, savedDocument.ID)
+	if !errors.Is(err, document.ErrNotFound) {
+		t.Fatalf(
+			"second Delete() error = %v, want ErrNotFound",
+			err,
+		)
+	}
+}
+
 // TestDocumentRepositoryList 使用真实 PostgreSQL 验证总数、分页、稳定排序
 // 以及超过末页时返回空切片。测试只清理自己创建的记录。
 func TestDocumentRepositoryList(t *testing.T) {
