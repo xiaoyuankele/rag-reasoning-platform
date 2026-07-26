@@ -48,7 +48,11 @@ type processingJobResponse struct {
 	DocumentID   int64                              `json:"document_id"`
 	Status       documentdomain.ProcessingJobStatus `json:"status"`
 	AttemptCount int                                `json:"attempt_count"`
+	ErrorMessage *string                            `json:"error_message"`
 	CreatedAt    time.Time                          `json:"created_at"`
+	UpdatedAt    time.Time                          `json:"updated_at"`
+	StartedAt    *time.Time                         `json:"started_at"`
+	CompletedAt  *time.Time                         `json:"completed_at"`
 }
 
 func newProcessingJobResponse(
@@ -59,7 +63,11 @@ func newProcessingJobResponse(
 		DocumentID:   job.DocumentID,
 		Status:       job.Status,
 		AttemptCount: job.AttemptCount,
+		ErrorMessage: job.ErrorMessage,
 		CreatedAt:    job.CreatedAt,
+		UpdatedAt:    job.UpdatedAt,
+		StartedAt:    job.StartedAt,
+		CompletedAt:  job.CompletedAt,
 	}
 }
 

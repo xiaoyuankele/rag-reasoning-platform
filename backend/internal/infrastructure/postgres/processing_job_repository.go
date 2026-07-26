@@ -18,6 +18,7 @@ type ProcessingJobRepository struct {
 }
 
 var _ document.ProcessingJobCreator = (*ProcessingJobRepository)(nil)
+var _ document.ProcessingJobFinder = (*ProcessingJobRepository)(nil)
 
 // NewProcessingJobRepository 创建 PostgreSQL 解析任务仓储。
 func NewProcessingJobRepository(
@@ -66,6 +67,42 @@ func (r *ProcessingJobRepository) CreateProcessingJob(
 	}
 
 	return createdJob, nil
+}
+
+// GetProcessingJobByID 根据主键查询解析任务。
+func (r *ProcessingJobRepository) GetProcessingJobByID(
+	ctx context.Context,
+	jobID int64,
+) (document.ProcessingJob, error) {
+	const query = `
+		SELECT
+			id,
+			document_id,
+			status,
+			attempt_count,
+			error_message,
+			created_at,
+			updated_at,
+			started_at,
+			completed_at
+		FROM document_jobs
+		WHERE id = $1
+	`
+
+	row := r.pool.QueryRow(ctx, query, jobID)
+	foundJob, err := scanProcessingJob(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return document.ProcessingJob{},
+			document.ErrProcessingJobNotFound
+	}
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"get document processing job by ID: %w",
+			err,
+		)
+	}
+
+	return foundJob, nil
 }
 
 func scanProcessingJob(

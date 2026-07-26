@@ -97,6 +97,9 @@ func run() error {
 		documentRepository,
 		processingJobRepository,
 	)
+	processingJobService := documentapplication.NewProcessingJobService(
+		processingJobRepository,
+	)
 
 	// Handler 负责把 HTTP 请求转换成应用服务调用。
 	documentHandler := api.NewDocumentHandler(documentService)
@@ -106,6 +109,9 @@ func run() error {
 	documentProcessingHandler := api.NewDocumentProcessingHandler(
 		documentProcessingService,
 	)
+	processingJobHandler := api.NewProcessingJobHandler(
+		processingJobService,
+	)
 
 	router := api.NewRouter()
 	documentHandler.RegisterRoutes(router)
@@ -113,6 +119,7 @@ func run() error {
 	documentListHandler.RegisterRoutes(router)
 	documentDeleteHandler.RegisterRoutes(router)
 	documentProcessingHandler.RegisterRoutes(router)
+	processingJobHandler.RegisterRoutes(router)
 
 	if err := router.Run(appConfig.ServerAddress()); err != nil {
 		return fmt.Errorf(

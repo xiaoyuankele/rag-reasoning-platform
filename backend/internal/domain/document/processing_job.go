@@ -11,6 +11,11 @@ var ErrActiveProcessingJobExists = errors.New(
 	"active document processing job already exists",
 )
 
+// ErrProcessingJobNotFound 表示指定解析任务不存在。
+var ErrProcessingJobNotFound = errors.New(
+	"document processing job not found",
+)
+
 // ProcessingJobStatus 是文档解析任务状态。
 type ProcessingJobStatus string
 
@@ -52,5 +57,13 @@ type ProcessingJobCreator interface {
 	CreateProcessingJob(
 		ctx context.Context,
 		documentID int64,
+	) (ProcessingJob, error)
+}
+
+// ProcessingJobFinder 定义按任务 ID 查询解析任务所需的能力。
+type ProcessingJobFinder interface {
+	GetProcessingJobByID(
+		ctx context.Context,
+		jobID int64,
 	) (ProcessingJob, error)
 }

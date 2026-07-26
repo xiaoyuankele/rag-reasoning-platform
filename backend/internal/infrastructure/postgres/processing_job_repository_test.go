@@ -121,6 +121,31 @@ func TestProcessingJobRepositoryCreate(t *testing.T) {
 		t.Fatal("new queued job must contain database timestamps")
 	}
 
+	foundJob, err := jobRepository.GetProcessingJobByID(
+		ctx,
+		createdJob.ID,
+	)
+	if err != nil {
+		t.Fatalf("get processing job by ID: %v", err)
+	}
+	if foundJob.ID != createdJob.ID ||
+		foundJob.DocumentID != createdDocument.ID ||
+		foundJob.Status != documentdomain.ProcessingJobStatusQueued {
+		t.Fatalf(
+			"found processing job = %+v, want created job %+v",
+			foundJob,
+			createdJob,
+		)
+	}
+
+	_, err = jobRepository.GetProcessingJobByID(ctx, -1)
+	if !errors.Is(err, documentdomain.ErrProcessingJobNotFound) {
+		t.Fatalf(
+			"missing GetProcessingJobByID() error = %v, want ErrProcessingJobNotFound",
+			err,
+		)
+	}
+
 	_, err = jobRepository.CreateProcessingJob(
 		ctx,
 		createdDocument.ID,
