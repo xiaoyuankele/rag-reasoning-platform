@@ -12,6 +12,7 @@ import (
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
+	"rag-reasoning-platform/backend/migrations"
 )
 
 // main 调用 run，并统一处理应用程序最终返回的错误。
@@ -66,8 +67,20 @@ func run() error {
 	// run 返回前关闭连接池。
 	defer databasePool.Close()
 
+	if err := database.Migrate(
+		ctx,
+		databasePool,
+		migrations.Files,
+	); err != nil {
+		return fmt.Errorf(
+			"migrate database: %w",
+			err,
+		)
+	}
+
 	// Repository 负责 PostgreSQL 数据访问。
 	documentRepository := postgres.NewDocumentRepository(databasePool)
+	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
 	localFileStorage, err := filestorage.NewLocalStorage(storageConfig.RootDir, storageConfig.MaxFileSizeBytes)
 	if err != nil {
 		return fmt.Errorf(
@@ -80,18 +93,26 @@ func run() error {
 	documentUploadService := documentapplication.NewUploadService(documentRepository, localFileStorage)
 	documentListService := documentapplication.NewListService(documentRepository)
 	documentDeleteService := documentapplication.NewDeleteService(documentRepository, localFileStorage)
+	documentProcessingService := documentapplication.NewQueueProcessingService(
+		documentRepository,
+		processingJobRepository,
+	)
 
 	// Handler 负责把 HTTP 请求转换成应用服务调用。
 	documentHandler := api.NewDocumentHandler(documentService)
 	documentUploadHandler := api.NewDocumentUploadHandler(documentUploadService, storageConfig.MaxFileSizeBytes)
 	documentListHandler := api.NewDocumentListHandler(documentListService)
 	documentDeleteHandler := api.NewDocumentDeleteHandler(documentDeleteService)
+	documentProcessingHandler := api.NewDocumentProcessingHandler(
+		documentProcessingService,
+	)
 
 	router := api.NewRouter()
 	documentHandler.RegisterRoutes(router)
 	documentUploadHandler.RegisterRoutes(router)
 	documentListHandler.RegisterRoutes(router)
 	documentDeleteHandler.RegisterRoutes(router)
+	documentProcessingHandler.RegisterRoutes(router)
 
 	if err := router.Run(appConfig.ServerAddress()); err != nil {
 		return fmt.Errorf(

@@ -1,9 +1,8 @@
 -- 创建文档元数据表。
 -- 文件本体保存在 storage/，数据库只保存文件信息和处理状态。
-
-BEGIN;
-
-CREATE TABLE documents (
+--
+-- IF NOT EXISTS 用于接管自动迁移引入前已经手工创建的开发数据库。
+CREATE TABLE IF NOT EXISTS documents (
     -- IDENTITY 由 PostgreSQL 自动生成递增 ID。
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 
@@ -37,11 +36,9 @@ CREATE TABLE documents (
 );
 
 -- 加速按状态查询和按创建时间排序。
-CREATE INDEX idx_documents_status_created_at
+CREATE INDEX IF NOT EXISTS idx_documents_status_created_at
     ON documents (status, created_at DESC);
 
 -- 加速根据文件哈希查找重复内容。
-CREATE INDEX idx_documents_sha256
+CREATE INDEX IF NOT EXISTS idx_documents_sha256
     ON documents (sha256);
-
-COMMIT;
