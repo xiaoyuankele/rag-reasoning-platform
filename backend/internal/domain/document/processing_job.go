@@ -16,6 +16,13 @@ var ErrProcessingJobNotFound = errors.New(
 	"document processing job not found",
 )
 
+// ErrNoQueuedProcessingJob 表示当前没有可以被 Worker 领取的排队任务。
+//
+// 这不是系统故障，而是 Worker 空闲时的正常结果。
+var ErrNoQueuedProcessingJob = errors.New(
+	"no queued document processing job",
+)
+
 // ProcessingJobStatus 是文档解析任务状态。
 type ProcessingJobStatus string
 
@@ -65,5 +72,12 @@ type ProcessingJobFinder interface {
 	GetProcessingJobByID(
 		ctx context.Context,
 		jobID int64,
+	) (ProcessingJob, error)
+}
+
+// ProcessingJobClaimer 定义 Worker 原子领取下一条排队任务所需的能力。
+type ProcessingJobClaimer interface {
+	ClaimNextProcessingJob(
+		ctx context.Context,
 	) (ProcessingJob, error)
 }
