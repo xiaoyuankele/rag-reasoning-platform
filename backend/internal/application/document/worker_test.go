@@ -9,8 +9,12 @@ import (
 )
 
 type fakeProcessingJobClaimer struct {
-	claimNextFunc  func(context.Context) (documentdomain.ProcessingJob, error)
-	claimNextCalls int
+	claimNextFunc      func(context.Context) (documentdomain.ProcessingJob, error)
+	markSucceededFunc  func(context.Context, int64) error
+	markFailedFunc     func(context.Context, int64, string) error
+	claimNextCalls     int
+	markSucceededCalls int
+	markFailedCalls    int
 }
 
 func (f *fakeProcessingJobClaimer) ClaimNextProcessingJob(
@@ -18,6 +22,29 @@ func (f *fakeProcessingJobClaimer) ClaimNextProcessingJob(
 ) (documentdomain.ProcessingJob, error) {
 	f.claimNextCalls++
 	return f.claimNextFunc(ctx)
+}
+
+func (f *fakeProcessingJobClaimer) MarkProcessingJobSucceeded(
+	ctx context.Context,
+	jobID int64,
+) error {
+	f.markSucceededCalls++
+	if f.markSucceededFunc == nil {
+		return nil
+	}
+	return f.markSucceededFunc(ctx, jobID)
+}
+
+func (f *fakeProcessingJobClaimer) MarkProcessingJobFailed(
+	ctx context.Context,
+	jobID int64,
+	errorMessage string,
+) error {
+	f.markFailedCalls++
+	if f.markFailedFunc == nil {
+		return nil
+	}
+	return f.markFailedFunc(ctx, jobID, errorMessage)
 }
 
 func TestWorkerClaimNextReturnsIdleWhenQueueIsEmpty(t *testing.T) {
@@ -29,7 +56,7 @@ func TestWorkerClaimNextReturnsIdleWhenQueueIsEmpty(t *testing.T) {
 				documentdomain.ErrNoQueuedProcessingJob
 		},
 	}
-	worker := NewWorker(claimer)
+	worker := NewWorker(claimer, nil, nil)
 
 	job, claimed, err := worker.ClaimNext(context.Background())
 
@@ -64,7 +91,7 @@ func TestWorkerClaimNextReturnsClaimedJob(t *testing.T) {
 			return expectedJob, nil
 		},
 	}
-	worker := NewWorker(claimer)
+	worker := NewWorker(claimer, nil, nil)
 
 	job, claimed, err := worker.ClaimNext(context.Background())
 
@@ -98,7 +125,7 @@ func TestWorkerClaimNextPreservesUnexpectedError(t *testing.T) {
 			return documentdomain.ProcessingJob{}, databaseError
 		},
 	}
-	worker := NewWorker(claimer)
+	worker := NewWorker(claimer, nil, nil)
 
 	job, claimed, err := worker.ClaimNext(context.Background())
 

@@ -23,6 +23,12 @@ var ErrNoQueuedProcessingJob = errors.New(
 	"no queued document processing job",
 )
 
+// ErrProcessingJobNotProcessing 表示任务或关联文档不处于 processing，
+// 因此不能被标记为成功或失败。
+var ErrProcessingJobNotProcessing = errors.New(
+	"document processing job is not processing",
+)
+
 // ProcessingJobStatus 是文档解析任务状态。
 type ProcessingJobStatus string
 
@@ -80,4 +86,18 @@ type ProcessingJobClaimer interface {
 	ClaimNextProcessingJob(
 		ctx context.Context,
 	) (ProcessingJob, error)
+}
+
+// ProcessingJobFinalizer 定义 Worker 完成一次执行后所需的状态回写能力。
+type ProcessingJobFinalizer interface {
+	MarkProcessingJobSucceeded(
+		ctx context.Context,
+		jobID int64,
+	) error
+
+	MarkProcessingJobFailed(
+		ctx context.Context,
+		jobID int64,
+		errorMessage string,
+	) error
 }

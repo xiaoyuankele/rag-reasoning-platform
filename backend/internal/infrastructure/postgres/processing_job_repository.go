@@ -20,6 +20,7 @@ type ProcessingJobRepository struct {
 var _ document.ProcessingJobCreator = (*ProcessingJobRepository)(nil)
 var _ document.ProcessingJobFinder = (*ProcessingJobRepository)(nil)
 var _ document.ProcessingJobClaimer = (*ProcessingJobRepository)(nil)
+var _ document.ProcessingJobFinalizer = (*ProcessingJobRepository)(nil)
 
 // NewProcessingJobRepository 创建 PostgreSQL 解析任务仓储。
 func NewProcessingJobRepository(
@@ -228,6 +229,153 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 	}
 
 	return claimedJob, nil
+}
+
+// MarkProcessingJobSucceeded 原子地把任务标记为 succeeded，
+// 并把关联文档标记为 ready。
+func (r *ProcessingJobRepository) MarkProcessingJobSucceeded(
+	ctx context.Context,
+	jobID int64,
+) error {
+	return r.finalizeProcessingJob(
+		ctx,
+		jobID,
+		document.ProcessingJobStatusSucceeded,
+		document.StatusReady,
+		nil,
+	)
+}
+
+// MarkProcessingJobFailed 原子地把任务和关联文档标记为 failed，
+// 并保存可以安全展示的失败说明。
+func (r *ProcessingJobRepository) MarkProcessingJobFailed(
+	ctx context.Context,
+	jobID int64,
+	errorMessage string,
+) error {
+	return r.finalizeProcessingJob(
+		ctx,
+		jobID,
+		document.ProcessingJobStatusFailed,
+		document.StatusFailed,
+		&errorMessage,
+	)
+}
+
+func (r *ProcessingJobRepository) finalizeProcessingJob(
+	ctx context.Context,
+	jobID int64,
+	jobStatus document.ProcessingJobStatus,
+	documentStatus document.Status,
+	errorMessage *string,
+) error {
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf(
+			"begin finalize processing job transaction: %w",
+			err,
+		)
+	}
+	defer func() {
+		_ = transaction.Rollback(context.Background())
+	}()
+
+	// 同时锁定任务和文档，保证检查状态与后续更新之间不会被其他事务修改。
+	const lockQuery = `
+		SELECT j.document_id
+		FROM document_jobs AS j
+		INNER JOIN documents AS d ON d.id = j.document_id
+		WHERE j.id = $1
+			AND j.status = 'processing'
+			AND d.status = 'processing'
+		FOR UPDATE OF j, d
+	`
+
+	var documentID int64
+	err = transaction.QueryRow(
+		ctx,
+		lockQuery,
+		jobID,
+	).Scan(&documentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return document.ErrProcessingJobNotProcessing
+	}
+	if err != nil {
+		return fmt.Errorf(
+			"lock processing job for finalization: %w",
+			err,
+		)
+	}
+
+	const updateJobQuery = `
+		UPDATE document_jobs
+		SET
+			status = $2,
+			error_message = $3,
+			updated_at = CURRENT_TIMESTAMP,
+			completed_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+			AND status = 'processing'
+	`
+
+	jobCommandTag, err := transaction.Exec(
+		ctx,
+		updateJobQuery,
+		jobID,
+		jobStatus,
+		errorMessage,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"update finalized processing job: %w",
+			err,
+		)
+	}
+	if jobCommandTag.RowsAffected() != 1 {
+		return fmt.Errorf(
+			"update finalized processing job: expected 1 updated row, got %d",
+			jobCommandTag.RowsAffected(),
+		)
+	}
+
+	const updateDocumentQuery = `
+		UPDATE documents
+		SET
+			status = $2,
+			error_message = $3,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+			AND status = 'processing'
+	`
+
+	documentCommandTag, err := transaction.Exec(
+		ctx,
+		updateDocumentQuery,
+		documentID,
+		documentStatus,
+		errorMessage,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"update finalized processing job document: %w",
+			err,
+		)
+	}
+	if documentCommandTag.RowsAffected() != 1 {
+		return fmt.Errorf(
+			"update finalized processing job document: expected 1 updated row, got %d",
+			documentCommandTag.RowsAffected(),
+		)
+	}
+
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf(
+			"commit finalized processing job: %w",
+			err,
+		)
+	}
+
+	return nil
 }
 
 func scanProcessingJob(
