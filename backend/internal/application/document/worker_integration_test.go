@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,13 +18,16 @@ import (
 )
 
 type integrationDocumentProcessor struct {
-	processFunc func(context.Context, documentdomain.Document) error
+	processFunc func(
+		context.Context,
+		documentdomain.Document,
+	) (ProcessingResult, error)
 }
 
 func (p *integrationDocumentProcessor) Process(
 	ctx context.Context,
 	document documentdomain.Document,
-) error {
+) (ProcessingResult, error) {
 	return p.processFunc(ctx, document)
 }
 
@@ -74,6 +78,7 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 
 	documentRepository := postgresrepository.NewDocumentRepository(pool)
 	jobRepository := postgresrepository.NewProcessingJobRepository(pool)
+	chunkRepository := postgresrepository.NewChunkRepository(pool)
 	createdDocumentIDs := make([]int64, 0, 2)
 	defer func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(
@@ -111,12 +116,16 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			createdDocumentIDs,
 			createdDocument.ID,
 		)
+		expectedChunks := []documentdomain.ChunkInput{
+			{Index: 0, Content: "first integration chunk"},
+			{Index: 1, Content: "second integration chunk"},
+		}
 
 		processor := &integrationDocumentProcessor{
 			processFunc: func(
 				_ context.Context,
 				document documentdomain.Document,
-			) error {
+			) (ProcessingResult, error) {
 				if document.ID != createdDocument.ID {
 					t.Fatalf(
 						"processor document ID = %d, want %d",
@@ -124,13 +133,16 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 						createdDocument.ID,
 					)
 				}
-				return nil
+				return ProcessingResult{
+					Chunks: expectedChunks,
+				}, nil
 			},
 		}
 		worker := NewWorker(
 			jobRepository,
 			documentRepository,
 			processor,
+			chunkRepository,
 		)
 
 		handled, err := worker.RunOnce(ctx)
@@ -152,6 +164,33 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			documentdomain.StatusReady,
 			nil,
 		)
+
+		foundChunks, err := chunkRepository.ListByDocumentID(
+			ctx,
+			createdDocument.ID,
+		)
+		if err != nil {
+			t.Fatalf("list successful Worker chunks: %v", err)
+		}
+		if len(foundChunks) != len(expectedChunks) {
+			t.Fatalf(
+				"stored chunk count = %d, want %d",
+				len(foundChunks),
+				len(expectedChunks),
+			)
+		}
+		for index, expectedChunk := range expectedChunks {
+			foundChunk := foundChunks[index]
+			if foundChunk.Index != expectedChunk.Index ||
+				foundChunk.Content != expectedChunk.Content {
+				t.Fatalf(
+					"stored chunk %d = %+v, want %+v",
+					index,
+					foundChunk,
+					expectedChunk,
+				)
+			}
+		}
 	})
 
 	t.Run("failed processor fails job safely", func(t *testing.T) {
@@ -176,14 +215,15 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			processFunc: func(
 				context.Context,
 				documentdomain.Document,
-			) error {
-				return processingError
+			) (ProcessingResult, error) {
+				return ProcessingResult{}, processingError
 			},
 		}
 		worker := NewWorker(
 			jobRepository,
 			documentRepository,
 			processor,
+			chunkRepository,
 		)
 
 		handled, err := worker.RunOnce(ctx)
@@ -209,6 +249,23 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			documentdomain.StatusFailed,
 			&expectedMessage,
 		)
+
+		foundChunks, err := chunkRepository.ListByDocumentID(
+			ctx,
+			createdDocument.ID,
+		)
+		if err != nil {
+			t.Fatalf("list failed Worker chunks: %v", err)
+		}
+		if !reflect.DeepEqual(
+			foundChunks,
+			[]documentdomain.TextChunk{},
+		) {
+			t.Fatalf(
+				"failed Worker chunks = %+v, want empty slice",
+				foundChunks,
+			)
+		}
 	})
 }
 

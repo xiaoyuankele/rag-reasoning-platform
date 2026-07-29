@@ -16,6 +16,14 @@ type processingJobWorkerRepository interface {
 	documentdomain.ProcessingJobFinalizer
 }
 
+// ProcessingResult 表示文档处理器产生的统一结果。
+//
+// 不同输入格式可以有各自的解析方式，但都必须把正文转换成 Chunks，
+// 使 Worker 后面的持久化流程不再区分 PDF、Markdown、TXT 或 DOCX。
+type ProcessingResult struct {
+	Chunks []documentdomain.ChunkInput
+}
+
 // documentProcessor 隔离具体的 Python 或其他文档处理实现。
 //
 // Application 只规定“能够处理一份文档”，不依赖子进程、脚本或 PDF 库。
@@ -23,7 +31,7 @@ type documentProcessor interface {
 	Process(
 		ctx context.Context,
 		document documentdomain.Document,
-	) error
+	) (ProcessingResult, error)
 }
 
 // Worker 编排后台文档解析任务。
@@ -31,6 +39,7 @@ type Worker struct {
 	jobs      processingJobWorkerRepository
 	documents documentdomain.Finder
 	processor documentProcessor
+	chunks    documentdomain.ChunkReplacer
 }
 
 // NewWorker 创建文档解析 Worker。
@@ -38,11 +47,13 @@ func NewWorker(
 	jobs processingJobWorkerRepository,
 	documents documentdomain.Finder,
 	processor documentProcessor,
+	chunks documentdomain.ChunkReplacer,
 ) *Worker {
 	return &Worker{
 		jobs:      jobs,
 		documents: documents,
 		processor: processor,
+		chunks:    chunks,
 	}
 }
 
@@ -105,7 +116,10 @@ func (w *Worker) RunOnce(
 		)
 	}
 
-	processingErr := w.processor.Process(ctx, foundDocument)
+	// 不同格式的处理器都会返回相同的 ProcessingResult，
+	// Worker 只负责按统一方式保存结果。
+	processingResult, processingErr := w.processor.Process(ctx, foundDocument)
+
 	if processingErr != nil {
 		// 真实处理错误返回给 Worker 循环写后端日志。
 		wrappedProcessingErr := fmt.Errorf(
@@ -136,6 +150,34 @@ func (w *Worker) RunOnce(
 		}
 
 		return true, wrappedProcessingErr
+	}
+	// 处理器成功后先保存文本块；只有结果成功入库，任务才能进入 succeeded。
+	replaceErr := w.chunks.ReplaceForDocument(ctx, foundDocument.ID, processingResult.Chunks)
+	if replaceErr != nil {
+		wrappedReplaceErr := fmt.Errorf(
+			"replace document %d chunks: %w",
+			foundDocument.ID,
+			replaceErr,
+		)
+
+		markFailedErr := w.jobs.MarkProcessingJobFailed(
+			ctx,
+			job.ID,
+			safeProcessingFailureMessage,
+		)
+		if markFailedErr != nil {
+			wrappedMarkFailedErr := fmt.Errorf(
+				"mark processing job %d failed: %w",
+				job.ID,
+				markFailedErr,
+			)
+			return true, errors.Join(
+				wrappedReplaceErr,
+				wrappedMarkFailedErr,
+			)
+		}
+
+		return true, wrappedReplaceErr
 	}
 
 	// 只有处理器真正成功后，才能把任务和文档标记为成功。
