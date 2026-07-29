@@ -110,6 +110,59 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 		)
 	}
 
+	var textChunksTable string
+	if err := testPool.QueryRow(
+		ctx,
+		"SELECT to_regclass('text_chunks')::text",
+	).Scan(&textChunksTable); err != nil {
+		t.Fatalf("query text_chunks table: %v", err)
+	}
+	if textChunksTable != "text_chunks" {
+		t.Fatalf(
+			"text_chunks table = %q, want %q",
+			textChunksTable,
+			"text_chunks",
+		)
+	}
+
+	var hasDocumentChunkIndexConstraint bool
+	if err := testPool.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_constraint
+				WHERE conname = 'uq_text_chunks_document_index'
+				  AND conrelid = 'text_chunks'::regclass
+			)
+		`,
+	).Scan(&hasDocumentChunkIndexConstraint); err != nil {
+		t.Fatalf("query text_chunks unique constraint: %v", err)
+	}
+	if !hasDocumentChunkIndexConstraint {
+		t.Fatal("text_chunks document/index unique constraint was not created")
+	}
+
+	var hasCascadeForeignKey bool
+	if err := testPool.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_constraint
+				WHERE conrelid = 'text_chunks'::regclass
+				  AND confrelid = 'documents'::regclass
+				  AND contype = 'f'
+				  AND confdeltype = 'c'
+			)
+		`,
+	).Scan(&hasCascadeForeignKey); err != nil {
+		t.Fatalf("query text_chunks cascade foreign key: %v", err)
+	}
+	if !hasCascadeForeignKey {
+		t.Fatal("text_chunks cascading document foreign key was not created")
+	}
+
 	var appliedCount int
 	if err := testPool.QueryRow(
 		ctx,
@@ -117,9 +170,9 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 	).Scan(&appliedCount); err != nil {
 		t.Fatalf("count schema migrations: %v", err)
 	}
-	if appliedCount != 2 {
+	if appliedCount != 3 {
 		t.Fatalf(
-			"applied migration count = %d, want 2",
+			"applied migration count = %d, want 3",
 			appliedCount,
 		)
 	}
