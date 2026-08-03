@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
 )
@@ -29,6 +30,46 @@ var (
 	// ErrInvalidStoragePath 表示存储路径不属于允许的文档目录。
 	ErrInvalidStoragePath = errors.New("invalid storage path")
 )
+
+// fileFormat 描述一种允许上传的文件格式。
+// storageExtension 是后端生成物理文件名时使用的规范化扩展名，
+// mimeType 是 LocalStorage 完成格式判断后交给应用层的可信 MIME 类型。
+type fileFormat struct {
+	storageExtension string
+	mimeType         string
+}
+
+// resolveFileFormat 根据原始文件名确定允许使用的存储扩展名和 MIME 类型。
+// 文件名只用于选择预期格式；Save 后续还必须校验真实文件内容，
+// 不能仅凭客户端提供的扩展名信任文件。
+func resolveFileFormat(originalName string) (fileFormat, error) {
+	extension := strings.ToLower(
+		filepath.Ext(strings.TrimSpace(originalName)),
+	)
+
+	switch extension {
+	case ".pdf":
+		return fileFormat{
+			storageExtension: ".pdf",
+			mimeType:         "application/pdf",
+		}, nil
+
+	case ".md", ".markdown":
+		return fileFormat{
+			storageExtension: ".md",
+			mimeType:         "text/markdown",
+		}, nil
+
+	case ".txt":
+		return fileFormat{
+			storageExtension: ".txt",
+			mimeType:         "text/plain",
+		}, nil
+
+	default:
+		return fileFormat{}, applicationdocument.ErrUnsupportedFileType
+	}
+}
 
 // LocalStorage 将上传文件保存在本地磁盘。
 type LocalStorage struct {
@@ -120,10 +161,66 @@ func validatePDFHeader(content io.Reader) (*bufio.Reader, error) {
 	return bufferedContent, nil
 }
 
+// validateUTF8File 以固定大小缓冲区流式检查临时文本文件是否为合法 UTF-8。
+//
+// 一个 UTF-8 字符最多占 4 个字节，并且可能恰好跨越两次 Read。
+// pendingBytes 会把上一轮末尾尚不完整的字符字节移动到缓冲区开头，
+// 再与下一轮读到的数据一起判断，避免误把合法的跨块字符识别为错误。
+func validateUTF8File(ctx context.Context, path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open temporary text file for validation: %w", err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	const readBufferSize = 32 * 1024
+	buffer := make([]byte, readBufferSize+utf8.UTFMax)
+	pendingBytes := 0
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("validate text file: %w", err)
+		}
+
+		bytesRead, readErr := file.Read(buffer[pendingBytes:])
+		data := buffer[:pendingBytes+bytesRead]
+		offset := 0
+
+		for offset < len(data) {
+			remaining := data[offset:]
+			if !utf8.FullRune(remaining) {
+				break
+			}
+
+			runeValue, runeSize := utf8.DecodeRune(remaining)
+			if runeValue == utf8.RuneError && runeSize == 1 {
+				return applicationdocument.ErrInvalidTextContent
+			}
+
+			offset += runeSize
+		}
+
+		pendingBytes = copy(buffer, data[offset:])
+
+		if errors.Is(readErr, io.EOF) {
+			if pendingBytes != 0 {
+				return applicationdocument.ErrInvalidTextContent
+			}
+
+			return nil
+		}
+		if readErr != nil {
+			return fmt.Errorf("read temporary text file for validation: %w", readErr)
+		}
+	}
+}
+
 // Save 流式保存文件，并返回实际文件元数据。
 func (s *LocalStorage) Save(
 	ctx context.Context,
-	_ string,
+	originalName string,
 	content io.Reader,
 ) (applicationdocument.StoredFile, error) {
 	if err := ctx.Err(); err != nil {
@@ -133,8 +230,17 @@ func (s *LocalStorage) Save(
 		)
 	}
 
+	format, err := resolveFileFormat(originalName)
+	if err != nil {
+		return applicationdocument.StoredFile{}, err
+	}
+
 	if content == nil {
-		return applicationdocument.StoredFile{}, applicationdocument.ErrInvalidPDFContent
+		if format.storageExtension == ".pdf" {
+			return applicationdocument.StoredFile{}, applicationdocument.ErrInvalidPDFContent
+		}
+
+		return applicationdocument.StoredFile{}, applicationdocument.ErrInvalidTextContent
 	}
 
 	contextContent := &contextReader{
@@ -142,9 +248,14 @@ func (s *LocalStorage) Save(
 		reader: content,
 	}
 
-	bufferedContent, err := validatePDFHeader(contextContent)
-	if err != nil {
-		return applicationdocument.StoredFile{}, err
+	var contentToStore io.Reader = contextContent
+	if format.storageExtension == ".pdf" {
+		bufferedContent, err := validatePDFHeader(contextContent)
+		if err != nil {
+			return applicationdocument.StoredFile{}, err
+		}
+
+		contentToStore = bufferedContent
 	}
 
 	temporaryFile, err := os.CreateTemp(
@@ -175,7 +286,7 @@ func (s *LocalStorage) Save(
 	// 最多读取限制值加一个字节。
 	// 多出来的一个字节用于判断文件是否真正超过上限。
 	limitedContent := io.LimitReader(
-		bufferedContent,
+		contentToStore,
 		s.maxSizeBytes+1,
 	)
 
@@ -206,11 +317,17 @@ func (s *LocalStorage) Save(
 		)
 	}
 
+	if format.storageExtension != ".pdf" {
+		if err := validateUTF8File(ctx, temporaryPath); err != nil {
+			return applicationdocument.StoredFile{}, err
+		}
+	}
+
 	temporaryName := filepath.Base(temporaryPath)
 	finalName := strings.TrimSuffix(
 		temporaryName,
 		filepath.Ext(temporaryName),
-	) + ".pdf"
+	) + format.storageExtension
 
 	finalPath := filepath.Join(
 		s.documentsDir,
@@ -239,6 +356,7 @@ func (s *LocalStorage) Save(
 	cleanupTemporaryFile = false
 	return applicationdocument.StoredFile{
 		StoragePath: filepath.ToSlash(relativePath),
+		MIMEType:    format.mimeType,
 		SizeBytes:   sizeBytes,
 		SHA256:      hex.EncodeToString(hasher.Sum(nil)),
 	}, nil
@@ -246,18 +364,22 @@ func (s *LocalStorage) Save(
 
 // resolveStoragePath 校验相对存储路径，并转换为本机绝对路径。
 //
-// 当前存储布局只允许 documents 目录下的单层 PDF 文件，
-// 例如 documents/document-123.pdf。
+// 当前存储布局只允许 documents 目录下的单层受支持文件，
+// 例如 documents/document-123.pdf 或 documents/document-456.md。
 func (s *LocalStorage) resolveStoragePath(storagePath string) (string, error) {
 	localPath := filepath.Clean(
 		filepath.FromSlash(strings.TrimSpace(storagePath)),
 	)
 
 	documentsDirectoryName := filepath.Base(s.documentsDir)
+	storageExtension := strings.ToLower(filepath.Ext(localPath))
+	allowedExtension := storageExtension == ".pdf" ||
+		storageExtension == ".md" ||
+		storageExtension == ".txt"
 
 	if !filepath.IsLocal(localPath) ||
 		filepath.Dir(localPath) != documentsDirectoryName ||
-		!strings.EqualFold(filepath.Ext(localPath), ".pdf") {
+		!allowedExtension {
 		return "", fmt.Errorf(
 			"%w: %q",
 			ErrInvalidStoragePath,

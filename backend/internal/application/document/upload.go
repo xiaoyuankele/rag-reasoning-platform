@@ -13,7 +13,7 @@ import (
 // UploadInput 表示上传文档用例接收到的数据。
 //
 // Content 使用 io.Reader，而不是 []byte。
-// 这样应用层可以一边读取一边保存文件，避免把整个 PDF 一次性加载进内存。
+// 这样应用层可以一边读取一边保存文件，避免把整个文件一次性加载进内存。
 type UploadInput struct {
 	OriginalName string
 	Content      io.Reader
@@ -25,6 +25,7 @@ type UploadInput struct {
 // 不能直接相信浏览器传来的文件大小和哈希值。
 type StoredFile struct {
 	StoragePath string
+	MIMEType    string
 	SizeBytes   int64
 	SHA256      string
 }
@@ -34,10 +35,10 @@ type StoredFile struct {
 // 应用层只依赖这个接口，不关心文件最终保存在本地磁盘、
 // 对象存储还是其他位置。
 type FileStorage interface {
-	// Save 流式保存文件，并返回最终存储路径、文件大小和 SHA-256。
+	// Save 流式保存文件，并返回最终存储路径、可信 MIME、文件大小和 SHA-256。
 	//
-	// 文件超限时返回 ErrFileTooLarge，内容不是 PDF 时返回
-	// ErrInvalidPDFContent。
+	// 文件超限时返回 ErrFileTooLarge；扩展名不受支持时返回
+	// ErrUnsupportedFileType；文件内容不符合对应格式时返回相应内容错误。
 	Save(ctx context.Context, originalName string, content io.Reader) (StoredFile, error)
 
 	// Delete 删除已经保存的文件。
@@ -46,8 +47,6 @@ type FileStorage interface {
 	// UploadService 将调用 Delete，避免留下没有数据库记录的孤立文件。
 	Delete(ctx context.Context, storagePath string) error
 }
-
-const pdfMIMEType = "application/pdf"
 
 var (
 	// ErrOriginalNameRequired 表示上传时没有提供有效的原始文件名。
@@ -61,6 +60,16 @@ var (
 
 	// ErrInvalidPDFContent 表示上传内容不具有合法的 PDF 文件头。
 	ErrInvalidPDFContent = errors.New("file content is not a PDF")
+
+	// ErrUnsupportedFileType 表示文件扩展名不在上传白名单中。
+	ErrUnsupportedFileType = errors.New(
+		"file type must be PDF, Markdown, or plain text",
+	)
+
+	// ErrInvalidTextContent 表示文本文件不是合法的 UTF-8 文本。
+	ErrInvalidTextContent = errors.New(
+		"text file content must be valid UTF-8",
+	)
 )
 
 // UploadService 编排文件保存和文档元数据入库流程。
@@ -103,7 +112,7 @@ func (s *UploadService) Upload(ctx context.Context, input UploadInput) (document
 	createdDocument, err := s.repository.Create(ctx, documentdomain.CreateInput{
 		OriginalName: originalName,
 		StoragePath:  storedFile.StoragePath,
-		MIMEType:     pdfMIMEType,
+		MIMEType:     storedFile.MIMEType,
 		SizeBytes:    storedFile.SizeBytes,
 		SHA256:       storedFile.SHA256,
 	})

@@ -57,11 +57,12 @@ func (f *fakeFileStorage) Delete(
 // TestUploadServiceSavesFileAndCreatesDocument 验证上传成功的主流程：
 // 先保存文件，再把可信的文件元数据交给文档仓储。
 func TestUploadServiceSavesFileAndCreatesDocument(t *testing.T) {
-	const originalName = "example.pdf"
-	const fileContent = "%PDF-1.7\ntest document"
+	const originalName = "example.md"
+	const fileContent = "# Example"
 
 	storedFile := StoredFile{
-		StoragePath: "documents/example.pdf",
+		StoragePath: "documents/example.md",
+		MIMEType:    "text/markdown",
 		SizeBytes:   int64(len(fileContent)),
 		SHA256:      strings.Repeat("a", 64),
 	}
@@ -70,7 +71,7 @@ func TestUploadServiceSavesFileAndCreatesDocument(t *testing.T) {
 		ID:           7,
 		OriginalName: originalName,
 		StoragePath:  storedFile.StoragePath,
-		MIMEType:     "application/pdf",
+		MIMEType:     storedFile.MIMEType,
 		SizeBytes:    storedFile.SizeBytes,
 		SHA256:       storedFile.SHA256,
 		Status:       documentdomain.StatusUploaded,
@@ -119,8 +120,8 @@ func TestUploadServiceSavesFileAndCreatesDocument(t *testing.T) {
 		) (documentdomain.Document, error) {
 			expectedInput := documentdomain.CreateInput{
 				OriginalName: originalName,
+				MIMEType:     storedFile.MIMEType,
 				StoragePath:  storedFile.StoragePath,
-				MIMEType:     "application/pdf",
 				SizeBytes:    storedFile.SizeBytes,
 				SHA256:       storedFile.SHA256,
 			}
@@ -180,6 +181,7 @@ func TestUploadServiceDeletesStoredFileWhenRepositoryFails(t *testing.T) {
 	repositoryError := errors.New("database unavailable")
 	storedFile := StoredFile{
 		StoragePath: "documents/orphan.pdf",
+		MIMEType:    "application/pdf",
 		SizeBytes:   128,
 		SHA256:      strings.Repeat("b", 64),
 	}
@@ -318,6 +320,7 @@ func TestUploadServicePreservesRepositoryAndDeleteErrors(t *testing.T) {
 	deleteError := errors.New("delete permission denied")
 	storedFile := StoredFile{
 		StoragePath: "documents/orphan.pdf",
+		MIMEType:    "application/pdf",
 		SizeBytes:   128,
 		SHA256:      strings.Repeat("c", 64),
 	}

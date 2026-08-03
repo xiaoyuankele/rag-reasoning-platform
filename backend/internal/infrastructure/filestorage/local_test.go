@@ -133,6 +133,14 @@ func TestLocalStorageSaveWritesFileAndCalculatesMetadata(t *testing.T) {
 		)
 	}
 
+	if storedFile.MIMEType != "application/pdf" {
+		t.Fatalf(
+			"expected MIME type %q, got %q",
+			"application/pdf",
+			storedFile.MIMEType,
+		)
+	}
+
 	expectedHash := sha256.Sum256(content)
 	expectedSHA256 := hex.EncodeToString(expectedHash[:])
 	if storedFile.SHA256 != expectedSHA256 {
@@ -199,6 +207,112 @@ func TestLocalStorageSaveWritesFileAndCalculatesMetadata(t *testing.T) {
 			"expected only a .pdf file, got %q",
 			entries[0].Name(),
 		)
+	}
+}
+
+// TestLocalStorageSaveSupportsTextFormats 验证 Markdown 和纯文本会使用
+// 规范化扩展名保存，并向应用层返回可信 MIME 类型。
+func TestLocalStorageSaveSupportsTextFormats(t *testing.T) {
+	tests := []struct {
+		name              string
+		originalName      string
+		content           []byte
+		expectedExtension string
+		expectedMIME      string
+	}{
+		{
+			name:              "MD file",
+			originalName:      "notes.md",
+			content:           []byte("# 标题\nMarkdown 内容"),
+			expectedExtension: ".md",
+			expectedMIME:      "text/markdown",
+		},
+		{
+			name:              "Markdown extension is normalized",
+			originalName:      "notes.markdown",
+			content:           []byte("# Normalized extension"),
+			expectedExtension: ".md",
+			expectedMIME:      "text/markdown",
+		},
+		{
+			name:              "TXT file",
+			originalName:      "notes.txt",
+			content:           []byte("plain text 内容"),
+			expectedExtension: ".txt",
+			expectedMIME:      "text/plain",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rootDir := t.TempDir()
+			storage, err := NewLocalStorage(rootDir, 1024)
+			if err != nil {
+				t.Fatalf("create local storage: %v", err)
+			}
+
+			storedFile, err := storage.Save(
+				context.Background(),
+				test.originalName,
+				bytes.NewReader(test.content),
+			)
+			if err != nil {
+				t.Fatalf("save text document: %v", err)
+			}
+
+			if filepath.Ext(storedFile.StoragePath) != test.expectedExtension {
+				t.Fatalf(
+					"expected extension %q, got path %q",
+					test.expectedExtension,
+					storedFile.StoragePath,
+				)
+			}
+
+			if storedFile.MIMEType != test.expectedMIME {
+				t.Fatalf(
+					"expected MIME type %q, got %q",
+					test.expectedMIME,
+					storedFile.MIMEType,
+				)
+			}
+
+			absolutePath := filepath.Join(
+				rootDir,
+				filepath.FromSlash(storedFile.StoragePath),
+			)
+			savedContent, err := os.ReadFile(absolutePath)
+			if err != nil {
+				t.Fatalf("read saved text document: %v", err)
+			}
+
+			if !bytes.Equal(savedContent, test.content) {
+				t.Fatalf(
+					"expected content %q, got %q",
+					string(test.content),
+					string(savedContent),
+				)
+			}
+		})
+	}
+}
+
+// TestLocalStorageSaveAcceptsUTF8RuneAcrossReadBoundary 验证多字节 UTF-8
+// 字符跨越验证缓冲区边界时不会被误判为非法文本。
+func TestLocalStorageSaveAcceptsUTF8RuneAcrossReadBoundary(t *testing.T) {
+	rootDir := t.TempDir()
+	content := append(bytes.Repeat([]byte("a"), 32*1024+3), []byte("中")...)
+	storage, err := NewLocalStorage(rootDir, int64(len(content)))
+	if err != nil {
+		t.Fatalf("create local storage: %v", err)
+	}
+
+	_, err = storage.Save(
+		context.Background(),
+		"boundary.txt",
+		bytes.NewReader(content),
+	)
+	if err != nil {
+		t.Fatalf("expected valid UTF-8 to be accepted, got %v", err)
 	}
 }
 
@@ -300,6 +414,87 @@ func TestLocalStorageSaveUsesUniqueStoragePaths(t *testing.T) {
 			first.SHA256,
 			second.SHA256,
 		)
+	}
+}
+
+// TestLocalStorageSaveRejectsUnsupportedFileType 验证扩展名白名单会在
+// 创建临时文件前拒绝不支持的格式。
+func TestLocalStorageSaveRejectsUnsupportedFileType(t *testing.T) {
+	rootDir := t.TempDir()
+	storage, err := NewLocalStorage(rootDir, 1024)
+	if err != nil {
+		t.Fatalf("create local storage: %v", err)
+	}
+
+	_, err = storage.Save(
+		context.Background(),
+		"report.docx",
+		bytes.NewReader([]byte("DOCX content")),
+	)
+	if !errors.Is(err, applicationdocument.ErrUnsupportedFileType) {
+		t.Fatalf(
+			"expected ErrUnsupportedFileType, got %v",
+			err,
+		)
+	}
+
+	entries, readErr := os.ReadDir(filepath.Join(rootDir, "documents"))
+	if readErr != nil {
+		t.Fatalf("read documents directory: %v", readErr)
+	}
+
+	if len(entries) != 0 {
+		t.Fatalf(
+			"expected no files after unsupported upload, got %d",
+			len(entries),
+		)
+	}
+}
+
+// TestLocalStorageSaveRejectsInvalidUTF8 验证 Markdown 和 TXT 中的非法
+// UTF-8 字节会被拒绝，并且失败后不会留下临时文件。
+func TestLocalStorageSaveRejectsInvalidUTF8(t *testing.T) {
+	tests := []struct {
+		name         string
+		originalName string
+	}{
+		{name: "invalid Markdown", originalName: "invalid.md"},
+		{name: "invalid plain text", originalName: "invalid.txt"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rootDir := t.TempDir()
+			storage, err := NewLocalStorage(rootDir, 1024)
+			if err != nil {
+				t.Fatalf("create local storage: %v", err)
+			}
+
+			invalidContent := []byte{'v', 'a', 'l', 'i', 'd', 0xff}
+			_, err = storage.Save(
+				context.Background(),
+				test.originalName,
+				bytes.NewReader(invalidContent),
+			)
+			if !errors.Is(err, applicationdocument.ErrInvalidTextContent) {
+				t.Fatalf(
+					"expected ErrInvalidTextContent, got %v",
+					err,
+				)
+			}
+
+			entries, readErr := os.ReadDir(filepath.Join(rootDir, "documents"))
+			if readErr != nil {
+				t.Fatalf("read documents directory: %v", readErr)
+			}
+
+			if len(entries) != 0 {
+				t.Fatalf(
+					"expected no files after invalid UTF-8, got %d",
+					len(entries),
+				)
+			}
+		})
 	}
 }
 
@@ -434,8 +629,8 @@ func TestLocalStorageDeleteRemovesStoredFile(t *testing.T) {
 
 	storedFile, err := storage.Save(
 		context.Background(),
-		"example.pdf",
-		bytes.NewReader([]byte("%PDF-1.7\ntest document")),
+		"example.md",
+		bytes.NewReader([]byte("# document to delete")),
 	)
 	if err != nil {
 		t.Fatalf("save document: %v", err)
@@ -571,7 +766,7 @@ func TestLocalStorageDeleteStopsWhenContextCanceled(t *testing.T) {
 }
 
 // TestLocalStorageDeleteRejectsInvalidPaths 验证 Delete 只接受
-// documents 目录下的单层 PDF 相对路径。
+// documents 目录下具有受支持扩展名的单层相对路径。
 func TestLocalStorageDeleteRejectsInvalidPaths(t *testing.T) {
 	rootDir := t.TempDir()
 	storage, err := NewLocalStorage(rootDir, 1024)
@@ -597,7 +792,7 @@ func TestLocalStorageDeleteRejectsInvalidPaths(t *testing.T) {
 			name:        "nested directory",
 			storagePath: "documents/nested/file.pdf",
 		},
-		{name: "non-PDF path", storagePath: "documents/file.txt"},
+		{name: "unsupported extension", storagePath: "documents/file.exe"},
 	}
 
 	for _, test := range tests {
@@ -610,6 +805,103 @@ func TestLocalStorageDeleteRejectsInvalidPaths(t *testing.T) {
 				t.Fatalf(
 					"expected ErrInvalidStoragePath, got %v",
 					err,
+				)
+			}
+		})
+	}
+}
+
+// TestResolveFileFormat 验证上传文件名能够映射为固定的存储扩展名和 MIME，
+// 同时拒绝白名单以外的格式。
+func TestResolveFileFormat(t *testing.T) {
+	tests := []struct {
+		name           string
+		originalName   string
+		expectedFormat fileFormat
+		expectedError  error
+	}{
+		{
+			name:         "PDF extension is supported",
+			originalName: "report.pdf",
+			expectedFormat: fileFormat{
+				storageExtension: ".pdf",
+				mimeType:         "application/pdf",
+			},
+		},
+		{
+			name:         "uppercase PDF extension is normalized",
+			originalName: "report.PDF",
+			expectedFormat: fileFormat{
+				storageExtension: ".pdf",
+				mimeType:         "application/pdf",
+			},
+		},
+		{
+			name:         "MD extension is supported",
+			originalName: "notes.md",
+			expectedFormat: fileFormat{
+				storageExtension: ".md",
+				mimeType:         "text/markdown",
+			},
+		},
+		{
+			name:         "Markdown extension is normalized to MD",
+			originalName: "notes.markdown",
+			expectedFormat: fileFormat{
+				storageExtension: ".md",
+				mimeType:         "text/markdown",
+			},
+		},
+		{
+			name:         "TXT extension is supported",
+			originalName: "notes.txt",
+			expectedFormat: fileFormat{
+				storageExtension: ".txt",
+				mimeType:         "text/plain",
+			},
+		},
+		{
+			name:          "DOCX extension is rejected",
+			originalName:  "report.docx",
+			expectedError: applicationdocument.ErrUnsupportedFileType,
+		},
+		{
+			name:          "missing extension is rejected",
+			originalName:  "README",
+			expectedError: applicationdocument.ErrUnsupportedFileType,
+		},
+		{
+			name:          "double extension executable is rejected",
+			originalName:  "report.pdf.exe",
+			expectedError: applicationdocument.ErrUnsupportedFileType,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			actualFormat, err := resolveFileFormat(test.originalName)
+
+			if test.expectedError != nil {
+				if !errors.Is(err, test.expectedError) {
+					t.Fatalf(
+						"expected error %v, got %v",
+						test.expectedError,
+						err,
+					)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+
+			if actualFormat != test.expectedFormat {
+				t.Fatalf(
+					"expected format %+v, got %+v",
+					test.expectedFormat,
+					actualFormat,
 				)
 			}
 		})

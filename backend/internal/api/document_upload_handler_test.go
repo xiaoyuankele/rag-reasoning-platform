@@ -239,6 +239,18 @@ func TestDocumentUploadHandlerMapsApplicationErrors(t *testing.T) {
 			expectedBody:   `{"error":"file content must be a PDF"}`,
 		},
 		{
+			name:           "unsupported file type",
+			serviceError:   applicationdocument.ErrUnsupportedFileType,
+			expectedStatus: http.StatusUnsupportedMediaType,
+			expectedBody:   `{"error":"file type must be PDF, Markdown, or plain text"}`,
+		},
+		{
+			name:           "invalid UTF-8 text content",
+			serviceError:   applicationdocument.ErrInvalidTextContent,
+			expectedStatus: http.StatusUnsupportedMediaType,
+			expectedBody:   `{"error":"text file content must be valid UTF-8"}`,
+		},
+		{
 			name:           "file too large",
 			serviceError:   applicationdocument.ErrFileTooLarge,
 			expectedStatus: http.StatusRequestEntityTooLarge,

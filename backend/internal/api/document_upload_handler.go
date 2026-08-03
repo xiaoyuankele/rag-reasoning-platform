@@ -131,6 +131,14 @@ func (h *DocumentUploadHandler) Upload(c *gin.Context) {
 				c.JSON(http.StatusUnsupportedMediaType, errorResponse{
 					Error: "file content must be a PDF",
 				})
+			case errors.Is(err, applicationdocument.ErrUnsupportedFileType):
+				c.JSON(http.StatusUnsupportedMediaType, errorResponse{
+					Error: "file type must be PDF, Markdown, or plain text",
+				})
+			case errors.Is(err, applicationdocument.ErrInvalidTextContent):
+				c.JSON(http.StatusUnsupportedMediaType, errorResponse{
+					Error: "text file content must be valid UTF-8",
+				})
 			case errors.Is(err, applicationdocument.ErrFileTooLarge):
 				c.JSON(http.StatusRequestEntityTooLarge, errorResponse{
 					Error: "file exceeds maximum allowed size",
