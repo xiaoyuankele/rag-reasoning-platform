@@ -84,6 +84,7 @@ type LocalStorage struct {
 }
 
 var _ applicationdocument.FileStorage = (*LocalStorage)(nil)
+var _ applicationdocument.StoredFileOpener = (*LocalStorage)(nil)
 
 // NewLocalStorage 创建本地文件存储，并准备文档目录。
 func NewLocalStorage(rootDir string, maxSizeBytes int64) (*LocalStorage, error) {
@@ -122,6 +123,28 @@ func NewLocalStorage(rootDir string, maxSizeBytes int64) (*LocalStorage, error) 
 type contextReader struct {
 	ctx    context.Context
 	reader io.Reader
+}
+
+// contextReadCloser 把上下文取消检查和关闭能力组合进读取器。
+// 它同时实现 io.Reader 与 io.Closer，因此也实现 io.ReadCloser。
+type contextReadCloser struct {
+	ctx    context.Context
+	reader io.Reader
+	closer io.Closer
+}
+
+// Read 在每次读取前检查调用方是否已经取消任务。
+func (r *contextReadCloser) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	return r.reader.Read(p)
+}
+
+// Close 把资源关闭操作委托给底层文件。
+func (r *contextReadCloser) Close() error {
+	return r.closer.Close()
 }
 
 // Read 实现 io.Reader 接口。
@@ -388,6 +411,40 @@ func (s *LocalStorage) resolveStoragePath(storagePath string) (string, error) {
 	}
 
 	return filepath.Join(s.rootDir, localPath), nil
+}
+
+// Open 根据相对存储路径安全地打开文档文件。
+//
+// 返回的 io.ReadCloser 由调用方负责关闭。
+func (s *LocalStorage) Open(
+	ctx context.Context,
+	storagePath string,
+) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf(
+			"open stored document file: %w",
+			err,
+		)
+	}
+
+	absolutePath, err := s.resolveStoragePath(storagePath)
+	if err != nil {
+		return nil, err
+	}
+
+	file, err := os.Open(absolutePath)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"open stored document file: %w",
+			err,
+		)
+	}
+
+	return &contextReadCloser{
+		ctx:    ctx,
+		reader: file,
+		closer: file,
+	}, nil
 }
 
 // Delete 根据相对存储路径删除本地文件。
