@@ -5,9 +5,12 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
+
+const testWorkerProcessingTimeout = time.Minute
 
 type fakeWorkerDocumentFinder struct {
 	getByIDFunc  func(context.Context, int64) (documentdomain.Document, error)
@@ -88,7 +91,13 @@ func TestWorkerRunOnceReturnsIdleWhenQueueIsEmpty(t *testing.T) {
 		},
 	}
 	chunks := &fakeWorkerChunkReplacer{}
-	worker := NewWorker(jobs, documents, processor, chunks)
+	worker := NewWorker(
+		jobs,
+		documents,
+		processor,
+		chunks,
+		testWorkerProcessingTimeout,
+	)
 
 	handled, err := worker.RunOnce(context.Background())
 
@@ -204,7 +213,13 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 			return nil
 		},
 	}
-	worker := NewWorker(jobs, documents, processor, chunks)
+	worker := NewWorker(
+		jobs,
+		documents,
+		processor,
+		chunks,
+		testWorkerProcessingTimeout,
+	)
 
 	handled, err := worker.RunOnce(context.Background())
 
@@ -269,7 +284,13 @@ func TestWorkerRunOncePreservesDocumentLookupError(t *testing.T) {
 		},
 	}
 	chunks := &fakeWorkerChunkReplacer{}
-	worker := NewWorker(jobs, documents, processor, chunks)
+	worker := NewWorker(
+		jobs,
+		documents,
+		processor,
+		chunks,
+		testWorkerProcessingTimeout,
+	)
 
 	handled, err := worker.RunOnce(context.Background())
 
@@ -353,7 +374,13 @@ func TestWorkerRunOnceMarksFailedProcessing(t *testing.T) {
 		},
 	}
 	chunks := &fakeWorkerChunkReplacer{}
-	worker := NewWorker(jobs, documents, processor, chunks)
+	worker := NewWorker(
+		jobs,
+		documents,
+		processor,
+		chunks,
+		testWorkerProcessingTimeout,
+	)
 
 	handled, err := worker.RunOnce(context.Background())
 
@@ -380,6 +407,122 @@ func TestWorkerRunOnceMarksFailedProcessing(t *testing.T) {
 	}
 	if chunks.replaceCalls != 0 {
 		t.Fatal("processing failure must not store chunks")
+	}
+}
+
+// TestWorkerRunOnceMarksTimedOutProcessingFailed 验证单次处理超时只取消
+// Processor，并且 Worker 仍能使用父 context 把任务安全标记为失败。
+func TestWorkerRunOnceMarksTimedOutProcessingFailed(t *testing.T) {
+	expectedJob := documentdomain.ProcessingJob{
+		ID:         27,
+		DocumentID: 17,
+		Status:     documentdomain.ProcessingJobStatusProcessing,
+	}
+	expectedDocument := documentdomain.Document{
+		ID:          expectedJob.DocumentID,
+		StoragePath: "documents/timeout.md",
+		Status:      documentdomain.StatusProcessing,
+	}
+
+	jobs := &fakeProcessingJobClaimer{
+		claimNextFunc: func(
+			context.Context,
+		) (documentdomain.ProcessingJob, error) {
+			return expectedJob, nil
+		},
+		markFailedFunc: func(
+			ctx context.Context,
+			jobID int64,
+			errorMessage string,
+		) error {
+			// 数据库收尾必须使用仍然有效的父 context，不能使用
+			// 已经发生 DeadlineExceeded 的 processContext。
+			if err := ctx.Err(); err != nil {
+				t.Fatalf(
+					"MarkProcessingJobFailed() context error = %v, want nil",
+					err,
+				)
+			}
+			if jobID != expectedJob.ID {
+				t.Fatalf(
+					"MarkProcessingJobFailed() jobID = %d, want %d",
+					jobID,
+					expectedJob.ID,
+				)
+			}
+			if errorMessage != safeProcessingTimeoutMessage {
+				t.Fatalf(
+					"failure message = %q, want %q",
+					errorMessage,
+					safeProcessingTimeoutMessage,
+				)
+			}
+			return nil
+		},
+	}
+	documents := &fakeWorkerDocumentFinder{
+		getByIDFunc: func(
+			context.Context,
+			int64,
+		) (documentdomain.Document, error) {
+			return expectedDocument, nil
+		},
+	}
+	processor := &fakeDocumentProcessor{
+		processFunc: func(
+			ctx context.Context,
+			_ documentdomain.Document,
+		) (ProcessingResult, error) {
+			if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+				t.Fatal("Process() context has no deadline")
+			}
+
+			select {
+			case <-ctx.Done():
+				return ProcessingResult{}, ctx.Err()
+			case <-time.After(time.Second):
+				t.Fatal("Process() context was not canceled before safety timeout")
+				return ProcessingResult{}, nil
+			}
+		},
+	}
+	chunks := &fakeWorkerChunkReplacer{}
+	worker := NewWorker(
+		jobs,
+		documents,
+		processor,
+		chunks,
+		20*time.Millisecond,
+	)
+
+	handled, err := worker.RunOnce(context.Background())
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf(
+			"RunOnce() error = %v, want context deadline exceeded",
+			err,
+		)
+	}
+	if !handled {
+		t.Fatal("RunOnce() handled = false, want true")
+	}
+	if processor.processCalls != 1 {
+		t.Fatalf(
+			"Process() calls = %d, want 1",
+			processor.processCalls,
+		)
+	}
+	if jobs.markFailedCalls != 1 {
+		t.Fatalf(
+			"MarkProcessingJobFailed() calls = %d, want 1",
+			jobs.markFailedCalls,
+		)
+	}
+	if jobs.markSucceededCalls != 0 {
+		t.Fatal("timed-out processing must not mark the job succeeded")
+	}
+	if chunks.replaceCalls != 0 {
+		t.Fatal("timed-out processing must not store chunks")
 	}
 }
 
@@ -471,7 +614,13 @@ func TestWorkerRunOnceMarksFailedWhenChunkReplacementFails(t *testing.T) {
 			return chunkReplacementError
 		},
 	}
-	worker := NewWorker(jobs, documents, processor, chunks)
+	worker := NewWorker(
+		jobs,
+		documents,
+		processor,
+		chunks,
+		testWorkerProcessingTimeout,
+	)
 
 	handled, err := worker.RunOnce(context.Background())
 
@@ -569,7 +718,13 @@ func TestWorkerRunOncePreservesChunkAndFailureFinalizationErrors(
 			return chunkReplacementError
 		},
 	}
-	worker := NewWorker(jobs, documents, processor, chunks)
+	worker := NewWorker(
+		jobs,
+		documents,
+		processor,
+		chunks,
+		testWorkerProcessingTimeout,
+	)
 
 	handled, err := worker.RunOnce(context.Background())
 
@@ -644,6 +799,7 @@ func TestWorkerRunOncePreservesProcessingAndFailureFinalizationErrors(
 		documents,
 		processor,
 		&fakeWorkerChunkReplacer{},
+		testWorkerProcessingTimeout,
 	)
 
 	handled, err := worker.RunOnce(context.Background())
@@ -719,6 +875,7 @@ func TestWorkerRunOncePreservesFinalizationError(t *testing.T) {
 		documents,
 		processor,
 		&fakeWorkerChunkReplacer{},
+		testWorkerProcessingTimeout,
 	)
 
 	handled, err := worker.RunOnce(context.Background())

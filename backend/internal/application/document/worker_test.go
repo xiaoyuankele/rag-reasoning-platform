@@ -56,7 +56,7 @@ func TestWorkerClaimNextReturnsIdleWhenQueueIsEmpty(t *testing.T) {
 				documentdomain.ErrNoQueuedProcessingJob
 		},
 	}
-	worker := NewWorker(claimer, nil, nil, nil)
+	worker := NewWorker(claimer, nil, nil, nil, testWorkerProcessingTimeout)
 
 	job, claimed, err := worker.ClaimNext(context.Background())
 
@@ -91,7 +91,7 @@ func TestWorkerClaimNextReturnsClaimedJob(t *testing.T) {
 			return expectedJob, nil
 		},
 	}
-	worker := NewWorker(claimer, nil, nil, nil)
+	worker := NewWorker(claimer, nil, nil, nil, testWorkerProcessingTimeout)
 
 	job, claimed, err := worker.ClaimNext(context.Background())
 
@@ -125,7 +125,7 @@ func TestWorkerClaimNextPreservesUnexpectedError(t *testing.T) {
 			return documentdomain.ProcessingJob{}, databaseError
 		},
 	}
-	worker := NewWorker(claimer, nil, nil, nil)
+	worker := NewWorker(claimer, nil, nil, nil, testWorkerProcessingTimeout)
 
 	job, claimed, err := worker.ClaimNext(context.Background())
 

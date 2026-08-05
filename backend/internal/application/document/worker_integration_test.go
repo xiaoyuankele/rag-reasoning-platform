@@ -143,6 +143,7 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			documentRepository,
 			processor,
 			chunkRepository,
+			testWorkerProcessingTimeout,
 		)
 
 		handled, err := worker.RunOnce(ctx)
@@ -224,6 +225,7 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			documentRepository,
 			processor,
 			chunkRepository,
+			testWorkerProcessingTimeout,
 		)
 
 		handled, err := worker.RunOnce(ctx)

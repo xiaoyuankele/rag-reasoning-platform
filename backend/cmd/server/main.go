@@ -121,7 +121,13 @@ func run(ctx context.Context) error {
 	processingJobService := documentapplication.NewProcessingJobService(
 		processingJobRepository,
 	)
-	worker := documentapplication.NewWorker(processingJobRepository, documentRepository, textProcessor, chunkRepository)
+	worker := documentapplication.NewWorker(
+		processingJobRepository,
+		documentRepository,
+		textProcessor,
+		chunkRepository,
+		workerConfig.ProcessingTimeout,
+	)
 	workerErrorReporter := func(err error) {
 		log.Printf("worker error: %v", err)
 	}
