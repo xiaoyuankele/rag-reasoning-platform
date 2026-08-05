@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
-const safeProcessingFailureMessage = "document processing failed"
+const (
+	safeProcessingFailureMessage = "document processing failed"
+	safeProcessingTimeoutMessage = "document processing timed out"
+)
 
 // processingJobWorkerRepository 组合 Worker 领取和收尾任务所需的能力。
 type processingJobWorkerRepository interface {
@@ -36,10 +40,11 @@ type documentProcessor interface {
 
 // Worker 编排后台文档解析任务。
 type Worker struct {
-	jobs      processingJobWorkerRepository
-	documents documentdomain.Finder
-	processor documentProcessor
-	chunks    documentdomain.ChunkReplacer
+	jobs              processingJobWorkerRepository
+	documents         documentdomain.Finder
+	processor         documentProcessor
+	chunks            documentdomain.ChunkReplacer
+	processingTimeout time.Duration
 }
 
 // NewWorker 创建文档解析 Worker。
@@ -48,12 +53,14 @@ func NewWorker(
 	documents documentdomain.Finder,
 	processor documentProcessor,
 	chunks documentdomain.ChunkReplacer,
+	processingTimeout time.Duration,
 ) *Worker {
 	return &Worker{
-		jobs:      jobs,
-		documents: documents,
-		processor: processor,
-		chunks:    chunks,
+		jobs:              jobs,
+		documents:         documents,
+		processor:         processor,
+		chunks:            chunks,
+		processingTimeout: processingTimeout,
 	}
 }
 
@@ -116,9 +123,14 @@ func (w *Worker) RunOnce(
 		)
 	}
 
-	// 不同格式的处理器都会返回相同的 ProcessingResult，
-	// Worker 只负责按统一方式保存结果。
-	processingResult, processingErr := w.processor.Process(ctx, foundDocument)
+	// processContext 只限制文档处理器的执行时间。
+	// 父级 ctx 取消时，它也会立刻取消；即使父级仍然有效，
+	// 超过 processingTimeout 后也会自动返回 DeadlineExceeded。
+	processContext, cancelProcess := context.WithTimeout(ctx, w.processingTimeout)
+	processingResult, processingErr := w.processor.Process(processContext, foundDocument)
+
+	// 处理器已经返回，不再需要定时器，立即释放相关资源。
+	cancelProcess()
 
 	if processingErr != nil {
 		// 真实处理错误返回给 Worker 循环写后端日志。
@@ -128,11 +140,16 @@ func (w *Worker) RunOnce(
 			processingErr,
 		)
 
+		failureMessage := safeProcessingFailureMessage
+		if errors.Is(processingErr, context.DeadlineExceeded) {
+			failureMessage = safeProcessingTimeoutMessage
+		}
+
 		// 数据库只保存可安全展示给前端的通用失败说明。
 		finalizationErr := w.jobs.MarkProcessingJobFailed(
 			ctx,
 			job.ID,
-			safeProcessingFailureMessage,
+			failureMessage,
 		)
 		if finalizationErr != nil {
 			wrappedFinalizationErr := fmt.Errorf(
