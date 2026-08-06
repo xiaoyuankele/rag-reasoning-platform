@@ -131,6 +131,18 @@ func run(ctx context.Context) error {
 	// 必须先确认 LocalStorage 创建成功，再把它交给 TextProcessor。
 
 	textProcessor := documentapplication.NewTextProcessor(localFileStorage)
+	processorDispatcher, err := documentapplication.NewProcessorDispatcher(
+		map[string]documentapplication.DocumentProcessor{
+			"text/markdown": textProcessor,
+			"text/plain":    textProcessor,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"create document processor dispatcher: %w",
+			err,
+		)
+	}
 
 	// Service 负责文档查询用例和业务参数校验。
 	documentService := documentapplication.NewService(documentRepository)
@@ -147,7 +159,7 @@ func run(ctx context.Context) error {
 	worker := documentapplication.NewWorker(
 		processingJobRepository,
 		documentRepository,
-		textProcessor,
+		processorDispatcher,
 		chunkRepository,
 		workerConfig.ProcessingTimeout,
 	)
