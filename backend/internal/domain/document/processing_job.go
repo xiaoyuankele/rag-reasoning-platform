@@ -101,3 +101,15 @@ type ProcessingJobFinalizer interface {
 		errorMessage string,
 	) error
 }
+
+// InterruptedProcessingJobRecoverer 定义应用启动时恢复异常中断任务
+// 所需的持久化能力。
+//
+// 当前系统只运行一个 Worker 实例，因此服务启动时仍处于 processing
+// 的任务可以确定为上一次进程异常退出留下的中断任务。
+type InterruptedProcessingJobRecoverer interface {
+	MarkInterruptedProcessingJobsFailed(
+		ctx context.Context,
+		errorMessage string,
+	) (recoveredCount int64, err error)
+}
