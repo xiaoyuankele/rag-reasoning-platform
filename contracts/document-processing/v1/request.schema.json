@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rag-reasoning-platform.local/contracts/document-processing/v1/request.schema.json",
+  "title": "Document Processing Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "request_id",
+    "document",
+    "options"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "v1"
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "original_name",
+        "source_path",
+        "mime_type"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "original_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "source_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32767
+        },
+        "mime_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_chunk_characters"
+      ],
+      "properties": {
+        "max_chunk_characters": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        }
+      }
+    }
+  }
+}
