@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rag-reasoning-ai"
+version = "0.1.0"
+description = "Python document processing adapters for the RAG reasoning platform"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+rag-document-processor = "rag_ai.document_processor_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,13 @@
+{
+  "contract_version": "v1",
+  "request_id": "job-123",
+  "document": {
+    "id": 456,
+    "original_name": "research.pdf",
+    "source_path": "E:\\data\\documents\\document-456.pdf",
+    "mime_type": "application/pdf"
+  },
+  "options": {
+    "max_chunk_characters": 1000
+  }
+}

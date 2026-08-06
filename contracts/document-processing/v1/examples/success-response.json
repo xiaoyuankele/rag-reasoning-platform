@@ -1,0 +1,11 @@
+{
+  "contract_version": "v1",
+  "request_id": "job-123",
+  "status": "succeeded",
+  "chunks": [
+    {
+      "index": 0,
+      "content": "normalized document content"
+    }
+  ]
+}
