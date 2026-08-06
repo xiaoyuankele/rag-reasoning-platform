@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P2（异步解析链路，进行中）。文档上传、详情、分页列表和删除接口已经实现并验证；PostgreSQL 自动迁移、解析任务表、任务排队、任务状态查询以及 Worker 的领取与状态收尾已经完成；统一文本块表、领域模型和 PostgreSQL 仓储已经建立。Go 原生 Markdown/TXT 处理器已经能够安全读取本地文件、规范化 UTF-8 文本并生成统一文本块。单并发 Worker 常驻循环、单次处理超时、安全退出以及异常中断任务恢复已经接入生产入口；真实 Python 复杂文档解析适配器尚未实现。
+> 当前状态：P2（异步解析链路，进行中）。文档上传、详情、分页列表和删除接口已经实现并验证；PostgreSQL 自动迁移、解析任务表、任务排队、任务状态查询以及 Worker 的领取与状态收尾已经完成；统一文本块表、领域模型和 PostgreSQL 仓储已经建立。Go 原生 Markdown/TXT 处理器已经能够安全读取本地文件、规范化 UTF-8 文本并生成统一文本块。单并发 Worker 常驻循环、单次处理超时、安全退出、异常中断任务恢复以及按 MIME 选择处理器的调度边界已经接入生产入口；真实 Python 复杂文档解析适配器尚未实现。
 
 ## 项目目标
 
@@ -159,7 +159,9 @@ Worker Application 已定义可替换的文档处理器端口，并实现单次�
 
 单并发 WorkerLoop 已经实现连续领取、空队列等待、错误上报和 context 取消，并由生产入口以独立 goroutine 启动。HTTP 服务使用标准库 `http.Server` 响应退出信号和执行限时优雅关闭；真实 HTTP、PostgreSQL 与本地文件链路已经验证 Markdown 文档能够自动处理为统一文本块。Worker 使用独立子 context 限制单份文档的处理时间，默认超时为 5 分钟，并在超时后使用仍有效的父 context 将任务安全标记为失败。
 
-服务启动时会在 Worker 运行前恢复上一次异常退出遗留的 `processing` 任务，并在同一 PostgreSQL 事务内把任务和关联文档标记为 `failed`。真实启动测试已验证恢复数量、双表状态一致性、安全错误信息和第二次启动的幂等性。当前恢复策略建立在单实例 Worker 约束上；未来扩展为多实例时需要使用 lease/heartbeat 判断任务是否真正失联。下一步是建立多格式 Processor 调度和 Go/Python 处理契约，再增加 PDF 与 DOCX 适配器。
+服务启动时会在 Worker 运行前恢复上一次异常退出遗留的 `processing` 任务，并在同一 PostgreSQL 事务内把任务和关联文档标记为 `failed`。真实启动测试已验证恢复数量、双表状态一致性、安全错误信息和第二次启动的幂等性。当前恢复策略建立在单实例 Worker 约束上；未来扩展为多实例时需要使用 lease/heartbeat 判断任务是否真正失联。下一步是定义 Go/Python 处理契约，再增加 PDF 与 DOCX 适配器。
+
+`ProcessorDispatcher` 已作为统一处理器入口接入 Worker，根据数据库中的可信 MIME 类型选择具体实现。`text/markdown` 和 `text/plain` 当前路由到 Go `TextProcessor`；尚未注册的格式会返回可判断的错误，而不会误用文本处理器。后续 Python PDF/DOCX 适配器只需实现相同 `DocumentProcessor` 接口并增加注册项，Worker 的任务领取、超时、文本块保存和状态收尾流程不需要修改。
 
 ## 配置与安全约定
 

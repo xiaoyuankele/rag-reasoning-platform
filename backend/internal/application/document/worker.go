@@ -28,10 +28,11 @@ type ProcessingResult struct {
 	Chunks []documentdomain.ChunkInput
 }
 
-// documentProcessor 隔离具体的 Python 或其他文档处理实现。
+// DocumentProcessor 隔离具体的 Go、Python 或其他文档处理实现。
 //
 // Application 只规定“能够处理一份文档”，不依赖子进程、脚本或 PDF 库。
-type documentProcessor interface {
+// 接口需要导出，因为组合根会把多个具体处理器注册到 ProcessorDispatcher。
+type DocumentProcessor interface {
 	Process(
 		ctx context.Context,
 		document documentdomain.Document,
@@ -42,7 +43,7 @@ type documentProcessor interface {
 type Worker struct {
 	jobs              processingJobWorkerRepository
 	documents         documentdomain.Finder
-	processor         documentProcessor
+	processor         DocumentProcessor
 	chunks            documentdomain.ChunkReplacer
 	processingTimeout time.Duration
 }
@@ -51,7 +52,7 @@ type Worker struct {
 func NewWorker(
 	jobs processingJobWorkerRepository,
 	documents documentdomain.Finder,
-	processor documentProcessor,
+	processor DocumentProcessor,
 	chunks documentdomain.ChunkReplacer,
 	processingTimeout time.Duration,
 ) *Worker {

@@ -30,7 +30,7 @@ type TextProcessor struct {
 	files StoredFileOpener
 }
 
-var _ documentProcessor = (*TextProcessor)(nil)
+var _ DocumentProcessor = (*TextProcessor)(nil)
 
 // NewTextProcessor 创建文本处理器。
 func NewTextProcessor(files StoredFileOpener) *TextProcessor {
