@@ -262,6 +262,98 @@ func (r *ProcessingJobRepository) MarkProcessingJobFailed(
 	)
 }
 
+// MarkInterruptedProcessingJobsFailed 在应用启动时，把上一次进程异常退出
+// 遗留的 processing 任务及其文档原子地标记为 failed。
+//
+// 当前实现建立在单 Worker 实例约束上：新进程启动时，不应存在另一个仍
+// 合法处理任务的实例。未来扩展为多实例时，需要使用 lease/heartbeat
+// 判断任务是否真正失联，不能继续恢复全部 processing 任务。
+func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
+	ctx context.Context,
+	errorMessage string,
+) (int64, error) {
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"begin interrupted processing job recovery transaction: %w",
+			err,
+		)
+	}
+	defer func() {
+		_ = transaction.Rollback(context.Background())
+	}()
+
+	// interrupted_jobs 先锁定恢复范围；两个 UPDATE CTE 分别修改文档和任务。
+	// 最终 SELECT 同时返回两张表的更新数量，用于验证事务内状态仍然一致。
+	const recoveryQuery = `
+		WITH interrupted_jobs AS (
+			SELECT id, document_id
+			FROM document_jobs
+			WHERE status = 'processing'
+			FOR UPDATE
+		),
+		updated_documents AS (
+			UPDATE documents AS d
+			SET
+				status = 'failed',
+				error_message = $1,
+				updated_at = CURRENT_TIMESTAMP
+			FROM interrupted_jobs AS interrupted
+			WHERE d.id = interrupted.document_id
+				AND d.status = 'processing'
+			RETURNING d.id
+		),
+		updated_jobs AS (
+			UPDATE document_jobs AS j
+			SET
+				status = 'failed',
+				error_message = $1,
+				updated_at = CURRENT_TIMESTAMP,
+				completed_at = CURRENT_TIMESTAMP
+			FROM interrupted_jobs AS interrupted
+			WHERE j.id = interrupted.id
+				AND j.status = 'processing'
+			RETURNING j.id
+		)
+		SELECT
+			(SELECT COUNT(*) FROM updated_jobs),
+			(SELECT COUNT(*) FROM updated_documents)
+	`
+
+	var recoveredJobCount int64
+	var recoveredDocumentCount int64
+	if err := transaction.QueryRow(
+		ctx,
+		recoveryQuery,
+		errorMessage,
+	).Scan(
+		&recoveredJobCount,
+		&recoveredDocumentCount,
+	); err != nil {
+		return 0, fmt.Errorf(
+			"recover interrupted processing jobs: %w",
+			err,
+		)
+	}
+
+	if recoveredJobCount != recoveredDocumentCount {
+		return 0, fmt.Errorf(
+			"recover interrupted processing jobs: updated %d jobs and %d documents",
+			recoveredJobCount,
+			recoveredDocumentCount,
+		)
+	}
+
+	if err := transaction.Commit(ctx); err != nil {
+		return 0, fmt.Errorf(
+			"commit interrupted processing job recovery: %w",
+			err,
+		)
+	}
+
+	return recoveredJobCount, nil
+}
+
 func (r *ProcessingJobRepository) finalizeProcessingJob(
 	ctx context.Context,
 	jobID int64,

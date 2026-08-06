@@ -40,7 +40,8 @@ func main() {
 	}
 }
 
-// run 按顺序完成读取配置、连接数据库和启动 HTTP 服务。
+// run 是应用生命周期的编排入口：按顺序完成配置加载、基础设施初始化、
+// 启动恢复、后台 Worker 启动、HTTP 服务运行与优雅关闭。
 func run(ctx context.Context) error {
 	appConfig, err := config.Load()
 	if err != nil {
@@ -101,6 +102,28 @@ func run(ctx context.Context) error {
 	documentRepository := postgres.NewDocumentRepository(databasePool)
 	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
 	chunkRepository := postgres.NewChunkRepository(databasePool)
+
+	// Worker 启动前，先恢复上一次异常退出遗留的 processing 任务。
+	// main 只负责决定调用时机；恢复规则位于 Application，SQL 位于 Repository。
+	interruptedJobRecoveryService :=
+		documentapplication.NewInterruptedJobRecoveryService(
+			processingJobRepository,
+		)
+	recoveredJobCount, err := interruptedJobRecoveryService.Recover(ctx)
+	if err != nil {
+		return fmt.Errorf(
+			"recover interrupted processing jobs during startup: %w",
+			err,
+		)
+	}
+
+	if recoveredJobCount > 0 {
+		log.Printf(
+			"recovered %d interrupted processing jobs",
+			recoveredJobCount,
+		)
+	}
+
 	localFileStorage, err := filestorage.NewLocalStorage(storageConfig.RootDir, storageConfig.MaxFileSizeBytes)
 	if err != nil {
 		return fmt.Errorf("create local file storage: %w", err)
