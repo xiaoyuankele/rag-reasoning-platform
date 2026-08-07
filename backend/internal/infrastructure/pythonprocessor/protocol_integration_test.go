@@ -53,6 +53,8 @@ func TestPythonCLIContractRoundTrip(t *testing.T) {
 		},
 		sourcePath,
 		1000,
+		50*1024*1024,
+		500,
 	)
 	if err != nil {
 		t.Fatalf("new process request: %v", err)
@@ -104,11 +106,11 @@ func TestPythonCLIContractRoundTrip(t *testing.T) {
 	if !errors.As(err, &failure) {
 		t.Fatalf("decode response error = %v, want ProcessingFailureError", err)
 	}
-	if failure.Code != "unsupported_format" {
-		t.Fatalf("failure code = %q, want unsupported_format", failure.Code)
+	if failure.Code != "invalid_content" {
+		t.Fatalf("failure code = %q, want invalid_content", failure.Code)
 	}
 	if failure.Retryable {
-		t.Fatal("unsupported format failure must not be retryable")
+		t.Fatal("invalid content failure must not be retryable")
 	}
 	if len(result.Chunks) != 0 {
 		t.Fatalf("result chunks = %+v, want empty", result.Chunks)

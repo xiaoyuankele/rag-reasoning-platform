@@ -10,9 +10,10 @@ from rag_ai.document_processing_contract import (
     ContractError,
     failure_response,
     parse_request,
-    process_request,
     safe_request_id,
 )
+from rag_ai.document_processor import process_request
+from rag_ai.parsing.errors import DocumentProcessingError
 
 
 def main() -> int:
@@ -34,6 +35,15 @@ def main() -> int:
         )
     except ContractError as error:
         response = failure_response(request_id, error)
+    except DocumentProcessingError as error:
+        response = failure_response(
+            request_id,
+            ContractError(
+                error.code,
+                error.message,
+                retryable=error.retryable,
+            ),
+        )
     except Exception as error:  # pragma: no cover - defensive process boundary
         # stderr is for diagnostics only; stdout remains valid protocol JSON.
         print(

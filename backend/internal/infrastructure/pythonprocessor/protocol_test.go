@@ -26,6 +26,8 @@ func TestNewProcessRequestBuildsVersionedRequest(t *testing.T) {
 		document,
 		sourcePath,
 		1000,
+		50*1024*1024,
+		500,
 	)
 	if err != nil {
 		t.Fatalf("newProcessRequest() error = %v, want nil", err)
@@ -52,6 +54,16 @@ func TestNewProcessRequestBuildsVersionedRequest(t *testing.T) {
 			"max chunk characters = %d, want 1000",
 			request.Options.MaxChunkCharacters,
 		)
+	}
+	if request.Options.MaxPDFFileBytes != 50*1024*1024 {
+		t.Fatalf(
+			"max PDF file bytes = %d, want %d",
+			request.Options.MaxPDFFileBytes,
+			50*1024*1024,
+		)
+	}
+	if request.Options.MaxPDFPages != 500 {
+		t.Fatalf("max PDF pages = %d, want 500", request.Options.MaxPDFPages)
 	}
 }
 
@@ -112,6 +124,8 @@ func TestNewProcessRequestRejectsInvalidInput(t *testing.T) {
 				test.document,
 				test.sourcePath,
 				test.maxChunkCharacters,
+				50*1024*1024,
+				500,
 			)
 
 			if !errors.Is(err, ErrInvalidProcessRequest) {
@@ -137,7 +151,11 @@ func TestEncodeProcessRequestWritesContractJSON(t *testing.T) {
 			SourcePath:   filepath.Join(t.TempDir(), "document.pdf"),
 			MIMEType:     "application/pdf",
 		},
-		Options: processOptions{MaxChunkCharacters: 1000},
+		Options: processOptions{
+			MaxChunkCharacters: 1000,
+			MaxPDFFileBytes:    50 * 1024 * 1024,
+			MaxPDFPages:        500,
+		},
 	}
 	var output bytes.Buffer
 
@@ -164,7 +182,7 @@ func TestDecodeProcessResponseReturnsChunks(t *testing.T) {
 		"request_id":"job-123",
 		"status":"succeeded",
 		"chunks":[
-			{"index":0,"content":"first"},
+			{"index":0,"content":"first","page_start":2,"page_end":3},
 			{"index":1,"content":"second"}
 		]
 	}`
@@ -178,7 +196,12 @@ func TestDecodeProcessResponseReturnsChunks(t *testing.T) {
 		t.Fatalf("decodeProcessResponse() error = %v, want nil", err)
 	}
 	wantChunks := []documentdomain.ChunkInput{
-		{Index: 0, Content: "first"},
+		{
+			Index:     0,
+			Content:   "first",
+			PageStart: protocolTestIntPointer(2),
+			PageEnd:   protocolTestIntPointer(3),
+		},
 		{Index: 1, Content: "second"},
 	}
 	if !reflect.DeepEqual(result.Chunks, wantChunks) {
@@ -214,6 +237,24 @@ func TestDecodeProcessResponseReturnsStructuredFailure(t *testing.T) {
 	}
 	if len(result.Chunks) != 0 {
 		t.Fatalf("chunks = %+v, want empty", result.Chunks)
+	}
+}
+
+func TestValidateProcessFailureAcceptsEveryStableCode(t *testing.T) {
+	retryable := false
+
+	for code := range supportedFailureCodes {
+		t.Run(code, func(t *testing.T) {
+			err := validateProcessFailure(&processFailure{
+				Code:      code,
+				Message:   "safe diagnostic message",
+				Retryable: &retryable,
+			})
+
+			if err != nil {
+				t.Fatalf("validateProcessFailure() error = %v, want nil", err)
+			}
+		})
 	}
 }
 
@@ -361,9 +402,60 @@ func TestValidateProcessChunks(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "valid chunks",
+			name: "page start requires page end",
 			chunks: []processChunk{
-				{Index: 0, Content: "first"},
+				{
+					Index:     0,
+					Content:   "content",
+					PageStart: protocolTestIntPointer(1),
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "page end requires page start",
+			chunks: []processChunk{
+				{
+					Index:   0,
+					Content: "content",
+					PageEnd: protocolTestIntPointer(1),
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "page numbers must be positive",
+			chunks: []processChunk{
+				{
+					Index:     0,
+					Content:   "content",
+					PageStart: protocolTestIntPointer(0),
+					PageEnd:   protocolTestIntPointer(1),
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "page end must not precede page start",
+			chunks: []processChunk{
+				{
+					Index:     0,
+					Content:   "content",
+					PageStart: protocolTestIntPointer(3),
+					PageEnd:   protocolTestIntPointer(2),
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "valid chunks with and without page ranges",
+			chunks: []processChunk{
+				{
+					Index:     0,
+					Content:   "first",
+					PageStart: protocolTestIntPointer(1),
+					PageEnd:   protocolTestIntPointer(1),
+				},
 				{Index: 1, Content: "second"},
 			},
 		},
@@ -388,4 +480,8 @@ func TestValidateProcessChunks(t *testing.T) {
 			}
 		})
 	}
+}
+
+func protocolTestIntPointer(value int) *int {
+	return &value
 }

@@ -12,6 +12,10 @@ CONTRACT_VERSION = "v1"
 MAX_REQUEST_ID_LENGTH = 128
 MIN_CHUNK_CHARACTERS = 1
 MAX_CHUNK_CHARACTERS = 100_000
+DEFAULT_PDF_FILE_BYTES = 50 * 1024 * 1024
+DEFAULT_PDF_PAGES = 500
+MAX_PDF_FILE_BYTES = 1024 * 1024 * 1024
+MAX_PDF_PAGES = 10_000
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 
@@ -30,6 +34,8 @@ class ProcessingOptions:
     """Options controlled by Go for one processing invocation."""
 
     max_chunk_characters: int
+    max_pdf_file_bytes: int
+    max_pdf_pages: int
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,16 @@ class ProcessingRequest:
     request_id: str
     document: ProcessingDocument
     options: ProcessingOptions
+
+
+@dataclass(frozen=True)
+class ProcessingChunk:
+    """One normalized text chunk produced by a document parser."""
+
+    index: int
+    content: str
+    page_start: int | None = None
+    page_end: int | None = None
 
 
 class ContractError(Exception):
@@ -90,18 +106,33 @@ def parse_request(payload: Any) -> ProcessingRequest:
     )
 
 
-def process_request(request: ProcessingRequest) -> dict[str, Any]:
-    """Dispatch a validated request to a future PDF or DOCX parser.
+def success_response(
+    request_id: str,
+    chunks: list[ProcessingChunk],
+) -> dict[str, Any]:
+    """Build a validated success response for the Go backend."""
 
-    The protocol is ready before parser libraries are selected. Returning a
-    structured unsupported error proves the failure path without pretending
-    that complex document parsing already exists.
-    """
+    _validate_request_id(request_id)
+    _validate_processing_chunks(chunks)
 
-    raise ContractError(
-        "unsupported_format",
-        f"no Python processor is registered for {request.document.mime_type!r}",
-    )
+    chunk_payloads: list[dict[str, Any]] = []
+    for chunk in chunks:
+        chunk_payload: dict[str, Any] = {
+            "index": chunk.index,
+            "content": chunk.content,
+        }
+        if chunk.page_start is not None and chunk.page_end is not None:
+            chunk_payload["page_start"] = chunk.page_start
+            chunk_payload["page_end"] = chunk.page_end
+
+        chunk_payloads.append(chunk_payload)
+
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "request_id": request_id,
+        "status": "succeeded",
+        "chunks": chunk_payloads,
+    }
 
 
 def failure_response(
@@ -181,25 +212,54 @@ def _parse_document(value: Any) -> ProcessingDocument:
 
 def _parse_options(value: Any) -> ProcessingOptions:
     options = _require_object(value, "options")
-    _require_exact_keys(
+    _require_required_and_allowed_keys(
         options,
-        {"max_chunk_characters"},
-        "options",
+        required={"max_chunk_characters"},
+        allowed={
+            "max_chunk_characters",
+            "max_pdf_file_bytes",
+            "max_pdf_pages",
+        },
+        field="options",
     )
 
     max_chunk_characters = _require_integer(
         options["max_chunk_characters"],
         "options.max_chunk_characters",
     )
-    if not MIN_CHUNK_CHARACTERS <= max_chunk_characters <= MAX_CHUNK_CHARACTERS:
-        raise ContractError(
-            "invalid_request",
-            "options.max_chunk_characters must be between "
-            f"{MIN_CHUNK_CHARACTERS} and {MAX_CHUNK_CHARACTERS}",
-        )
+    _require_bounded_integer(
+        max_chunk_characters,
+        "options.max_chunk_characters",
+        minimum=MIN_CHUNK_CHARACTERS,
+        maximum=MAX_CHUNK_CHARACTERS,
+    )
+
+    max_pdf_file_bytes = _require_integer(
+        options.get("max_pdf_file_bytes", DEFAULT_PDF_FILE_BYTES),
+        "options.max_pdf_file_bytes",
+    )
+    _require_bounded_integer(
+        max_pdf_file_bytes,
+        "options.max_pdf_file_bytes",
+        minimum=1,
+        maximum=MAX_PDF_FILE_BYTES,
+    )
+
+    max_pdf_pages = _require_integer(
+        options.get("max_pdf_pages", DEFAULT_PDF_PAGES),
+        "options.max_pdf_pages",
+    )
+    _require_bounded_integer(
+        max_pdf_pages,
+        "options.max_pdf_pages",
+        minimum=1,
+        maximum=MAX_PDF_PAGES,
+    )
 
     return ProcessingOptions(
         max_chunk_characters=max_chunk_characters,
+        max_pdf_file_bytes=max_pdf_file_bytes,
+        max_pdf_pages=max_pdf_pages,
     )
 
 
@@ -215,6 +275,56 @@ def _validate_request_id(value: Any) -> str:
             "request_id has an invalid format",
         )
     return request_id
+
+
+def _validate_processing_chunks(chunks: list[ProcessingChunk]) -> None:
+    if not chunks:
+        raise ContractError(
+            "internal_error",
+            "Python processor must produce at least one chunk",
+            retryable=True,
+        )
+
+    for expected_index, chunk in enumerate(chunks):
+        if isinstance(chunk.index, bool) or chunk.index != expected_index:
+            raise ContractError(
+                "internal_error",
+                "Python processor produced non-contiguous chunk indexes",
+                retryable=True,
+            )
+        if not isinstance(chunk.content, str) or not chunk.content.strip():
+            raise ContractError(
+                "internal_error",
+                "Python processor produced blank chunk content",
+                retryable=True,
+            )
+
+        has_page_start = chunk.page_start is not None
+        has_page_end = chunk.page_end is not None
+        if has_page_start != has_page_end:
+            raise ContractError(
+                "internal_error",
+                "Python processor produced an incomplete page range",
+                retryable=True,
+            )
+        if not has_page_start:
+            continue
+
+        page_start = chunk.page_start
+        page_end = chunk.page_end
+        if (
+            isinstance(page_start, bool)
+            or isinstance(page_end, bool)
+            or not isinstance(page_start, int)
+            or not isinstance(page_end, int)
+            or page_start < 1
+            or page_end < page_start
+        ):
+            raise ContractError(
+                "internal_error",
+                "Python processor produced an invalid page range",
+                retryable=True,
+            )
 
 
 def _require_object(value: Any, field: str) -> dict[str, Any]:
@@ -268,3 +378,34 @@ def _require_integer(value: Any, field: str) -> int:
             f"{field} must be an integer",
         )
     return value
+
+
+def _require_bounded_integer(
+    value: int,
+    field: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> None:
+    if not minimum <= value <= maximum:
+        raise ContractError(
+            "invalid_request",
+            f"{field} must be between {minimum} and {maximum}",
+        )
+
+
+def _require_required_and_allowed_keys(
+    value: dict[str, Any],
+    *,
+    required: set[str],
+    allowed: set[str],
+    field: str,
+) -> None:
+    actual = set(value)
+    missing = sorted(required - actual)
+    unknown = sorted(actual - allowed)
+    if missing or unknown:
+        raise ContractError(
+            "invalid_request",
+            f"{field} fields are invalid; missing={missing}, unknown={unknown}",
+        )

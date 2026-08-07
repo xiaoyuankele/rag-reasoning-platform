@@ -41,8 +41,42 @@
           "content": {
             "type": "string",
             "minLength": 1
+          },
+          "page_start": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "page_end": {
+            "type": "integer",
+            "minimum": 1
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "page_start"
+              ]
+            },
+            "then": {
+              "required": [
+                "page_end"
+              ]
+            }
+          },
+          {
+            "if": {
+              "required": [
+                "page_end"
+              ]
+            },
+            "then": {
+              "required": [
+                "page_start"
+              ]
+            }
+          }
+        ]
       }
     }
   }

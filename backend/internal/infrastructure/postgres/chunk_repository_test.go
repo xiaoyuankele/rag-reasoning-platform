@@ -84,8 +84,18 @@ func TestChunkRepositoryReplaceAndList(t *testing.T) {
 	}()
 
 	firstChunks := []documentdomain.ChunkInput{
-		{Index: 0, Content: "first chunk"},
-		{Index: 1, Content: "second chunk"},
+		{
+			Index:     0,
+			Content:   "first chunk",
+			PageStart: intPointer(1),
+			PageEnd:   intPointer(1),
+		},
+		{
+			Index:     1,
+			Content:   "second chunk",
+			PageStart: intPointer(2),
+			PageEnd:   intPointer(3),
+		},
 		{Index: 2, Content: "third chunk"},
 	}
 	if err := chunkRepository.ReplaceForDocument(
@@ -106,7 +116,12 @@ func TestChunkRepositoryReplaceAndList(t *testing.T) {
 	assertChunkContents(t, foundChunks, firstChunks)
 
 	replacementChunks := []documentdomain.ChunkInput{
-		{Index: 0, Content: "replacement first chunk"},
+		{
+			Index:     0,
+			Content:   "replacement first chunk",
+			PageStart: intPointer(4),
+			PageEnd:   intPointer(4),
+		},
 		{Index: 1, Content: "replacement second chunk"},
 	}
 	if err := chunkRepository.ReplaceForDocument(
@@ -123,6 +138,35 @@ func TestChunkRepositoryReplaceAndList(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("list replacement document chunks: %v", err)
+	}
+	assertChunkContents(t, foundChunks, replacementChunks)
+
+	// 领域层先拒绝只提供一个页码或逆序的页码范围，不能删除原有文本块。
+	err = chunkRepository.ReplaceForDocument(
+		ctx,
+		createdDocument.ID,
+		[]documentdomain.ChunkInput{
+			{
+				Index:     0,
+				Content:   "invalid page range",
+				PageStart: intPointer(3),
+				PageEnd:   intPointer(2),
+			},
+		},
+	)
+	if !errors.Is(err, documentdomain.ErrInvalidChunkPageRange) {
+		t.Fatalf(
+			"invalid page range error = %v, want ErrInvalidChunkPageRange",
+			err,
+		)
+	}
+
+	foundChunks, err = chunkRepository.ListByDocumentID(
+		ctx,
+		createdDocument.ID,
+	)
+	if err != nil {
+		t.Fatalf("list chunks after invalid page range: %v", err)
 	}
 	assertChunkContents(t, foundChunks, replacementChunks)
 
@@ -225,8 +269,54 @@ func assertChunkContents(
 				expected[index].Content,
 			)
 		}
+		assertOptionalInt(
+			t,
+			fmt.Sprintf("chunk %d page_start", index),
+			actual[index].PageStart,
+			expected[index].PageStart,
+		)
+		assertOptionalInt(
+			t,
+			fmt.Sprintf("chunk %d page_end", index),
+			actual[index].PageEnd,
+			expected[index].PageEnd,
+		)
 		if actual[index].CreatedAt.IsZero() {
 			t.Fatalf("chunk %d created_at must be set", index)
 		}
+	}
+}
+
+func intPointer(value int) *int {
+	return &value
+}
+
+func assertOptionalInt(
+	t *testing.T,
+	fieldName string,
+	actual *int,
+	expected *int,
+) {
+	t.Helper()
+
+	if actual == nil || expected == nil {
+		if actual != nil || expected != nil {
+			t.Fatalf(
+				"%s = %v, want %v",
+				fieldName,
+				actual,
+				expected,
+			)
+		}
+		return
+	}
+
+	if *actual != *expected {
+		t.Fatalf(
+			"%s = %d, want %d",
+			fieldName,
+			*actual,
+			*expected,
+		)
 	}
 }

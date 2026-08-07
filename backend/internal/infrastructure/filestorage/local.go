@@ -413,6 +413,23 @@ func (s *LocalStorage) resolveStoragePath(storagePath string) (string, error) {
 	return filepath.Join(s.rootDir, localPath), nil
 }
 
+// ResolveAbsolutePath 把数据库中保存的受控相对路径转换为本机绝对路径。
+//
+// PythonProcessor 需要把物理文件路径交给 Python 子进程，但不能直接信任
+// Document.StoragePath。本方法复用 LocalStorage 的目录和扩展名校验，确保只有
+// documents 目录下由后端管理的文件能够跨越进程边界。
+func (s *LocalStorage) ResolveAbsolutePath(storagePath string) (string, error) {
+	absolutePath, err := s.resolveStoragePath(storagePath)
+	if err != nil {
+		return "", fmt.Errorf(
+			"resolve stored document absolute path: %w",
+			err,
+		)
+	}
+
+	return absolutePath, nil
+}
+
 // Open 根据相对存储路径安全地打开文档文件。
 //
 // 返回的 io.ReadCloser 由调用方负责关闭。

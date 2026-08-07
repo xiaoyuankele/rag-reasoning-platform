@@ -38,7 +38,12 @@
             "invalid_request",
             "unsupported_format",
             "source_not_found",
+            "source_access_denied",
+            "password_required",
+            "extraction_not_permitted",
+            "ocr_required",
             "invalid_content",
+            "resource_limit_exceeded",
             "parse_failed",
             "internal_error"
           ]

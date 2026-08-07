@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -226,4 +227,56 @@ func TestLocalStorageOpenHonorsContextCancellation(t *testing.T) {
 			t.Fatalf("Close() after cancellation error = %v", closeErr)
 		}
 	})
+}
+
+func TestLocalStorageResolveAbsolutePath(t *testing.T) {
+	rootDirectory := t.TempDir()
+	storage, err := NewLocalStorage(rootDirectory, 1024)
+	if err != nil {
+		t.Fatalf("create local storage: %v", err)
+	}
+
+	storedFile, err := storage.Save(
+		context.Background(),
+		"document.pdf",
+		strings.NewReader("%PDF-1.7\n%%EOF"),
+	)
+	if err != nil {
+		t.Fatalf("save PDF: %v", err)
+	}
+
+	absolutePath, err := storage.ResolveAbsolutePath(storedFile.StoragePath)
+	if err != nil {
+		t.Fatalf("resolve absolute path: %v", err)
+	}
+
+	expectedPath := filepath.Join(
+		rootDirectory,
+		filepath.FromSlash(storedFile.StoragePath),
+	)
+	if absolutePath != expectedPath {
+		t.Fatalf(
+			"absolute path = %q, want %q",
+			absolutePath,
+			expectedPath,
+		)
+	}
+}
+
+func TestLocalStorageResolveAbsolutePathRejectsInvalidPath(t *testing.T) {
+	storage, err := NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("create local storage: %v", err)
+	}
+
+	absolutePath, err := storage.ResolveAbsolutePath("../outside.pdf")
+	if absolutePath != "" {
+		t.Fatalf("absolute path = %q, want empty", absolutePath)
+	}
+	if !errors.Is(err, ErrInvalidStoragePath) {
+		t.Fatalf(
+			"ResolveAbsolutePath() error = %v, want ErrInvalidStoragePath",
+			err,
+		)
+	}
 }

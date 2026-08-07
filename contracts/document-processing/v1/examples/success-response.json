@@ -5,7 +5,9 @@
   "chunks": [
     {
       "index": 0,
-      "content": "normalized document content"
+      "content": "normalized document content",
+      "page_start": 1,
+      "page_end": 1
     }
   ]
 }

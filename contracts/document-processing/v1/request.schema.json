@@ -62,6 +62,16 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 100000
+        },
+        "max_pdf_file_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        },
+        "max_pdf_pages": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
         }
       }
     }

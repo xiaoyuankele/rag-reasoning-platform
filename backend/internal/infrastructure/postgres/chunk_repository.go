@@ -31,6 +31,16 @@ func (r *ChunkRepository) ReplaceForDocument(
 	documentID int64,
 	chunks []document.ChunkInput,
 ) error {
+	for _, chunk := range chunks {
+		if !chunk.HasValidPageRange() {
+			return fmt.Errorf(
+				"%w: chunk index %d",
+				document.ErrInvalidChunkPageRange,
+				chunk.Index,
+			)
+		}
+	}
+
 	transaction, err := r.pool.Begin(ctx) //开始事务
 	if err != nil {
 		return fmt.Errorf(
@@ -79,9 +89,11 @@ func (r *ChunkRepository) ReplaceForDocument(
 		INSERT INTO text_chunks (
 			document_id,
 			chunk_index,
-			content
+			content,
+			page_start,
+			page_end
 		)
-		VALUES ($1, $2, $3)
+		VALUES ($1, $2, $3, $4, $5)
 	`
 
 	for _, chunk := range chunks {
@@ -91,6 +103,8 @@ func (r *ChunkRepository) ReplaceForDocument(
 			lockedDocumentID,
 			chunk.Index,
 			chunk.Content,
+			chunk.PageStart,
+			chunk.PageEnd,
 		); err != nil {
 			return fmt.Errorf(
 				"insert document chunk %d: %w",
@@ -150,6 +164,8 @@ func (r *ChunkRepository) ListByDocumentID(
 			document_id,
 			chunk_index,
 			content,
+			page_start,
+			page_end,
 			created_at
 		FROM text_chunks
 		WHERE document_id = $1
@@ -203,6 +219,8 @@ func scanTextChunk(row pgx.Row) (document.TextChunk, error) {
 		&chunk.DocumentID,
 		&chunk.Index,
 		&chunk.Content,
+		&chunk.PageStart,
+		&chunk.PageEnd,
 		&chunk.CreatedAt,
 	)
 	if err != nil {
