@@ -8,6 +8,8 @@ import unittest
 from pypdf import PdfWriter
 from pypdf.constants import UserAccessPermissions
 
+from tests.pdf_test_support import write_text_pdf
+
 
 AI_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = AI_ROOT / "src"
@@ -15,8 +17,10 @@ sys.path.insert(0, str(SOURCE_ROOT))
 
 from rag_ai.parsing.errors import DocumentProcessingError  # noqa: E402
 from rag_ai.parsing.pdf import (  # noqa: E402
+    PDFPageText,
     PDFPreflightResult,
     _validate_page_count,
+    extract_pdf_pages,
     preflight_pdf,
 )
 
@@ -125,6 +129,17 @@ class PDFPreflightTests(unittest.TestCase):
         max_file_bytes: int,
         max_pages: int,
     ) -> DocumentProcessingError:
+        """执行 PDF 预检并返回测试期望捕获的处理异常。
+
+        Args:
+            source_path: 待预检测试 PDF 的路径。
+            max_file_bytes: 测试使用的文件字节上限。
+            max_pages: 测试使用的页数上限。
+
+        Returns:
+            ``preflight_pdf`` 抛出的 ``DocumentProcessingError``。
+        """
+
         with self.assertRaises(DocumentProcessingError) as raised:
             preflight_pdf(
                 source_path,
@@ -141,6 +156,15 @@ class PDFPreflightTests(unittest.TestCase):
         password: str | None = None,
         restrict_extraction: bool = False,
     ) -> None:
+        """生成用于 PDF 预检测试的最小空白 PDF。
+
+        Args:
+            path: 测试 PDF 的输出路径。
+            page_count: 需要生成的物理页数。
+            password: 可选的打开密码；传入后生成需要密码的 PDF。
+            restrict_extraction: 是否生成允许打开但禁止提取文字的 PDF。
+        """
+
         writer = PdfWriter()
         for _ in range(page_count):
             writer.add_blank_page(width=612, height=792)
@@ -157,6 +181,47 @@ class PDFPreflightTests(unittest.TestCase):
 
         with path.open("wb") as output:
             writer.write(output)
+
+
+class PDFTextExtractionTests(unittest.TestCase):
+    def test_extract_pdf_pages_preserves_page_numbers_and_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "two-pages.pdf"
+            write_text_pdf(
+                source_path,
+                ["First page text", "Second page text"],
+            )
+
+            pages = extract_pdf_pages(
+                source_path,
+                max_file_bytes=1024 * 1024,
+                max_pages=10,
+            )
+
+        self.assertEqual(
+            pages,
+            [
+                PDFPageText(page_number=1, text="First page text"),
+                PDFPageText(page_number=2, text="Second page text"),
+            ],
+        )
+
+    def test_extract_pdf_pages_preserves_blank_page_as_empty_text(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "blank.pdf"
+            write_text_pdf(source_path, [""])
+
+            pages = extract_pdf_pages(
+                source_path,
+                max_file_bytes=1024 * 1024,
+                max_pages=10,
+            )
+
+        self.assertEqual(
+            pages,
+            [PDFPageText(page_number=1, text="")],
+        )
+
 
 
 if __name__ == "__main__":

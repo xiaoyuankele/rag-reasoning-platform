@@ -1,4 +1,4 @@
-"""Stable internal errors produced while parsing one document."""
+"""文档解析阶段使用的稳定内部错误。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,17 @@ ERROR_RETRYABILITY: dict[str, bool] = {
 
 
 def retryable_for(code: str) -> bool:
-    """Return the stable retry policy for one processing error code."""
+    """查询稳定错误码是否适合由系统自动重试。
+
+    Args:
+        code: Go/Python v1 契约中约定的稳定文档处理错误码。
+
+    Returns:
+        ``True`` 表示可以有限自动重试，``False`` 表示需要用户或环境先修复。
+
+    Raises:
+        ValueError: ``code`` 不是已登记的稳定错误码。
+    """
 
     if code not in ERROR_RETRYABILITY:
         raise ValueError(f"unknown document processing error code: {code!r}")
@@ -30,9 +40,17 @@ def retryable_for(code: str) -> bool:
 
 
 class DocumentProcessingError(Exception):
-    """Expected document failure independent of the wire protocol."""
+    """与 JSON 传输格式无关、可以预期的文档处理失败。
+
+    Attributes:
+        code: 供程序稳定判断的错误码。
+        message: 可以跨到 Go 后端日志的安全错误说明。
+        retryable: 当前错误是否适合自动重试。
+    """
 
     def __init__(self, code: str, message: str) -> None:
+        """根据稳定错误码和安全消息创建文档处理异常。"""
+
         message = message.strip()
         if not message:
             raise ValueError("document processing error message must not be blank")

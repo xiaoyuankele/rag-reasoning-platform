@@ -1,4 +1,4 @@
-"""Single-request CLI entry point used by the Go backend."""
+"""供 Go 后端启动的单请求文档处理 CLI 入口。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,15 @@ from rag_ai.parsing.errors import DocumentProcessingError
 
 
 def main() -> int:
-    """Read one JSON request from stdin and write one JSON response to stdout."""
+    """从 stdin 读取一条 JSON 请求，并向 stdout 写一条 JSON 响应。
+
+    Returns:
+        进程退出码。只要 CLI 能按协议返回成功或结构化失败 JSON，就返回 0；
+        无法进入本函数等进程级故障才由操作系统产生非零退出码。
+
+    Notes:
+        stdout 只能写协议 JSON；诊断信息必须写入 stderr，避免 Go 解码失败。
+    """
 
     payload: Any = None
     request_id = "invalid-request"

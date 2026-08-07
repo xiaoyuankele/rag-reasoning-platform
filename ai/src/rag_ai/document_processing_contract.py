@@ -1,4 +1,4 @@
-"""Versioned wire contract shared with the Go Python processor adapter."""
+"""Go 与 Python 文档处理适配器共享的 v1 JSON 契约。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,14 @@ REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 @dataclass(frozen=True)
 class ProcessingDocument:
-    """Document fields that Python is allowed to read."""
+    """Go 允许 Python 读取的文档信息。
+
+    Attributes:
+        id: PostgreSQL 中的正整数文档 ID。
+        original_name: 用户上传时的原始文件名，仅用于处理上下文。
+        source_path: Go 在受控存储根目录中解析出的绝对路径。
+        mime_type: Go 已确认并用于选择处理器的 MIME 类型。
+    """
 
     id: int
     original_name: str
@@ -31,7 +38,13 @@ class ProcessingDocument:
 
 @dataclass(frozen=True)
 class ProcessingOptions:
-    """Options controlled by Go for one processing invocation."""
+    """Go 为单次 Python 处理调用提供的安全限制。
+
+    Attributes:
+        max_chunk_characters: 单个统一文本块允许的最大字符数。
+        max_pdf_file_bytes: PDF 解析文件上限，独立于上传文件上限。
+        max_pdf_pages: 单份 PDF 允许解析的最大物理页数。
+    """
 
     max_chunk_characters: int
     max_pdf_file_bytes: int
@@ -40,7 +53,14 @@ class ProcessingOptions:
 
 @dataclass(frozen=True)
 class ProcessingRequest:
-    """Validated v1 request received from Go."""
+    """从 Go 收到并通过契约校验的 v1 处理请求。
+
+    Attributes:
+        contract_version: 当前固定为 ``v1``。
+        request_id: 用于关联 Go 请求和 Python 响应的 ID。
+        document: Python 被授权处理的文档信息。
+        options: 本次处理必须遵守的资源和分块限制。
+    """
 
     contract_version: str
     request_id: str
@@ -50,7 +70,14 @@ class ProcessingRequest:
 
 @dataclass(frozen=True)
 class ProcessingChunk:
-    """One normalized text chunk produced by a document parser."""
+    """格式处理器生成的一条统一文本块。
+
+    Attributes:
+        index: 从 0 开始连续递增的块序号。
+        content: 去除首尾空白后不能为空的文本内容。
+        page_start: 可选的起始物理页码；PDF 页码从 1 开始。
+        page_end: 可选的结束物理页码；必须和 ``page_start`` 同时出现。
+    """
 
     index: int
     content: str
@@ -59,7 +86,13 @@ class ProcessingChunk:
 
 
 class ContractError(Exception):
-    """Expected request or document failure that can cross the process boundary."""
+    """能够安全跨进程返回的契约或文档处理失败。
+
+    Attributes:
+        code: v1 契约中的稳定错误码。
+        message: 不包含密钥、绝对路径和正文的安全说明。
+        retryable: Go Worker 是否适合有限自动重试。
+    """
 
     def __init__(
         self,
@@ -68,6 +101,8 @@ class ContractError(Exception):
         *,
         retryable: bool = False,
     ) -> None:
+        """根据稳定错误码、安全消息和重试策略创建契约异常。"""
+
         super().__init__(message)
         self.code = code
         self.message = message
@@ -75,7 +110,17 @@ class ContractError(Exception):
 
 
 def parse_request(payload: Any) -> ProcessingRequest:
-    """Validate an untrusted JSON value and return a typed request."""
+    """校验来自 stdin 的不可信 JSON 值并转换为强类型请求。
+
+    Args:
+        payload: ``json.load`` 产生的任意 Python 值，通常是字典。
+
+    Returns:
+        字段、类型、范围和版本均已校验的 ``ProcessingRequest``。
+
+    Raises:
+        ContractError: 请求结构、字段、类型、取值、路径或契约版本不合法。
+    """
 
     request = _require_object(payload, "request")
     _require_exact_keys(
@@ -110,7 +155,18 @@ def success_response(
     request_id: str,
     chunks: list[ProcessingChunk],
 ) -> dict[str, Any]:
-    """Build a validated success response for the Go backend."""
+    """校验处理结果并构造供 Go 解码的 v1 成功响应。
+
+    Args:
+        request_id: 必须与请求相同的关联 ID。
+        chunks: 格式处理器生成、顺序稳定的统一文本块列表。
+
+    Returns:
+        可以交给 ``json.dump`` 的成功响应字典。
+
+    Raises:
+        ContractError: 请求 ID 或文本块的序号、内容、页码不合法。
+    """
 
     _validate_request_id(request_id)
     _validate_processing_chunks(chunks)
@@ -139,7 +195,15 @@ def failure_response(
     request_id: str,
     error: ContractError,
 ) -> dict[str, Any]:
-    """Build a v1 failure response without exposing exception internals."""
+    """把安全契约异常转换为供 Go 解码的 v1 失败响应。
+
+    Args:
+        request_id: 当前能够确定的请求关联 ID。
+        error: 已经完成安全分类的 ``ContractError``。
+
+    Returns:
+        包含稳定错误码、安全消息和重试标记的响应字典。
+    """
 
     return {
         "contract_version": CONTRACT_VERSION,
@@ -154,7 +218,14 @@ def failure_response(
 
 
 def safe_request_id(payload: Any) -> str:
-    """Extract a valid correlation ID for an invalid-request response."""
+    """尽量从非法请求中提取仍可安全回传的关联 ID。
+
+    Args:
+        payload: 尚未通过完整契约校验的 JSON 值。
+
+    Returns:
+        合法的原始 ``request_id``；无法提取时返回 ``invalid-request``。
+    """
 
     if isinstance(payload, dict):
         candidate = payload.get("request_id")
@@ -168,6 +239,8 @@ def safe_request_id(payload: Any) -> str:
 
 
 def _parse_document(value: Any) -> ProcessingDocument:
+    """校验 document 对象并转换为 ``ProcessingDocument``。"""
+
     document = _require_object(value, "document")
     _require_exact_keys(
         document,
@@ -211,6 +284,8 @@ def _parse_document(value: Any) -> ProcessingDocument:
 
 
 def _parse_options(value: Any) -> ProcessingOptions:
+    """校验 options 对象并为旧版 v1 请求补充 PDF 默认限制。"""
+
     options = _require_object(value, "options")
     _require_required_and_allowed_keys(
         options,
@@ -264,6 +339,8 @@ def _parse_options(value: Any) -> ProcessingOptions:
 
 
 def _validate_request_id(value: Any) -> str:
+    """校验请求关联 ID 的类型、长度和允许字符。"""
+
     request_id = _require_string(value, "request_id")
     if (
         not request_id
@@ -278,6 +355,8 @@ def _validate_request_id(value: Any) -> str:
 
 
 def _validate_processing_chunks(chunks: list[ProcessingChunk]) -> None:
+    """校验成功响应文本块的序号、内容和可选页码范围。"""
+
     if not chunks:
         raise ContractError(
             "internal_error",
@@ -328,6 +407,8 @@ def _validate_processing_chunks(chunks: list[ProcessingChunk]) -> None:
 
 
 def _require_object(value: Any, field: str) -> dict[str, Any]:
+    """要求契约字段是 JSON object 对应的 Python 字典。"""
+
     if not isinstance(value, dict):
         raise ContractError(
             "invalid_request",
@@ -341,6 +422,8 @@ def _require_exact_keys(
     expected: set[str],
     field: str,
 ) -> None:
+    """要求对象字段集合与预期集合完全相等。"""
+
     actual = set(value)
     if actual != expected:
         missing = sorted(expected - actual)
@@ -352,6 +435,8 @@ def _require_exact_keys(
 
 
 def _require_string(value: Any, field: str) -> str:
+    """要求契约字段是字符串并返回原值。"""
+
     if not isinstance(value, str):
         raise ContractError(
             "invalid_request",
@@ -361,6 +446,8 @@ def _require_string(value: Any, field: str) -> str:
 
 
 def _require_nonblank_string(value: Any, field: str) -> str:
+    """要求字段是去除空白后仍有内容的字符串。"""
+
     text = _require_string(value, field)
     if not text.strip():
         raise ContractError(
@@ -371,6 +458,8 @@ def _require_nonblank_string(value: Any, field: str) -> str:
 
 
 def _require_integer(value: Any, field: str) -> int:
+    """要求字段是整数，并显式拒绝可冒充整数的布尔值。"""
+
     # Python bool inherits from int, so reject bool explicitly.
     if isinstance(value, bool) or not isinstance(value, int):
         raise ContractError(
@@ -387,6 +476,8 @@ def _require_bounded_integer(
     minimum: int,
     maximum: int,
 ) -> None:
+    """要求整数位于包含上下限的闭区间内。"""
+
     if not minimum <= value <= maximum:
         raise ContractError(
             "invalid_request",
@@ -401,6 +492,8 @@ def _require_required_and_allowed_keys(
     allowed: set[str],
     field: str,
 ) -> None:
+    """检查对象是否包含全部必需字段且没有未知字段。"""
+
     actual = set(value)
     missing = sorted(required - actual)
     unknown = sorted(actual - allowed)
