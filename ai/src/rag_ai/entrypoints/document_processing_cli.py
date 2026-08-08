@@ -21,6 +21,26 @@ from rag_ai.infrastructure.splitting.simple_text_splitter import (
 )
 
 
+def configure_standard_streams() -> None:
+    """把跨进程 JSON 标准输入和标准输出固定为 UTF-8。
+
+    Windows 在管道模式下可能让 Python 使用系统代码页（例如 GBK）。真实
+    文献经常包含数学符号和其他代码页无法表达的 Unicode 字符，因此不能
+    依赖操作系统默认编码。Go/Python v1 契约明确使用 UTF-8 字节。
+
+    Raises:
+        OSError: Python 进程无法重新配置标准流；这种情况属于进程级故障，
+            不应伪装成结构化文档处理失败。
+    """
+
+    sys.stdin.reconfigure(encoding="utf-8", errors="strict")
+    sys.stdout.reconfigure(
+        encoding="utf-8",
+        errors="strict",
+        newline="\n",
+    )
+
+
 def main() -> int:
     """从 stdin 读取一条 JSON 请求，并向 stdout 写一条 JSON 响应。
 
@@ -31,6 +51,8 @@ def main() -> int:
     Notes:
         stdout 只能写协议 JSON；诊断信息必须写入 stderr，避免 Go 解码失败。
     """
+
+    configure_standard_streams()
 
     payload: Any = None
     request_id = "invalid-request"

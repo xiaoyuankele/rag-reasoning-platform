@@ -143,9 +143,18 @@ class ProcessingContractTests(unittest.TestCase):
 
 
 class ProcessorCLITests(unittest.TestCase):
-    def run_cli(self, input_text: str) -> subprocess.CompletedProcess[str]:
+    def run_cli(
+        self,
+        input_text: str,
+        *,
+        python_io_encoding: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """以明确 UTF-8 字节启动真实 CLI，并允许模拟错误系统代码页。"""
+
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(SOURCE_ROOT)
+        if python_io_encoding is not None:
+            environment["PYTHONIOENCODING"] = python_io_encoding
         return subprocess.run(
             [
                 sys.executable,
@@ -154,12 +163,35 @@ class ProcessorCLITests(unittest.TestCase):
             ],
             input=input_text,
             text=True,
+            encoding="utf-8",
             capture_output=True,
             cwd=AI_ROOT,
             env=environment,
             check=False,
             timeout=10,
         )
+
+    def test_cli_forces_utf8_for_unicode_request_and_response(self) -> None:
+        """Windows 默认代码页不能破坏请求路径或响应中的 Unicode。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            payload = valid_payload(Path(directory) / "research.pdf")
+            document = payload["document"]
+            assert isinstance(document, dict)
+            document["original_name"] = "文献∗.pdf"
+            document["mime_type"] = "application/x-∗"
+
+            completed = self.run_cli(
+                json.dumps(payload, ensure_ascii=False),
+                python_io_encoding="gbk",
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stderr, "")
+        response = json.loads(completed.stdout)
+        self.assertEqual(response["status"], "failed")
+        self.assertEqual(response["error"]["code"], "unsupported_format")
+        self.assertIn("∗", response["error"]["message"])
 
     def test_cli_returns_structured_unsupported_format_response(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
