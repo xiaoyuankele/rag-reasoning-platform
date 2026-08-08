@@ -60,8 +60,11 @@ rag_reasoning_platform_individual/
 │  └─ migrations/               # PostgreSQL 数据库迁移
 ├─ ai/                          # Python 文档处理与 AI 能力
 │  ├─ src/rag_ai/
-│  │  ├─ parsing/               # PDF 解析
-│  │  ├─ chunking/              # 文本分块
+│  │  ├─ domain/                # 框架无关模型与稳定处理错误
+│  │  ├─ application/           # 文档处理用例与 Protocol 端口
+│  │  ├─ contracts/             # Python 侧版本化 JSON DTO 与校验
+│  │  ├─ entrypoints/           # CLI 入口、依赖组装和边界转换
+│  │  ├─ infrastructure/        # pypdf 与文本切分具体适配器
 │  │  ├─ embedding/             # 向量化（后期）
 │  │  ├─ retrieval/             # 语义检索（后期）
 │  │  └─ generation/            # 摘要与问答（后期）
@@ -180,7 +183,7 @@ Worker Application 已定义可替换的文档处理器端口，并实现单次�
 
 `ProcessorDispatcher` 已作为统一处理器入口接入 Worker，根据数据库中的可信 MIME 类型选择具体实现。`text/markdown` 和 `text/plain` 路由到 Go `TextProcessor`，`application/pdf` 路由到生产 `PythonProcessor`；尚未注册的格式会返回可判断的错误，而不会误用其他处理器。后续实现真实 PDF 解析或增加 DOCX 处理时，Worker 的任务领取、超时、文本块保存和状态收尾流程不需要修改。
 
-Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义版本化请求、成功响应、失败响应、稳定错误码、示例和进程通信规则。Go 基础设施层已经实现安全绝对路径解析、请求构造、JSON 编码、严格响应解码、文本块不变量校验、结构化 Python 失败错误、子进程超时取消和 stdout/stderr 输出上限。生产 `PythonProcessor` 已注册到 `application/pdf`，自动化测试覆盖成功、结构化失败、非法响应、进程崩溃、超时与输出超限。Python PDF 处理已经能够识别伪造或损坏文件、密码要求、提取权限限制、OCR 需求以及文件和页数超限，并能对普通数字 PDF 逐页提取、规范化、页内分块和返回物理页码。两页数字 PDF 已通过真实 Python CLI、生产 Go `PythonProcessor` 和 PostgreSQL chunk 仓储的纵向集成测试；下一步使用真实中英文文献完成 HTTP 上传、排队、`ready` 状态和文本质量验收。
+Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义版本化请求、成功响应、失败响应、稳定错误码、示例和进程通信规则。Go 基础设施层已经实现安全绝对路径解析、请求构造、JSON 编码、严格响应解码、文本块不变量校验、结构化 Python 失败错误、子进程超时取消和 stdout/stderr 输出上限。生产 `PythonProcessor` 已注册到 `application/pdf`，自动化测试覆盖成功、结构化失败、非法响应、进程崩溃、超时与输出超限。Python 内部已经按 domain、application、contracts、entrypoints 和 infrastructure 完成轻量分层；pypdf 与简单文本切分器通过 application 定义的 Protocol 接入，不向核心层暴露第三方框架对象。Python PDF 处理已经能够识别伪造或损坏文件、密码要求、提取权限限制、OCR 需求以及文件和页数超限，并能对普通数字 PDF 逐页提取、规范化、页内分块和返回物理页码。两页数字 PDF 已通过真实 Python CLI、生产 Go `PythonProcessor` 和 PostgreSQL chunk 仓储的纵向集成测试；下一步使用真实中英文文献完成 HTTP 上传、排队、`ready` 状态和文本质量验收。
 
 Python PDF 测试依赖 `ai/pyproject.toml` 中锁定的解析库。首次运行前安装项目依赖，然后执行测试：
 

@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-rag-document-processor = "rag_ai.document_processor_cli:main"
+rag-document-processor = "rag_ai.entrypoints.document_processing_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

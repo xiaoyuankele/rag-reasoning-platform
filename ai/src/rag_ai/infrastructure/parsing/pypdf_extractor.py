@@ -1,4 +1,4 @@
-"""PDF 安全预检与逐页文字提取。"""
+"""使用 pypdf 完成 PDF 安全预检与逐页文字提取。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from pypdf import PasswordType, PdfReader
 from pypdf.constants import UserAccessPermissions
 from pypdf.errors import EmptyFileError, LimitReachedError, PdfReadError
 
-from rag_ai.parsing.errors import DocumentProcessingError
+from rag_ai.domain.errors import DocumentProcessingError
+from rag_ai.domain.models import PageText
 
 
 PDF_HEADER_PREFIX = b"%PDF-"
@@ -17,28 +18,49 @@ PDF_HEADER_PREFIX = b"%PDF-"
 
 @dataclass(frozen=True)
 class PDFPreflightResult:
-    """PDF 通过预检后交给后续阶段使用的安全元数据。
+    """PDF 通过预检后交给文字提取阶段使用的安全元数据。
 
     Attributes:
         page_count: PDF 的物理页数。
-        encrypted: PDF 是否带有加密标记；能通过预检的加密 PDF 只能使用空密码。
+        encrypted: PDF 是否带有加密标记；能通过预检的加密 PDF 只能
+            使用空密码打开，并且必须允许提取文字。
     """
 
     page_count: int
     encrypted: bool
 
 
-@dataclass(frozen=True)
-class PDFPageText:
-    """从一个物理 PDF 页面提取出的原始文字。
+class PyPDFPageExtractor:
+    """通过 pypdf 实现应用层 ``PageTextExtractor`` 端口。"""
 
-    Attributes:
-        page_number: 从 1 开始的物理页码。
-        text: pypdf 提取的页面文字；空白页使用空字符串，不在提取层删除。
-    """
+    def extract(
+        self,
+        source_path: Path,
+        *,
+        max_file_bytes: int,
+        max_pages: int,
+    ) -> list[PageText]:
+        """安全预检 PDF，逐页提取原始文字并保留物理页码。
 
-    page_number: int
-    text: str
+        Args:
+            source_path: Go 文件存储层解析出的可信 PDF 绝对路径。
+            max_file_bytes: 本次任务允许处理的最大文件字节数。
+            max_pages: 本次任务允许处理的最大物理页数。
+
+        Returns:
+            按物理页顺序排列的 ``PageText``；空白页仍以空字符串保留。
+
+        Raises:
+            ValueError: 资源限制不是正整数。
+            DocumentProcessingError: 文件不可读、损坏、需要密码、禁止提取、
+                超过资源限制，或者页面文字提取失败。
+        """
+
+        return extract_pdf_pages(
+            source_path,
+            max_file_bytes=max_file_bytes,
+            max_pages=max_pages,
+        )
 
 
 def preflight_pdf(
@@ -59,8 +81,8 @@ def preflight_pdf(
 
     Raises:
         ValueError: 文件或页数限制不是正整数。
-        DocumentProcessingError: 文件不存在、不可读、损坏、需要密码、禁止提取，
-            或者超过资源限制。错误消息不会包含绝对路径、密码和正文。
+        DocumentProcessingError: 文件不存在、不可读、损坏、需要密码、禁止
+            提取，或者超过资源限制。错误消息不会包含绝对路径或正文。
     """
 
     _require_positive_limit(max_file_bytes, "max_file_bytes")
@@ -140,7 +162,7 @@ def extract_pdf_pages(
     *,
     max_file_bytes: int,
     max_pages: int,
-) -> list[PDFPageText]:
+) -> list[PageText]:
     """预检 PDF 后逐页提取原始文字，并保留物理页边界。
 
     Args:
@@ -149,8 +171,7 @@ def extract_pdf_pages(
         max_pages: 当前任务允许处理的最大 PDF 页数。
 
     Returns:
-        按物理页顺序排列的 ``PDFPageText`` 列表。空白页仍会保留，文字为
-        空字符串。第一版后续只允许在单页内部切分，不跨页合并 chunk。
+        按物理页顺序排列的 ``PageText``。空白页仍然保留，文字为空字符串。
 
     Raises:
         ValueError: 文件或页数限制不是正整数。
@@ -170,7 +191,7 @@ def extract_pdf_pages(
             if reader.is_encrypted:
                 reader.decrypt("")
 
-            pages: list[PDFPageText] = []
+            pages: list[PageText] = []
             for page_number, page in enumerate(reader.pages, start=1):
                 try:
                     text = page.extract_text()
@@ -181,7 +202,7 @@ def extract_pdf_pages(
                     ) from error
 
                 pages.append(
-                    PDFPageText(
+                    PageText(
                         page_number=page_number,
                         text=text or "",
                     )
@@ -224,26 +245,6 @@ def extract_pdf_pages(
         ) from error
 
 
-def normalize_pdf_page_text(text: str) -> str:
-    """把一页 PDF 原始文字规范化为适合后续分块的单空格文本。
-
-    Args:
-        text: ``pypdf`` 从一个物理页面提取出的原始字符串。
-
-    Returns:
-        删除空字符，并把换行、制表符和连续空格折叠为单个空格后的文字。
-        只有空白或空字符的页面返回空字符串。
-
-    Raises:
-        TypeError: ``text`` 不是字符串，说明上游提取结果违反内部契约。
-    """
-
-    if not isinstance(text, str):
-        raise TypeError("PDF page text must be a string")
-
-    return " ".join(text.replace("\x00", "").split())
-
-
 def _require_positive_limit(value: int, name: str) -> None:
     """校验内部资源限制必须是正整数，布尔值不能冒充整数。"""
 
@@ -253,6 +254,7 @@ def _require_positive_limit(value: int, name: str) -> None:
 
 def _validate_page_count(page_count: int, max_pages: int) -> None:
     """拒绝零页 PDF 以及超过任务页数限制的 PDF。"""
+
     if page_count <= 0:
         raise DocumentProcessingError(
             "invalid_content",

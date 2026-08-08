@@ -6,14 +6,19 @@ import json
 import sys
 from typing import Any
 
-from rag_ai.document_processing_contract import (
+from rag_ai.application.document_processor import ProcessDocumentService
+from rag_ai.contracts.document_processing_v1 import (
     ContractError,
     failure_response,
     parse_request,
     safe_request_id,
 )
-from rag_ai.document_processor import process_request
-from rag_ai.parsing.errors import DocumentProcessingError
+from rag_ai.domain.errors import DocumentProcessingError
+from rag_ai.entrypoints.document_processing_handler import process_request
+from rag_ai.infrastructure.parsing.pypdf_extractor import PyPDFPageExtractor
+from rag_ai.infrastructure.splitting.simple_text_splitter import (
+    SimpleTextSplitter,
+)
 
 
 def main() -> int:
@@ -35,7 +40,14 @@ def main() -> int:
         request_id = safe_request_id(payload)
         request = parse_request(payload)
         request_id = request.request_id
-        response = process_request(request)
+
+        # CLI 是当前 Python 进程的组合根：只有边界入口知道并创建具体的
+        # pypdf 与简单分块适配器，application 层只依赖它们实现的端口。
+        service = ProcessDocumentService(
+            page_extractor=PyPDFPageExtractor(),
+            text_splitter=SimpleTextSplitter(),
+        )
+        response = process_request(request, service)
     except json.JSONDecodeError:
         response = failure_response(
             request_id,

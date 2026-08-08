@@ -72,7 +72,7 @@ func TestPythonCLIContractRoundTrip(t *testing.T) {
 		ctx,
 		pythonExecutable,
 		"-m",
-		"rag_ai.document_processor_cli",
+		"rag_ai.entrypoints.document_processing_cli",
 	)
 	command.Dir = aiRoot
 	command.Env = append(

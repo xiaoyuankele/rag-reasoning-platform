@@ -1,15 +1,13 @@
-"""文档解析阶段使用的稳定内部错误。"""
+"""文档处理流程中与传输协议和解析库无关的稳定错误。"""
 
 from __future__ import annotations
 
 
-# Retryability belongs to the error category, not to an individual parser.
-# Keeping the policy in one table prevents PDF and DOCX implementations from
-# returning contradictory retry decisions for the same stable error code.
 ERROR_RETRYABILITY: dict[str, bool] = {
+    "invalid_request": False,
     "unsupported_format": False,
     "source_not_found": False,
-    "source_access_denied": False,
+    "source_access_denied": True,
     "password_required": False,
     "extraction_not_permitted": False,
     "ocr_required": False,
@@ -40,7 +38,7 @@ def retryable_for(code: str) -> bool:
 
 
 class DocumentProcessingError(Exception):
-    """与 JSON 传输格式无关、可以预期的文档处理失败。
+    """与 JSON 传输格式和解析库无关、可以预期的文档处理失败。
 
     Attributes:
         code: 供程序稳定判断的错误码。

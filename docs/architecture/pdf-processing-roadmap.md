@@ -125,36 +125,34 @@ type ChunkInput struct {
 
 ## 7. Python 内部结构
 
-第一版保持最小结构：
+随着普通数字 PDF 纵向链路稳定，Python 已从最小脚本结构渐进整理为轻量分层结构：
 
 ```text
 ai/src/rag_ai/
-├─ document_processor_cli.py
-├─ document_processing_contract.py
-└─ parsing/
-   ├─ errors.py
-   └─ pdf.py
+├─ domain/                         # 稳定模型和处理错误
+├─ application/                    # 文档处理用例与端口
+├─ contracts/
+│  └─ document_processing_v1.py    # Go/Python v1 JSON 契约
+├─ entrypoints/
+│  ├─ document_processing_cli.py   # stdin/stdout 进程入口与组合根
+│  └─ document_processing_handler.py # 契约 DTO 与领域对象转换
+└─ infrastructure/
+   ├─ parsing/pypdf_extractor.py   # pypdf 页面提取适配器
+   └─ splitting/simple_text_splitter.py # 轻量文本分块适配器
 ```
 
 责任边界：
 
-- `document_processor_cli.py`：只负责 stdin、stdout 和最终异常边界；
-- `document_processing_contract.py`：只负责 v1 请求/响应契约；
-- `parsing/errors.py`：定义 Python 内部稳定处理错误；
-- `parsing/pdf.py`：负责 PDF 预检、逐页提取、规范化和分块。
+- `contracts/document_processing_v1.py`：只负责 v1 请求/响应 DTO、校验和序列化载荷；
+- `entrypoints/document_processing_cli.py`：只负责 stdin、stdout、依赖组装和最终异常边界；
+- `entrypoints/document_processing_handler.py`：负责契约 DTO 与领域对象的双向转换；
+- `application/document_processor.py`：编排提取、规范化和分块，不认识 JSON 或 pypdf；
+- `application/ports.py`：定义入站用例与出站提取、切分端口；
+- `infrastructure/`：实现 pypdf 和具体文本切分能力。
 
-`pdf.py` 初期可以使用几个小函数，不提前拆出大量类：
-
-```text
-process_pdf
-  -> open_and_validate_pdf
-  -> extract_pages
-  -> detect_ocr_requirement
-  -> normalize_page_text
-  -> build_chunks
-```
-
-当出现第二种 PDF 引擎或 OCR 实现时，再抽取 `PDFTextExtractor` 接口。
+依赖方向保持为 `entrypoints -> application -> domain`，基础设施通过 application 定义的
+Protocol 插入用例。未来加入 OCR、DOCX 或 LangChain 时优先增加适配器，不让框架对象渗透
+到 application 和 domain。
 
 ## 8. 解析库策略
 

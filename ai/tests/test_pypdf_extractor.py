@@ -15,10 +15,11 @@ AI_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = AI_ROOT / "src"
 sys.path.insert(0, str(SOURCE_ROOT))
 
-from rag_ai.parsing.errors import DocumentProcessingError  # noqa: E402
-from rag_ai.parsing.pdf import (  # noqa: E402
-    PDFPageText,
+from rag_ai.domain.errors import DocumentProcessingError  # noqa: E402
+from rag_ai.domain.models import PageText  # noqa: E402
+from rag_ai.infrastructure.parsing.pypdf_extractor import (  # noqa: E402
     PDFPreflightResult,
+    PyPDFPageExtractor,
     _validate_page_count,
     extract_pdf_pages,
     preflight_pdf,
@@ -184,6 +185,22 @@ class PDFPreflightTests(unittest.TestCase):
 
 
 class PDFTextExtractionTests(unittest.TestCase):
+    def test_pypdf_extractor_satisfies_page_extraction_port(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "adapter.pdf"
+            write_text_pdf(source_path, ["adapter page"])
+
+            pages = PyPDFPageExtractor().extract(
+                source_path,
+                max_file_bytes=1024 * 1024,
+                max_pages=10,
+            )
+
+        self.assertEqual(
+            pages,
+            [PageText(page_number=1, text="adapter page")],
+        )
+
     def test_extract_pdf_pages_preserves_page_numbers_and_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source_path = Path(directory) / "two-pages.pdf"
@@ -201,8 +218,8 @@ class PDFTextExtractionTests(unittest.TestCase):
         self.assertEqual(
             pages,
             [
-                PDFPageText(page_number=1, text="First page text"),
-                PDFPageText(page_number=2, text="Second page text"),
+                PageText(page_number=1, text="First page text"),
+                PageText(page_number=2, text="Second page text"),
             ],
         )
 
@@ -219,7 +236,7 @@ class PDFTextExtractionTests(unittest.TestCase):
 
         self.assertEqual(
             pages,
-            [PDFPageText(page_number=1, text="")],
+            [PageText(page_number=1, text="")],
         )
 
 

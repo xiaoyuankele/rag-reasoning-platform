@@ -16,7 +16,7 @@ AI_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = AI_ROOT / "src"
 sys.path.insert(0, str(SOURCE_ROOT))
 
-from rag_ai.document_processing_contract import (  # noqa: E402
+from rag_ai.contracts.document_processing_v1 import (  # noqa: E402
     CONTRACT_VERSION,
     ContractError,
     ProcessingChunk,
@@ -147,7 +147,11 @@ class ProcessorCLITests(unittest.TestCase):
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(SOURCE_ROOT)
         return subprocess.run(
-            [sys.executable, "-m", "rag_ai.document_processor_cli"],
+            [
+                sys.executable,
+                "-m",
+                "rag_ai.entrypoints.document_processing_cli",
+            ],
             input=input_text,
             text=True,
             capture_output=True,

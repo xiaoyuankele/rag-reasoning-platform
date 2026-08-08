@@ -9,7 +9,7 @@ AI_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = AI_ROOT / "src"
 sys.path.insert(0, str(SOURCE_ROOT))
 
-from rag_ai.parsing.errors import (  # noqa: E402
+from rag_ai.domain.errors import (  # noqa: E402
     DocumentProcessingError,
     ERROR_RETRYABILITY,
     retryable_for,

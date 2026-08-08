@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	pythonProcessorModule     = "rag_ai.document_processor_cli"
+	pythonProcessorModule     = "rag_ai.entrypoints.document_processing_cli"
 	defaultMaxChunkCharacters = 1000
 	defaultMaxStdoutBytes     = 32 * 1024 * 1024
 	defaultMaxStderrBytes     = 1 * 1024 * 1024
