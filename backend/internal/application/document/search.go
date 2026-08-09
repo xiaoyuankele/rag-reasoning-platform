@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	// MaxSearchQueryRunes 限制一次关键词查询最多包含的 Unicode 字符数。 
-	// 使用字符数而不是字节数，避免中文等多字节字符受到不公平限制。 
+	// MaxSearchQueryRunes 限制一次关键词查询最多包含的 Unicode 字符数。
+	// 使用字符数而不是字节数，避免中文等多字节字符受到不公平限制。
 	MaxSearchQueryRunes = 200
 )
 
