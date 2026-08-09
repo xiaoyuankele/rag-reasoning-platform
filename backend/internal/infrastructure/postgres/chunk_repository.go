@@ -17,6 +17,7 @@ type ChunkRepository struct {
 }
 
 var _ document.ChunkRepository = (*ChunkRepository)(nil)
+var _ document.ChunkSearcher = (*ChunkRepository)(nil)
 
 // NewChunkRepository 创建 PostgreSQL 文本块仓储。
 func NewChunkRepository(pool *pgxpool.Pool) *ChunkRepository {
@@ -211,6 +212,108 @@ func (r *ChunkRepository) ListByDocumentID(
 	return textChunks, nil
 }
 
+// Search 跨 ready 文档检索包含指定关键词的统一文本块。
+//
+// P3 第一版使用大小写不敏感的字面子串匹配，保证连续中文和英文都能正确
+// 检索。相关性评分、专用索引和中文分词将在真实数据测量后逐步增加。
+func (r *ChunkRepository) Search(
+	ctx context.Context,
+	options document.SearchOptions,
+) (document.SearchResult, error) {
+	const countQuery = `
+		SELECT COUNT(*)
+		FROM text_chunks AS chunk
+		JOIN documents AS source_document
+			ON source_document.id = chunk.document_id
+		WHERE source_document.status = $1
+		  AND STRPOS(LOWER(chunk.content), LOWER($2)) > 0
+	`
+
+	var total int64
+	if err := r.pool.QueryRow(
+		ctx,
+		countQuery,
+		document.StatusReady,
+		options.Query,
+	).Scan(&total); err != nil {
+		return document.SearchResult{}, fmt.Errorf(
+			"count matching document chunks: %w",
+			err,
+		)
+	}
+
+	// 即使没有命中也返回非 nil 空切片，保证上层能够稳定输出 JSON []。
+	hits := make([]document.SearchHit, 0)
+	if total == 0 {
+		return document.SearchResult{
+			Hits:  hits,
+			Total: 0,
+		}, nil
+	}
+
+	const searchQuery = `
+		SELECT
+			chunk.id,
+			chunk.document_id,
+			chunk.chunk_index,
+			source_document.original_name,
+			source_document.mime_type,
+			chunk.content,
+			chunk.page_start,
+			chunk.page_end
+		FROM text_chunks AS chunk
+		JOIN documents AS source_document
+			ON source_document.id = chunk.document_id
+		WHERE source_document.status = $1
+		  AND STRPOS(LOWER(chunk.content), LOWER($2)) > 0
+		ORDER BY
+			source_document.created_at DESC,
+			source_document.id DESC,
+			chunk.chunk_index ASC,
+			chunk.id ASC
+		LIMIT $3
+		OFFSET $4
+	`
+
+	rows, err := r.pool.Query(
+		ctx,
+		searchQuery,
+		document.StatusReady,
+		options.Query,
+		options.Limit,
+		options.Offset,
+	)
+	if err != nil {
+		return document.SearchResult{}, fmt.Errorf(
+			"query matching document chunks: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		hit, err := scanSearchHit(rows)
+		if err != nil {
+			return document.SearchResult{}, fmt.Errorf(
+				"scan matching document chunk: %w",
+				err,
+			)
+		}
+		hits = append(hits, hit)
+	}
+	if err := rows.Err(); err != nil {
+		return document.SearchResult{}, fmt.Errorf(
+			"iterate matching document chunks: %w",
+			err,
+		)
+	}
+
+	return document.SearchResult{
+		Hits:  hits,
+		Total: total,
+	}, nil
+}
+
 func scanTextChunk(row pgx.Row) (document.TextChunk, error) {
 	var chunk document.TextChunk
 
@@ -228,4 +331,25 @@ func scanTextChunk(row pgx.Row) (document.TextChunk, error) {
 	}
 
 	return chunk, nil
+}
+
+// scanSearchHit 把文档与文本块 JOIN 后的一行转换成搜索命中模型。
+func scanSearchHit(row pgx.Row) (document.SearchHit, error) {
+	var hit document.SearchHit
+
+	err := row.Scan(
+		&hit.ChunkID,
+		&hit.DocumentID,
+		&hit.ChunkIndex,
+		&hit.OriginalName,
+		&hit.MIMEType,
+		&hit.Content,
+		&hit.PageStart,
+		&hit.PageEnd,
+	)
+	if err != nil {
+		return document.SearchHit{}, err
+	}
+
+	return hit, nil
 }
