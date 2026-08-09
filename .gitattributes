@@ -1,0 +1,2 @@
+# PostgreSQL 迁移会参与校验和计算，必须在所有操作系统上保持 LF 换行。
+/backend/migrations/*.sql text eol=lf

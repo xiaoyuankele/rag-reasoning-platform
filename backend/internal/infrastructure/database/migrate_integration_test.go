@@ -1,7 +1,9 @@
 package database_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io/fs"
 	"os"
@@ -200,6 +202,57 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 		t.Fatalf(
 			"Migrate() changed-file error = %v, want checksum error",
 			err,
+		)
+	}
+
+	// 模拟旧版迁移器曾按 CRLF 原始字节保存校验值。新版必须先严格确认
+	// 该旧值与当前源文件一致，再把数据库记录升级为规范化 LF 校验值。
+	legacyContent := []byte(
+		"CREATE TABLE legacy_line_endings (id BIGINT);\r\n",
+	)
+	legacyMigration := fstest.MapFS{
+		"000100_legacy_line_endings.up.sql": {
+			Data: legacyContent,
+		},
+	}
+	if err := database.Migrate(ctx, testPool, legacyMigration); err != nil {
+		t.Fatalf("apply legacy-line-ending migration: %v", err)
+	}
+
+	legacyChecksum := fmt.Sprintf("%x", sha256.Sum256(legacyContent))
+	if _, err := testPool.Exec(
+		ctx,
+		"UPDATE schema_migrations SET checksum = $1 WHERE version = 100",
+		legacyChecksum,
+	); err != nil {
+		t.Fatalf("set simulated legacy checksum: %v", err)
+	}
+
+	if err := database.Migrate(ctx, testPool, legacyMigration); err != nil {
+		t.Fatalf("upgrade legacy-line-ending checksum: %v", err)
+	}
+
+	normalizedLegacyContent := bytes.ReplaceAll(
+		legacyContent,
+		[]byte("\r\n"),
+		[]byte("\n"),
+	)
+	expectedNormalizedChecksum := fmt.Sprintf(
+		"%x",
+		sha256.Sum256(normalizedLegacyContent),
+	)
+	var upgradedChecksum string
+	if err := testPool.QueryRow(
+		ctx,
+		"SELECT checksum FROM schema_migrations WHERE version = 100",
+	).Scan(&upgradedChecksum); err != nil {
+		t.Fatalf("query upgraded legacy checksum: %v", err)
+	}
+	if upgradedChecksum != expectedNormalizedChecksum {
+		t.Fatalf(
+			"upgraded checksum = %q, want %q",
+			upgradedChecksum,
+			expectedNormalizedChecksum,
 		)
 	}
 }

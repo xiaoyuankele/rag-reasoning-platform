@@ -1,6 +1,7 @@
 package database
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -19,17 +20,18 @@ import (
 const migrationAdvisoryLockID int64 = 726031551
 
 type migration struct {
-	version  int64
-	name     string
-	filename string
-	checksum string
-	sql      string
+	version        int64
+	name           string
+	filename       string
+	checksum       string
+	sourceChecksum string
+	sql            string
 }
 
 // Migrate 按版本顺序执行尚未应用的 PostgreSQL 正向迁移。
 //
-// 每条迁移都在独立事务中执行；已应用迁移会校验文件名和 SHA-256，
-// 防止历史 SQL 被静默修改。
+// 每条迁移都在独立事务中执行；已应用迁移会校验文件名和规范化后的
+// SHA-256，既防止历史 SQL 被静默修改，也避免操作系统换行造成误报。
 func Migrate(
 	ctx context.Context,
 	pool *pgxpool.Pool,
@@ -187,15 +189,32 @@ func readMigration(
 		)
 	}
 
-	checksum := fmt.Sprintf("%x", sha256.Sum256(content))
+	// SQL 换行不改变数据库语义，因此校验和统一使用 LF。sourceChecksum
+	// 只用于识别并安全升级旧版迁移器保存的原始字节校验值。
+	normalizedContent := normalizeMigrationLineEndings(content)
+	checksum := migrationChecksum(normalizedContent)
+	sourceChecksum := migrationChecksum(content)
 
 	return migration{
-		version:  version,
-		name:     name,
-		filename: filename,
-		checksum: checksum,
-		sql:      string(content),
+		version:        version,
+		name:           name,
+		filename:       filename,
+		checksum:       checksum,
+		sourceChecksum: sourceChecksum,
+		sql:            string(normalizedContent),
 	}, nil
+}
+
+// normalizeMigrationLineEndings 把 Windows CRLF 和旧式 CR 统一成 LF。
+//
+// 必须先替换 CRLF，再替换剩余 CR，否则一个 CRLF 可能被错误处理成两次换行。
+func normalizeMigrationLineEndings(content []byte) []byte {
+	normalized := bytes.ReplaceAll(content, []byte("\r\n"), []byte("\n"))
+	return bytes.ReplaceAll(normalized, []byte("\r"), []byte("\n"))
+}
+
+func migrationChecksum(content []byte) string {
+	return fmt.Sprintf("%x", sha256.Sum256(content))
 }
 
 func migrationIsApplied(
@@ -227,15 +246,54 @@ func migrationIsApplied(
 		)
 	}
 
-	if appliedName != currentMigration.name ||
-		appliedChecksum != currentMigration.checksum {
+	if appliedName != currentMigration.name {
 		return false, fmt.Errorf(
 			"migration version %d changed after it was applied",
 			currentMigration.version,
 		)
 	}
 
-	return true, nil
+	if appliedChecksum == currentMigration.checksum {
+		return true, nil
+	}
+
+	// 旧版迁移器直接对工作区原始字节计算校验和。只有数据库保存值与
+	// 当前原始文件完全一致时，才能证明 SQL 没有被修改，并把记录升级
+	// 为跨平台稳定的 LF 校验值。整个过程处于 advisory lock 保护下。
+	if appliedChecksum == currentMigration.sourceChecksum {
+		commandTag, err := connection.Exec(
+			ctx,
+			`
+				UPDATE schema_migrations
+				SET checksum = $1
+				WHERE version = $2
+				  AND checksum = $3
+			`,
+			currentMigration.checksum,
+			currentMigration.version,
+			appliedChecksum,
+		)
+		if err != nil {
+			return false, fmt.Errorf(
+				"upgrade migration version %d checksum: %w",
+				currentMigration.version,
+				err,
+			)
+		}
+		if commandTag.RowsAffected() != 1 {
+			return false, fmt.Errorf(
+				"upgrade migration version %d checksum: expected one updated row",
+				currentMigration.version,
+			)
+		}
+
+		return true, nil
+	}
+
+	return false, fmt.Errorf(
+		"migration version %d changed after it was applied",
+		currentMigration.version,
+	)
 }
 
 func applyMigration(

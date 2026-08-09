@@ -5,6 +5,52 @@ import (
 	"testing/fstest"
 )
 
+func TestReadMigrationNormalizesLineEndings(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "LF", content: "SELECT 1;\nSELECT 2;\n"},
+		{name: "CRLF", content: "SELECT 1;\r\nSELECT 2;\r\n"},
+		{name: "CR", content: "SELECT 1;\rSELECT 2;\r"},
+	}
+
+	var expectedChecksum string
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			loaded, err := readMigration(
+				fstest.MapFS{
+					"000001_line_endings.up.sql": {
+						Data: []byte(test.content),
+					},
+				},
+				"000001_line_endings.up.sql",
+			)
+			if err != nil {
+				t.Fatalf("readMigration() error = %v, want nil", err)
+			}
+
+			if loaded.sql != "SELECT 1;\nSELECT 2;\n" {
+				t.Fatalf(
+					"readMigration() SQL = %q, want normalized LF SQL",
+					loaded.sql,
+				)
+			}
+
+			if expectedChecksum == "" {
+				expectedChecksum = loaded.checksum
+			}
+			if loaded.checksum != expectedChecksum {
+				t.Fatalf(
+					"readMigration() checksum = %q, want %q",
+					loaded.checksum,
+					expectedChecksum,
+				)
+			}
+		})
+	}
+}
+
 func TestLoadMigrationsSortsByNumericVersion(t *testing.T) {
 	files := fstest.MapFS{
 		"000010_tenth.up.sql": {
