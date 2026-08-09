@@ -8,6 +8,8 @@
     "mime_type": "application/pdf"
   },
   "options": {
-    "max_chunk_characters": 1000
+    "max_chunk_characters": 1000,
+    "max_pdf_file_bytes": 52428800,
+    "max_pdf_pages": 500
   }
 }

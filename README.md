@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P2（异步解析链路，进行中）。文档上传、详情、分页列表和删除接口已经实现并验证；PostgreSQL 自动迁移、解析任务表、任务排队、任务状态查询以及 Worker 的领取与状态收尾已经完成；统一文本块表、领域模型和 PostgreSQL 仓储已经建立。Go 原生 Markdown/TXT 处理器已经能够安全读取本地文件、规范化 UTF-8 文本并生成统一文本块。单并发 Worker 常驻循环、单次处理超时、安全退出、异常中断任务恢复以及按 MIME 选择处理器的调度边界已经接入生产入口。Go/Python v1 JSON 契约和最小 Python CLI 已建立；真实 PDF/DOCX 解析器和生产子进程适配器尚未实现。
+> 当前状态：P2（异步解析链路，已完成）。文档上传、详情、分页列表、删除、解析任务排队与状态查询已经形成完整 HTTP 主链路；PostgreSQL 自动迁移、单并发 Worker、异常任务恢复、处理超时与安全退出已经接入生产入口。Markdown/TXT 由 Go 原生处理，普通数字 PDF 通过版本化 JSON 契约交给 Python 子进程逐页提取并生成带页码的统一文本块。真实中英文学术 PDF 已完成 HTTP 上传、排队、异步处理、文本块入库和 `ready` 状态验收。下一阶段进入 P3 检索；DOCX、OCR 和复杂学术版面质量属于后续增量能力。
 
 ## 项目目标
 
@@ -60,8 +60,11 @@ rag_reasoning_platform_individual/
 │  └─ migrations/               # PostgreSQL 数据库迁移
 ├─ ai/                          # Python 文档处理与 AI 能力
 │  ├─ src/rag_ai/
-│  │  ├─ parsing/               # PDF 解析
-│  │  ├─ chunking/              # 文本分块
+│  │  ├─ domain/                # 框架无关模型与稳定处理错误
+│  │  ├─ application/           # 文档处理用例与 Protocol 端口
+│  │  ├─ contracts/             # Python 侧版本化 JSON DTO 与校验
+│  │  ├─ entrypoints/           # CLI 入口、依赖组装和边界转换
+│  │  ├─ infrastructure/        # pypdf 与文本切分具体适配器
 │  │  ├─ embedding/             # 向量化（后期）
 │  │  ├─ retrieval/             # 语义检索（后期）
 │  │  └─ generation/            # 摘要与问答（后期）
@@ -117,6 +120,23 @@ rag_reasoning_platform_individual/
 - **P4：AI 增强**——向量检索、带来源引用的摘要或问答，以及失败降级。
 - **P5：工程化**——测试、日志、配置校验、部署、性能记录和求职材料。
 
+### 当前里程碑进度（2026-08-09）
+
+| 阶段 | 状态 | 当前结论 |
+| --- | --- | --- |
+| P0 | 已完成 | 仓库、目录、忽略规则、配置模板和项目说明已经建立 |
+| P1 | 已完成 | Go 服务、PostgreSQL、迁移、文档增删查和真实 HTTP 验证已经完成 |
+| P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
+| P3 | 下一阶段 | 基于已经稳定入库的统一文本块实现全文检索、过滤、排序和可测量的查询接口 |
+| P4 | 尚未开始 | 在检索链路可测量后再加入向量检索、摘要和问答 |
+| P5 | 部分进行 | 测试、配置、安全关闭和错误包装持续建设；正式部署和性能记录尚未完成 |
+
+PDF 文献处理的错误分类、页码来源、资源限制、解析库选择和分阶段验收标准见
+[PDF 文献处理架构与分阶段路线](docs/architecture/pdf-processing-roadmap.md)。
+
+Python 类、函数和方法的中文 IDE 悬停说明要求见
+[Python Docstring 与 IDE 悬停说明规范](docs/development/python-docstrings.md)。
+
 ## 本地开发状态
 
 Go 后端已经可以运行，目前提供 `GET /health` 健康检查接口。该接口已通过真实 HTTP 请求和 Go 自动化测试验证。
@@ -129,7 +149,7 @@ SQL 迁移已经建立 `documents`、`document_jobs` 和 `text_chunks` 表。迁
 
 文档领域模型已定义与数据库字段对应的 Go 结构体、强类型处理状态和合法状态流转，并已通过表驱动测试验证。
 
-PostgreSQL 文档仓储已实现 `Create`、`GetByID`、分页 `List` 和 `Delete`。真实数据库集成测试已验证插入、按 ID 查询、领域级 `ErrNotFound` 转换、总数统计、稳定倒序、`LIMIT/OFFSET` 分页、空页结果、删除、重复删除的 `ErrNotFound` 转换和测试数据清理。
+PostgreSQL 文档仓储已实现 `Create`、`GetByID`、分页 `List` 和 `Delete`。真实数据库集成测试已验证插入、按 ID 查询、领域级 `ErrNotFound` 转换、总数统计、稳定倒序、`LIMIT/OFFSET` 分页、空页结果、删除和重复删除。分页测试使用独立临时 schema，默认并行运行全部数据库测试时不会受到其他包的临时数据干扰，并会在结束后自动清理测试 schema。
 
 文档应用服务已实现 `GetByID`、分页 `List` 和 `Delete` 用例，负责校验文档 ID 与分页参数、把 `page/page_size` 转换为 `limit/offset`、计算总页数，以及按“查询记录、删除文件、删除数据库记录”的顺序编排删除流程；相关单元测试和 Go 全量测试均已通过。
 
@@ -161,14 +181,15 @@ Worker Application 已定义可替换的文档处理器端口，并实现单次�
 
 服务启动时会在 Worker 运行前恢复上一次异常退出遗留的 `processing` 任务，并在同一 PostgreSQL 事务内把任务和关联文档标记为 `failed`。真实启动测试已验证恢复数量、双表状态一致性、安全错误信息和第二次启动的幂等性。当前恢复策略建立在单实例 Worker 约束上；未来扩展为多实例时需要使用 lease/heartbeat 判断任务是否真正失联。
 
-`ProcessorDispatcher` 已作为统一处理器入口接入 Worker，根据数据库中的可信 MIME 类型选择具体实现。`text/markdown` 和 `text/plain` 当前路由到 Go `TextProcessor`；尚未注册的格式会返回可判断的错误，而不会误用文本处理器。后续 Python PDF/DOCX 适配器只需实现相同 `DocumentProcessor` 接口并增加注册项，Worker 的任务领取、超时、文本块保存和状态收尾流程不需要修改。
+`ProcessorDispatcher` 已作为统一处理器入口接入 Worker，根据数据库中的可信 MIME 类型选择具体实现。`text/markdown` 和 `text/plain` 路由到 Go `TextProcessor`，`application/pdf` 路由到生产 `PythonProcessor`；尚未注册的格式会返回可判断的错误，而不会误用其他处理器。未来增加 DOCX、OCR 或替换 PDF 解析器时，可以继续添加或替换适配器，Worker 的任务领取、超时、文本块保存和状态收尾流程不需要修改。
 
-Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义版本化请求、成功响应、失败响应、稳定错误码、示例和进程通信规则。Go 基础设施层已经实现请求构造、JSON 编码、严格响应解码、文本块不变量校验和结构化 Python 失败错误；Python 使用标准库实现单请求 CLI、严格字段校验和结构化失败输出。自动化测试已验证 Go 和 Python 各自的协议边界，并通过真实子进程完成 stdin/stdout 往返。当前 CLI 仍会对 PDF/DOCX 返回 `unsupported_format`；下一步是实现生产子进程适配器和首个真实复杂文档解析器。
+Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义版本化请求、成功响应、失败响应、稳定错误码、示例和进程通信规则。Go 基础设施层已经实现安全绝对路径解析、请求构造、UTF-8 JSON 编码、严格响应解码、文本块不变量校验、结构化 Python 失败错误、子进程超时取消和 stdout/stderr 输出上限。生产 `PythonProcessor` 已注册到 `application/pdf`，自动化测试覆盖成功、结构化失败、非法响应、进程崩溃、超时与输出超限。Python 内部已经按 domain、application、contracts、entrypoints 和 infrastructure 完成轻量分层；pypdf 与简单文本切分器通过 application 定义的 Protocol 接入，不向核心层暴露第三方框架对象。Python PDF 处理能够识别伪造或损坏文件、密码要求、提取权限限制、OCR 需求以及文件和页数超限，并能对普通数字 PDF 逐页提取、规范化、页内分块和返回物理页码。真实英文文献已生成 126 个带页码文本块，真实中文文献已生成 42 个带页码文本块；二者均通过 HTTP 上传、Worker 异步处理、PostgreSQL 入库和 `ready` 状态验收。连字、页眉页脚、双栏和表格阅读顺序等质量改进留在 PDF-4 阶段。
 
-Python 契约测试不需要虚拟环境或第三方依赖：
+Python PDF 测试依赖 `ai/pyproject.toml` 中锁定的解析库。首次运行前安装项目依赖，然后执行测试：
 
 ```powershell
 cd ai
+python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
@@ -187,6 +208,10 @@ Go 后端当前支持以下环境变量：
 | `DB_SSLMODE` | `disable` | 本地开发时的 PostgreSQL SSL 模式 |
 | `STORAGE_ROOT` | `../storage` | 从 `backend` 目录运行时使用的本地文档存储根目录 |
 | `STORAGE_MAX_FILE_SIZE_BYTES` | `209715200` | 单个上传文件允许的最大字节数，即 200 MiB |
+| `PYTHON_EXECUTABLE` | `python` | Go 启动复杂文档处理子进程时使用的 Python 可执行程序 |
+| `PYTHON_SOURCE_ROOT` | `../ai/src` | 包含 `rag_ai` 包的 Python 源码目录，以 `backend` 为当前工作目录 |
+| `PYTHON_PDF_MAX_FILE_SIZE_BYTES` | `52428800` | PDF 解析文件上限，即 50 MiB；独立于上传上限 |
+| `PYTHON_PDF_MAX_PAGES` | `500` | 单份 PDF 允许解析的最大页数 |
 
 `.env.example` 是可以提交到 Git 的配置模板，不得包含密码或真实密钥。`.env` 用于保存本机配置和密钥，已被 Git 忽略。
 

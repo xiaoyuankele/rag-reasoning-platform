@@ -22,6 +22,8 @@ const (
 	maxRequestIDLength        = 128
 	maxChunkCharactersMinimum = 1
 	maxChunkCharactersMaximum = 100000
+	maxPDFFileBytesMaximum    = 1024 * 1024 * 1024
+	maxPDFPagesMaximum        = 10000
 )
 
 var (
@@ -39,12 +41,17 @@ var (
 )
 
 var supportedFailureCodes = map[string]struct{}{
-	"invalid_request":    {},
-	"unsupported_format": {},
-	"source_not_found":   {},
-	"invalid_content":    {},
-	"parse_failed":       {},
-	"internal_error":     {},
+	"invalid_request":          {},
+	"unsupported_format":       {},
+	"source_not_found":         {},
+	"source_access_denied":     {},
+	"password_required":        {},
+	"extraction_not_permitted": {},
+	"ocr_required":             {},
+	"invalid_content":          {},
+	"resource_limit_exceeded":  {},
+	"parse_failed":             {},
+	"internal_error":           {},
 }
 
 type processRequest struct {
@@ -62,7 +69,9 @@ type processDocument struct {
 }
 
 type processOptions struct {
-	MaxChunkCharacters int `json:"max_chunk_characters"`
+	MaxChunkCharacters int   `json:"max_chunk_characters"`
+	MaxPDFFileBytes    int64 `json:"max_pdf_file_bytes"`
+	MaxPDFPages        int   `json:"max_pdf_pages"`
 }
 
 type processResponse struct {
@@ -74,8 +83,10 @@ type processResponse struct {
 }
 
 type processChunk struct {
-	Index   int    `json:"index"`
-	Content string `json:"content"`
+	Index     int    `json:"index"`
+	Content   string `json:"content"`
+	PageStart *int   `json:"page_start,omitempty"`
+	PageEnd   *int   `json:"page_end,omitempty"`
 }
 
 type processFailure struct {
@@ -106,6 +117,8 @@ func newProcessRequest(
 	document documentdomain.Document,
 	sourcePath string,
 	maxChunkCharacters int,
+	maxPDFFileBytes int64,
+	maxPDFPages int,
 ) (processRequest, error) {
 	requestID = strings.TrimSpace(requestID)
 	sourcePath = strings.TrimSpace(sourcePath)
@@ -156,6 +169,18 @@ func newProcessRequest(
 			maxChunkCharactersMinimum,
 			maxChunkCharactersMaximum,
 		)
+	case maxPDFFileBytes < 1 || maxPDFFileBytes > maxPDFFileBytesMaximum:
+		return processRequest{}, fmt.Errorf(
+			"%w: max PDF file bytes must be between 1 and %d",
+			ErrInvalidProcessRequest,
+			maxPDFFileBytesMaximum,
+		)
+	case maxPDFPages < 1 || maxPDFPages > maxPDFPagesMaximum:
+		return processRequest{}, fmt.Errorf(
+			"%w: max PDF pages must be between 1 and %d",
+			ErrInvalidProcessRequest,
+			maxPDFPagesMaximum,
+		)
 	}
 
 	return processRequest{
@@ -169,6 +194,8 @@ func newProcessRequest(
 		},
 		Options: processOptions{
 			MaxChunkCharacters: maxChunkCharacters,
+			MaxPDFFileBytes:    maxPDFFileBytes,
+			MaxPDFPages:        maxPDFPages,
 		},
 	}, nil
 }
@@ -258,8 +285,10 @@ func decodeProcessResponse(
 		)
 		for index, chunk := range response.Chunks {
 			chunks[index] = documentdomain.ChunkInput{
-				Index:   chunk.Index,
-				Content: chunk.Content,
+				Index:     chunk.Index,
+				Content:   chunk.Content,
+				PageStart: chunk.PageStart,
+				PageEnd:   chunk.PageEnd,
 			}
 		}
 
@@ -315,6 +344,20 @@ func validateProcessChunks(chunks []processChunk) error {
 		if strings.TrimSpace(chunk.Content) == "" {
 			return fmt.Errorf(
 				"%w: chunk %d content must not be blank",
+				ErrInvalidProcessResponse,
+				expectedIndex,
+			)
+		}
+
+		chunkInput := documentdomain.ChunkInput{
+			Index:     chunk.Index,
+			Content:   chunk.Content,
+			PageStart: chunk.PageStart,
+			PageEnd:   chunk.PageEnd,
+		}
+		if !chunkInput.HasValidPageRange() {
+			return fmt.Errorf(
+				"%w: chunk %d has an invalid page range",
 				ErrInvalidProcessResponse,
 				expectedIndex,
 			)

@@ -18,6 +18,7 @@ import (
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
+	"rag-reasoning-platform/backend/internal/infrastructure/pythonprocessor"
 	"rag-reasoning-platform/backend/migrations"
 )
 
@@ -70,6 +71,11 @@ func run(ctx context.Context) error {
 	workerConfig, err := config.LoadWorker()
 	if err != nil {
 		return fmt.Errorf("load worker configuration: %w", err)
+	}
+
+	pythonConfig, err := config.LoadPython()
+	if err != nil {
+		return fmt.Errorf("load Python processor configuration: %w", err)
 	}
 
 	// ConnectionString 包含密码，只传给数据库层，不写入日志。
@@ -129,12 +135,22 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create local file storage: %w", err)
 	}
 	// 必须先确认 LocalStorage 创建成功，再把它交给 TextProcessor。
-
+	pythonDocumentProcessor, err := pythonprocessor.NewProcessor(
+		localFileStorage,
+		pythonConfig.Executable,
+		pythonConfig.SourceRoot,
+		pythonConfig.PDFMaxFileSizeBytes,
+		pythonConfig.PDFMaxPages,
+	)
+	if err != nil {
+		return fmt.Errorf("create Python document processor: %w", err)
+	}
 	textProcessor := documentapplication.NewTextProcessor(localFileStorage)
 	processorDispatcher, err := documentapplication.NewProcessorDispatcher(
 		map[string]documentapplication.DocumentProcessor{
-			"text/markdown": textProcessor,
-			"text/plain":    textProcessor,
+			"text/markdown":   textProcessor,
+			"text/plain":      textProcessor,
+			"application/pdf": pythonDocumentProcessor,
 		},
 	)
 	if err != nil {

@@ -3,6 +3,7 @@ package database_test
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -163,6 +164,17 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 		t.Fatal("text_chunks cascading document foreign key was not created")
 	}
 
+	// 期望数量直接来自编译进后端的正向迁移文件，避免每次新增迁移后
+	// 还要手工同步一个容易遗忘的数字常量。
+	embeddedMigrationNames, err := fs.Glob(
+		migrations.Files,
+		"*.up.sql",
+	)
+	if err != nil {
+		t.Fatalf("list embedded migrations: %v", err)
+	}
+	expectedAppliedCount := len(embeddedMigrationNames)
+
 	var appliedCount int
 	if err := testPool.QueryRow(
 		ctx,
@@ -170,10 +182,11 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 	).Scan(&appliedCount); err != nil {
 		t.Fatalf("count schema migrations: %v", err)
 	}
-	if appliedCount != 3 {
+	if appliedCount != expectedAppliedCount {
 		t.Fatalf(
-			"applied migration count = %d, want 3",
+			"applied migration count = %d, want %d",
 			appliedCount,
+			expectedAppliedCount,
 		)
 	}
 

@@ -2,15 +2,37 @@ package document
 
 import (
 	"context"
+	"errors"
 	"time"
+)
+
+var ErrInvalidChunkPageRange = errors.New(
+	"chunk page range must be absent or contain positive ordered pages",
 )
 
 // ChunkInput 表示处理器生成、准备写入数据库的一条文本块。
 //
 // ID、DocumentID 和 CreatedAt 由仓储或数据库补充，因此不由处理器提供。
 type ChunkInput struct {
-	Index   int
-	Content string
+	Index     int
+	Content   string
+	PageStart *int
+	PageEnd   *int
+}
+
+// HasValidPageRange 判断文本块的来源页码是否满足领域约束。
+//
+// Markdown/TXT 没有固定页码，因此起止页都为 nil 是合法的。PDF 必须同时提供
+// 两个正数页码，并且结束页不能早于开始页。
+func (c ChunkInput) HasValidPageRange() bool {
+	if c.PageStart == nil && c.PageEnd == nil {
+		return true
+	}
+	if c.PageStart == nil || c.PageEnd == nil {
+		return false
+	}
+
+	return *c.PageStart > 0 && *c.PageEnd >= *c.PageStart
 }
 
 // TextChunk 表示一份文档中已经持久化的文本块。
@@ -19,6 +41,8 @@ type TextChunk struct {
 	DocumentID int64
 	Index      int
 	Content    string
+	PageStart  *int
+	PageEnd    *int
 	CreatedAt  time.Time
 }
 

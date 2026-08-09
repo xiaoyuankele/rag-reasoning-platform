@@ -7,10 +7,12 @@ name = "rag-reasoning-ai"
 version = "0.1.0"
 description = "Python document processing adapters for the RAG reasoning platform"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pypdf[crypto]==6.14.2",
+]
 
 [project.scripts]
-rag-document-processor = "rag_ai.document_processor_cli:main"
+rag-document-processor = "rag_ai.entrypoints.document_processing_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

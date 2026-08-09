@@ -9,11 +9,101 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"rag-reasoning-platform/backend/internal/config"
 	"rag-reasoning-platform/backend/internal/domain/document"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	postgresrepository "rag-reasoning-platform/backend/internal/infrastructure/postgres"
+	"rag-reasoning-platform/backend/migrations"
 )
+
+// openIsolatedDocumentTestPool 为单个仓储测试创建独立的 PostgreSQL schema。
+//
+// 生产仓储只依赖 *pgxpool.Pool，不需要知道 schema 的存在；测试通过
+// search_path 把连接池指向临时 schema，从而避免并行测试互相污染数据。
+func openIsolatedDocumentTestPool(
+	t *testing.T,
+	ctx context.Context,
+) *pgxpool.Pool {
+	t.Helper()
+
+	databaseConfig, err := config.LoadDatabase()
+	if err != nil {
+		t.Fatalf("load database configuration: %v", err)
+	}
+
+	// adminPool 连接默认 schema，负责创建和最终删除测试 schema。
+	adminPool, err := database.Open(
+		ctx,
+		databaseConfig.ConnectionString(),
+	)
+	if err != nil {
+		t.Fatalf("open admin database connection: %v", err)
+	}
+
+	// schema 名完全由测试代码生成，不包含外部输入。
+	schemaName := fmt.Sprintf(
+		"document_repository_test_%d",
+		time.Now().UnixNano(),
+	)
+	if _, err := adminPool.Exec(
+		ctx,
+		fmt.Sprintf(`CREATE SCHEMA "%s"`, schemaName),
+	); err != nil {
+		adminPool.Close()
+		t.Fatalf("create document repository test schema: %v", err)
+	}
+
+	// t.Cleanup 即使在测试调用 t.Fatal 提前结束时也会执行。
+	// 这个清理先注册；后面注册的 testPool.Close 会先执行，之后才能安全删 schema。
+	t.Cleanup(func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer cleanupCancel()
+		defer adminPool.Close()
+
+		if _, cleanupErr := adminPool.Exec(
+			cleanupContext,
+			fmt.Sprintf(`DROP SCHEMA "%s" CASCADE`, schemaName),
+		); cleanupErr != nil {
+			t.Errorf(
+				"drop document repository test schema %q: %v",
+				schemaName,
+				cleanupErr,
+			)
+		}
+	})
+
+	poolConfig, err := pgxpool.ParseConfig(
+		databaseConfig.ConnectionString(),
+	)
+	if err != nil {
+		t.Fatalf("parse document repository test pool configuration: %v", err)
+	}
+	poolConfig.MaxConns = 2
+	poolConfig.ConnConfig.RuntimeParams["search_path"] = schemaName
+
+	testPool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		t.Fatalf("create isolated document repository test pool: %v", err)
+	}
+	// Cleanup 按后进先出执行，因此连接池会在 DROP SCHEMA 之前关闭。
+	t.Cleanup(testPool.Close)
+
+	if err := testPool.Ping(ctx); err != nil {
+		t.Fatalf("ping isolated document repository test pool: %v", err)
+	}
+
+	// 新 schema 最初没有任何表，必须先执行与生产启动相同的嵌入式迁移。
+	if err := database.Migrate(ctx, testPool, migrations.Files); err != nil {
+		t.Fatalf("migrate isolated document repository test schema: %v", err)
+	}
+
+	return testPool
+}
 
 // TestDocumentRepositoryCreateAndGetByID 使用真实 PostgreSQL 验证仓储。
 func TestDocumentRepositoryCreateAndGetByID(t *testing.T) {
@@ -233,54 +323,10 @@ func TestDocumentRepositoryList(t *testing.T) {
 	)
 	defer cancel()
 
-	databaseConfig, err := config.LoadDatabase()
-	if err != nil {
-		t.Fatalf("load database configuration: %v", err)
-	}
-
-	pool, err := database.Open(
-		ctx,
-		databaseConfig.ConnectionString(),
-	)
-	if err != nil {
-		t.Fatalf("open database: %v", err)
-	}
-	defer pool.Close()
-
+	pool := openIsolatedDocumentTestPool(t, ctx)
 	repository := postgresrepository.NewDocumentRepository(pool)
 
-	// 先读取已有记录数，使测试不依赖数据库必须为空。
-	var originalTotal int64
-	if err := pool.QueryRow(
-		ctx,
-		"SELECT COUNT(*) FROM documents",
-	).Scan(&originalTotal); err != nil {
-		t.Fatalf("count existing documents: %v", err)
-	}
-
 	createdDocuments := make([]document.Document, 0, 3)
-	defer func() {
-		cleanupContext, cleanupCancel := context.WithTimeout(
-			context.Background(),
-			5*time.Second,
-		)
-		defer cleanupCancel()
-
-		for _, createdDocument := range createdDocuments {
-			_, cleanupErr := pool.Exec(
-				cleanupContext,
-				"DELETE FROM documents WHERE id = $1",
-				createdDocument.ID,
-			)
-			if cleanupErr != nil {
-				t.Errorf(
-					"clean up test document %d: %v",
-					createdDocument.ID,
-					cleanupErr,
-				)
-			}
-		}
-	}()
 
 	uniquePrefix := time.Now().UnixNano()
 	for index := 0; index < 3; index++ {
@@ -319,7 +365,8 @@ func TestDocumentRepositoryList(t *testing.T) {
 		t.Fatalf("list first page: %v", err)
 	}
 
-	expectedTotal := originalTotal + int64(len(createdDocuments))
+	// 独立 schema 中只有本测试创建的记录，因此总数必须严格等于 3。
+	expectedTotal := int64(len(createdDocuments))
 	if firstPage.Total != expectedTotal {
 		t.Fatalf(
 			"expected total %d, got %d",
