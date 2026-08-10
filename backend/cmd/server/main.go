@@ -164,6 +164,7 @@ func run(ctx context.Context) error {
 	documentService := documentapplication.NewService(documentRepository)
 	documentUploadService := documentapplication.NewUploadService(documentRepository, localFileStorage)
 	documentListService := documentapplication.NewListService(documentRepository)
+	documentSearchService := documentapplication.NewSearchService(chunkRepository)
 	documentDeleteService := documentapplication.NewDeleteService(documentRepository, localFileStorage)
 	documentProcessingService := documentapplication.NewQueueProcessingService(
 		documentRepository,
@@ -215,6 +216,7 @@ func run(ctx context.Context) error {
 	documentHandler := api.NewDocumentHandler(documentService)
 	documentUploadHandler := api.NewDocumentUploadHandler(documentUploadService, storageConfig.MaxFileSizeBytes)
 	documentListHandler := api.NewDocumentListHandler(documentListService)
+	documentSearchHandler := api.NewDocumentSearchHandler(documentSearchService)
 	documentDeleteHandler := api.NewDocumentDeleteHandler(documentDeleteService)
 	documentProcessingHandler := api.NewDocumentProcessingHandler(
 		documentProcessingService,
@@ -227,6 +229,7 @@ func run(ctx context.Context) error {
 	documentHandler.RegisterRoutes(router)
 	documentUploadHandler.RegisterRoutes(router)
 	documentListHandler.RegisterRoutes(router)
+	documentSearchHandler.RegisterRoutes(router)
 	documentDeleteHandler.RegisterRoutes(router)
 	documentProcessingHandler.RegisterRoutes(router)
 	processingJobHandler.RegisterRoutes(router)
