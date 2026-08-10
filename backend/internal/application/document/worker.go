@@ -25,7 +25,8 @@ type processingJobWorkerRepository interface {
 // 不同输入格式可以有各自的解析方式，但都必须把正文转换成 Chunks，
 // 使 Worker 后面的持久化流程不再区分 PDF、Markdown、TXT 或 DOCX。
 type ProcessingResult struct {
-	Chunks []documentdomain.ChunkInput
+	DetectedTitle *string
+	Chunks        []documentdomain.ChunkInput
 }
 
 // DocumentProcessor 隔离具体的 Go、Python 或其他文档处理实现。
@@ -202,6 +203,9 @@ func (w *Worker) RunOnce(
 	if err := w.jobs.MarkProcessingJobSucceeded(
 		ctx,
 		job.ID,
+		documentdomain.ProcessingCompletion{
+			DetectedTitle: processingResult.DetectedTitle,
+		},
 	); err != nil {
 		// 这里不能改写成 failed：文档处理已经成功，
 		// 失败的是数据库状态回写，两者的业务事实不同。

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	documentapplication "rag-reasoning-platform/backend/internal/application/document"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
@@ -24,6 +25,7 @@ const (
 	maxChunkCharactersMaximum = 100000
 	maxPDFFileBytesMaximum    = 1024 * 1024 * 1024
 	maxPDFPagesMaximum        = 10000
+	maxDetectedTitleRunes     = 500
 )
 
 var (
@@ -75,11 +77,16 @@ type processOptions struct {
 }
 
 type processResponse struct {
-	ContractVersion string          `json:"contract_version"`
-	RequestID       string          `json:"request_id"`
-	Status          string          `json:"status"`
-	Chunks          []processChunk  `json:"chunks,omitempty"`
-	Error           *processFailure `json:"error,omitempty"`
+	ContractVersion string           `json:"contract_version"`
+	RequestID       string           `json:"request_id"`
+	Status          string           `json:"status"`
+	Metadata        *processMetadata `json:"metadata,omitempty"`
+	Chunks          []processChunk   `json:"chunks,omitempty"`
+	Error           *processFailure  `json:"error,omitempty"`
+}
+
+type processMetadata struct {
+	Title string `json:"title"`
 }
 
 type processChunk struct {
@@ -278,6 +285,10 @@ func decodeProcessResponse(
 		if err := validateProcessChunks(response.Chunks); err != nil {
 			return documentapplication.ProcessingResult{}, err
 		}
+		detectedTitle, err := decodeDetectedTitle(response.Metadata)
+		if err != nil {
+			return documentapplication.ProcessingResult{}, err
+		}
 
 		chunks := make(
 			[]documentdomain.ChunkInput,
@@ -293,10 +304,17 @@ func decodeProcessResponse(
 		}
 
 		return documentapplication.ProcessingResult{
-			Chunks: chunks,
+			DetectedTitle: detectedTitle,
+			Chunks:        chunks,
 		}, nil
 
 	case processStatusFailed:
+		if response.Metadata != nil {
+			return documentapplication.ProcessingResult{}, fmt.Errorf(
+				"%w: failed response must not contain metadata",
+				ErrInvalidProcessResponse,
+			)
+		}
 		if len(response.Chunks) != 0 {
 			return documentapplication.ProcessingResult{}, fmt.Errorf(
 				"%w: failed response must not contain chunks",
@@ -320,6 +338,27 @@ func decodeProcessResponse(
 			response.Status,
 		)
 	}
+}
+
+// decodeDetectedTitle 校验 Python 返回的可选标题候选。
+// 标题缺失是正常情况；一旦存在，就必须已经完成空白规范化并满足长度限制。
+func decodeDetectedTitle(metadata *processMetadata) (*string, error) {
+	if metadata == nil {
+		return nil, nil
+	}
+
+	title := metadata.Title
+	if !utf8.ValidString(title) ||
+		title == "" ||
+		title != strings.TrimSpace(title) ||
+		utf8.RuneCountInString(title) > maxDetectedTitleRunes {
+		return nil, fmt.Errorf(
+			"%w: metadata title is invalid",
+			ErrInvalidProcessResponse,
+		)
+	}
+
+	return &title, nil
 }
 
 // validateProcessChunks 校验成功响应中的统一文本块。

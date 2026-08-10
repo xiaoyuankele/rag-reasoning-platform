@@ -4,12 +4,14 @@ import "context"
 
 // SearchOptions 表示文本块仓储执行关键词检索时需要的参数。
 //
-// Query 已由 Application 层完成去除首尾空白和合法性校验；Limit 与
+// Query 已由 Application 层完成去除首尾空白和合法性校验；DocumentID
+// 为 nil 时跨全部 ready 文档搜索，非 nil 时只搜索指定文档；Limit 与
 // Offset 是仓储可以直接转换为 SQL LIMIT/OFFSET 的分页参数。
 type SearchOptions struct {
-	Query  string
-	Limit  int64
-	Offset int64
+	Query      string
+	DocumentID *int64
+	Limit      int64
+	Offset     int64
 }
 
 // SearchHit 表示一个命中关键词的统一文本块及其来源文档信息。
@@ -20,6 +22,7 @@ type SearchHit struct {
 	ChunkID      int64
 	DocumentID   int64
 	ChunkIndex   int
+	Title        *string
 	OriginalName string
 	MIMEType     string
 	Content      string

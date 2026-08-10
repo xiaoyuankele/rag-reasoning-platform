@@ -181,6 +181,7 @@ func TestDecodeProcessResponseReturnsChunks(t *testing.T) {
 		"contract_version":"v1",
 		"request_id":"job-123",
 		"status":"succeeded",
+		"metadata":{"title":"Maglev control study"},
 		"chunks":[
 			{"index":0,"content":"first","page_start":2,"page_end":3},
 			{"index":1,"content":"second"}
@@ -206,6 +207,14 @@ func TestDecodeProcessResponseReturnsChunks(t *testing.T) {
 	}
 	if !reflect.DeepEqual(result.Chunks, wantChunks) {
 		t.Fatalf("chunks = %+v, want %+v", result.Chunks, wantChunks)
+	}
+	if result.DetectedTitle == nil ||
+		*result.DetectedTitle != "Maglev control study" {
+		t.Fatalf(
+			"detected title = %v, want %q",
+			result.DetectedTitle,
+			"Maglev control study",
+		)
 	}
 }
 
@@ -326,6 +335,46 @@ func TestDecodeProcessResponseRejectsInvalidEnvelope(t *testing.T) {
 				"status":"failed",
 				"chunks":[{"index":0,"content":"content"}],
 				"error":{"code":"parse_failed","message":"failure","retryable":false}
+			}`,
+		},
+		{
+			name: "failure contains metadata",
+			responseJSON: `{
+				"contract_version":"v1",
+				"request_id":"job-123",
+				"status":"failed",
+				"metadata":{"title":"must not be returned"},
+				"error":{"code":"parse_failed","message":"failure","retryable":false}
+			}`,
+		},
+		{
+			name: "metadata title is blank",
+			responseJSON: `{
+				"contract_version":"v1",
+				"request_id":"job-123",
+				"status":"succeeded",
+				"metadata":{"title":"   "},
+				"chunks":[{"index":0,"content":"content"}]
+			}`,
+		},
+		{
+			name: "metadata title has surrounding whitespace",
+			responseJSON: `{
+				"contract_version":"v1",
+				"request_id":"job-123",
+				"status":"succeeded",
+				"metadata":{"title":" title "},
+				"chunks":[{"index":0,"content":"content"}]
+			}`,
+		},
+		{
+			name: "metadata title exceeds rune limit",
+			responseJSON: `{
+				"contract_version":"v1",
+				"request_id":"job-123",
+				"status":"succeeded",
+				"metadata":{"title":"` + strings.Repeat("磁", maxDetectedTitleRunes+1) + `"},
+				"chunks":[{"index":0,"content":"content"}]
 			}`,
 		},
 		{

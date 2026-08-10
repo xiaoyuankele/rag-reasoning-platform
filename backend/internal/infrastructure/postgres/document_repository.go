@@ -43,6 +43,7 @@ func (r *DocumentRepository) Create(
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING
 			id,
+			title,
 			original_name,
 			storage_path,
 			mime_type,
@@ -80,6 +81,7 @@ func (r *DocumentRepository) GetByID(
 	const query = `
 		SELECT
 			id,
+			title,
 			original_name,
 			storage_path,
 			mime_type,
@@ -155,6 +157,7 @@ func (r *DocumentRepository) List(
 	const listQuery = `
 		SELECT
 			id,
+			title,
 			original_name,
 			storage_path,
 			mime_type,
@@ -222,6 +225,7 @@ func scanDocument(row pgx.Row) (document.Document, error) {
 
 	err := row.Scan(
 		&foundDocument.ID,
+		&foundDocument.Title,
 		&foundDocument.OriginalName,
 		&foundDocument.StoragePath,
 		&foundDocument.MIMEType,

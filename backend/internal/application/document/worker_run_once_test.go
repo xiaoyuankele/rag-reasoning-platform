@@ -138,6 +138,7 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 		{Index: 0, Content: "first normalized chunk"},
 		{Index: 1, Content: "second normalized chunk"},
 	}
+	detectedTitle := "Maglev control study"
 	jobs := &fakeProcessingJobClaimer{
 		claimNextFunc: func(
 			context.Context,
@@ -147,12 +148,21 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 		markSucceededFunc: func(
 			_ context.Context,
 			jobID int64,
+			completion documentdomain.ProcessingCompletion,
 		) error {
 			if jobID != expectedJob.ID {
 				t.Fatalf(
 					"MarkProcessingJobSucceeded() jobID = %d, want %d",
 					jobID,
 					expectedJob.ID,
+				)
+			}
+			if completion.DetectedTitle == nil ||
+				*completion.DetectedTitle != detectedTitle {
+				t.Fatalf(
+					"completion detected title = %v, want %q",
+					completion.DetectedTitle,
+					detectedTitle,
 				)
 			}
 			return nil
@@ -186,7 +196,8 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 				)
 			}
 			return ProcessingResult{
-				Chunks: expectedChunks,
+				DetectedTitle: &detectedTitle,
+				Chunks:        expectedChunks,
 			}, nil
 		},
 	}
@@ -843,6 +854,7 @@ func TestWorkerRunOncePreservesFinalizationError(t *testing.T) {
 		markSucceededFunc: func(
 			context.Context,
 			int64,
+			documentdomain.ProcessingCompletion,
 		) error {
 			return finalizationError
 		},

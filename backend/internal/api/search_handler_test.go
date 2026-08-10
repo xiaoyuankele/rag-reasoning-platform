@@ -46,12 +46,14 @@ func newTestDocumentSearchRouter(service documentSearchService) *gin.Engine {
 // TestDocumentSearchHandlerReturnsResults 验证完整的成功路径：
 // HTTP 查询参数 -> SearchInput -> SearchOutput -> JSON 响应。
 func TestDocumentSearchHandlerReturnsResults(t *testing.T) {
+	title := "Bridge vibration study"
 	pageStart := 3
 	pageEnd := 4
 	expectedHit := documentdomain.SearchHit{
 		ChunkID:      11,
 		DocumentID:   7,
 		ChunkIndex:   2,
+		Title:        &title,
 		OriginalName: "bridge-study.pdf",
 		MIMEType:     "application/pdf",
 		Content:      "bridge vibration analysis",
@@ -141,6 +143,96 @@ func TestDocumentSearchHandlerReturnsResults(t *testing.T) {
 
 	if service.searchCalls != 1 {
 		t.Fatalf("expected one Search call, got %d", service.searchCalls)
+	}
+}
+
+// TestDocumentSearchHandlerPassesDocumentIDFilter 验证可选 document_id
+// 会被 Handler 解析成正整数指针并传给 Application。
+func TestDocumentSearchHandlerPassesDocumentIDFilter(t *testing.T) {
+	service := &fakeDocumentSearchService{
+		searchFunc: func(
+			_ context.Context,
+			input applicationdocument.SearchInput,
+		) (applicationdocument.SearchOutput, error) {
+			if input.DocumentID == nil || *input.DocumentID != 20 {
+				t.Fatalf("document ID filter = %v, want 20", input.DocumentID)
+			}
+
+			return applicationdocument.SearchOutput{
+				Query:      "control",
+				Hits:       make([]documentdomain.SearchHit, 0),
+				Page:       input.Page,
+				PageSize:   input.PageSize,
+				Total:      0,
+				TotalPages: 0,
+			}, nil
+		},
+	}
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/search?q=control&document_id=20",
+		nil,
+	)
+	response := httptest.NewRecorder()
+
+	newTestDocumentSearchRouter(service).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf(
+			"expected status %d, got %d: %s",
+			http.StatusOK,
+			response.Code,
+			response.Body.String(),
+		)
+	}
+}
+
+// TestDocumentSearchHandlerRejectsInvalidDocumentIDFilter 验证前端只要显式
+// 提供 document_id，就必须提供一个可以解析的正整数。
+func TestDocumentSearchHandlerRejectsInvalidDocumentIDFilter(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+	}{
+		{name: "empty document ID", target: "/search?q=bridge&document_id="},
+		{name: "non-numeric document ID", target: "/search?q=bridge&document_id=abc"},
+		{name: "zero document ID", target: "/search?q=bridge&document_id=0"},
+		{name: "negative document ID", target: "/search?q=bridge&document_id=-1"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeDocumentSearchService{
+				searchFunc: func(
+					context.Context,
+					applicationdocument.SearchInput,
+				) (applicationdocument.SearchOutput, error) {
+					t.Fatal("Search must not be called for invalid document ID")
+					return applicationdocument.SearchOutput{}, nil
+				},
+			}
+
+			request := httptest.NewRequest(http.MethodGet, test.target, nil)
+			response := httptest.NewRecorder()
+
+			newTestDocumentSearchRouter(service).ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf(
+					"expected status %d, got %d: %s",
+					http.StatusBadRequest,
+					response.Code,
+					response.Body.String(),
+				)
+			}
+			if response.Body.String() != `{"error":"document_id must be a positive integer"}` {
+				t.Fatalf("unexpected response body: %s", response.Body.String())
+			}
+			if service.searchCalls != 0 {
+				t.Fatalf("expected no Search calls, got %d", service.searchCalls)
+			}
+		})
 	}
 }
 
@@ -345,6 +437,12 @@ func TestDocumentSearchHandlerMapsApplicationErrors(t *testing.T) {
 			serviceError:   applicationdocument.ErrInvalidPageSize,
 			expectedStatus: http.StatusBadRequest,
 			expectedBody:   `{"error":"page_size must be between 1 and 100"}`,
+		},
+		{
+			name:           "document ID is invalid",
+			serviceError:   applicationdocument.ErrInvalidID,
+			expectedStatus: http.StatusBadRequest,
+			expectedBody:   `{"error":"document_id must be a positive integer"}`,
 		},
 		{
 			name:           "unknown internal error",

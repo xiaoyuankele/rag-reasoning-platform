@@ -26,6 +26,13 @@ class PageTextExtractor(Protocol):
         """按照物理页顺序返回文字，并遵守文件和页数限制。"""
 
 
+class DocumentTitleExtractor(Protocol):
+    """从一份文档中尽力读取可选标题的应用层端口。"""
+
+    def extract_title(self, source_path: Path) -> str | None:
+        """返回已经规范化的标题；无法可靠读取时返回 ``None``。"""
+
+
 class TextSplitter(Protocol):
     """把一段规范化文字切成有稳定顺序的小块。"""
 

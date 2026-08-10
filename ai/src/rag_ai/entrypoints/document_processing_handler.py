@@ -58,4 +58,8 @@ def process_request(
         for chunk in result.chunks
     ]
 
-    return success_response(request.request_id, contract_chunks)
+    return success_response(
+        request.request_id,
+        contract_chunks,
+        detected_title=result.detected_title,
+    )

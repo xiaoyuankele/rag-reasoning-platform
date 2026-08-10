@@ -44,6 +44,20 @@ class RecordingPageExtractor:
         return self.pages
 
 
+class RecordingTitleExtractor:
+    """返回固定标题并记录被读取的文档路径。"""
+
+    def __init__(self, title: str | None) -> None:
+        self.title = title
+        self.calls: list[Path] = []
+
+    def extract_title(self, source_path: Path) -> str | None:
+        """记录来源路径并返回预设的可选标题。"""
+
+        self.calls.append(source_path)
+        return self.title
+
+
 class RecordingTextSplitter:
     """按空格模拟分块并记录调用参数的测试 Fake。"""
 
@@ -72,8 +86,9 @@ class ProcessDocumentServiceTests(unittest.TestCase):
                 PageText(page_number=3, text="final"),
             ]
         )
+        title_extractor = RecordingTitleExtractor("Maglev research")
         splitter = RecordingTextSplitter()
-        service = ProcessDocumentService(extractor, splitter)
+        service = ProcessDocumentService(extractor, title_extractor, splitter)
 
         result = service.process(
             DocumentSource(
@@ -106,14 +121,17 @@ class ProcessDocumentServiceTests(unittest.TestCase):
                     TextChunk(0, "first", 1, 1),
                     TextChunk(1, "page", 1, 1),
                     TextChunk(2, "final", 3, 3),
-                ]
+                ],
+                detected_title="Maglev research",
             ),
         )
+        self.assertEqual(title_extractor.calls, [source_path])
 
     def test_process_rejects_unsupported_format_before_using_ports(self) -> None:
         extractor = RecordingPageExtractor([])
+        title_extractor = RecordingTitleExtractor(None)
         splitter = RecordingTextSplitter()
-        service = ProcessDocumentService(extractor, splitter)
+        service = ProcessDocumentService(extractor, title_extractor, splitter)
 
         with self.assertRaises(DocumentProcessingError) as raised:
             service.process(
@@ -129,6 +147,7 @@ class ProcessDocumentServiceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "unsupported_format")
         self.assertEqual(extractor.calls, [])
+        self.assertEqual(title_extractor.calls, [])
         self.assertEqual(splitter.calls, [])
 
     def test_process_requires_ocr_when_every_page_is_blank(self) -> None:
@@ -138,8 +157,9 @@ class ProcessDocumentServiceTests(unittest.TestCase):
                 PageText(page_number=2, text="\x00"),
             ]
         )
+        title_extractor = RecordingTitleExtractor(None)
         splitter = RecordingTextSplitter()
-        service = ProcessDocumentService(extractor, splitter)
+        service = ProcessDocumentService(extractor, title_extractor, splitter)
 
         with self.assertRaises(DocumentProcessingError) as raised:
             service.process(
@@ -151,6 +171,7 @@ class ProcessDocumentServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "ocr_required")
+        self.assertEqual(title_extractor.calls, [])
         self.assertEqual(splitter.calls, [])
 
 

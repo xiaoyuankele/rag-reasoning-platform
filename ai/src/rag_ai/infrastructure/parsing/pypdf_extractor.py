@@ -14,6 +14,7 @@ from rag_ai.domain.models import PageText
 
 
 PDF_HEADER_PREFIX = b"%PDF-"
+MAX_DETECTED_TITLE_CHARACTERS = 500
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,62 @@ class PyPDFPageExtractor:
             max_file_bytes=max_file_bytes,
             max_pages=max_pages,
         )
+
+
+class PyPDFTitleExtractor:
+    """从 pypdf 文档元数据中尽力读取可选文献标题。"""
+
+    def extract_title(self, source_path: Path) -> str | None:
+        """返回规范化的 PDF 元数据标题，无法可靠读取时返回 ``None``。
+
+        标题属于可选增强信息，因此元数据缺失或损坏不会让正文处理失败。
+        正文读取、密码和权限错误仍由 ``PyPDFPageExtractor`` 负责报告。
+        """
+
+        try:
+            with source_path.open("rb") as source:
+                reader = PdfReader(source, strict=False)
+                if reader.is_encrypted and reader.decrypt("") == PasswordType.NOT_DECRYPTED:
+                    return None
+
+                metadata = reader.metadata
+                raw_title = metadata.title if metadata is not None else None
+                return normalize_pdf_title(raw_title)
+        except (
+            FileNotFoundError,
+            PermissionError,
+            IsADirectoryError,
+            OSError,
+            EmptyFileError,
+            LimitReachedError,
+            PdfReadError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            return None
+
+
+def normalize_pdf_title(value: object) -> str | None:
+    """把不可信 PDF 元数据值转换成可落库的可选标题。
+
+    这是本阶段留给学习者实现的边界函数。测试已经定义空值、类型、空白折叠
+    和长度限制，函数完成后不得抛出异常。
+    """
+
+    if not isinstance(value, str):
+        return None
+
+    # split() 不传参数时会折叠空格、换行和制表符等连续空白。
+    normalized = " ".join(value.split())
+
+    if not normalized:
+        return None
+
+    if len(normalized) > MAX_DETECTED_TITLE_CHARACTERS:
+        return None
+
+    return normalized
 
 
 def preflight_pdf(

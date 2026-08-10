@@ -66,6 +66,14 @@ func TestChunkRepositorySearch(t *testing.T) {
 		chineseDocument.ID,
 		documentdomain.StatusReady,
 	)
+	chineseTitle := "磁悬浮列车协同控制"
+	setSearchTestDocumentTitle(
+		t,
+		ctx,
+		pool,
+		chineseDocument.ID,
+		chineseTitle,
+	)
 	setSearchTestDocumentStatus(
 		t,
 		ctx,
@@ -149,10 +157,42 @@ func TestChunkRepositorySearch(t *testing.T) {
 
 		hit := result.Hits[0]
 		if hit.DocumentID != chineseDocument.ID ||
+			hit.Title == nil || *hit.Title != chineseTitle ||
 			hit.OriginalName != chineseDocument.OriginalName ||
 			hit.ChunkIndex != 0 ||
 			hit.PageStart == nil || *hit.PageStart != 3 {
 			t.Fatalf("Search() Chinese hit = %+v, want Chinese page 3", hit)
+		}
+	})
+
+	t.Run("filters matches by document ID", func(t *testing.T) {
+		documentID := chineseDocument.ID
+		result, err := chunkRepository.Search(
+			ctx,
+			documentdomain.SearchOptions{
+				Query:      "control",
+				DocumentID: &documentID,
+				Limit:      10,
+			},
+		)
+		if err != nil {
+			t.Fatalf("Search() document filter error = %v", err)
+		}
+		if result.Total != 2 || len(result.Hits) != 2 {
+			t.Fatalf(
+				"Search() document filter result = total %d, hits %d; want 2/2",
+				result.Total,
+				len(result.Hits),
+			)
+		}
+		for _, hit := range result.Hits {
+			if hit.DocumentID != chineseDocument.ID {
+				t.Fatalf(
+					"Search() filtered document ID = %d, want %d",
+					hit.DocumentID,
+					chineseDocument.ID,
+				)
+			}
 		}
 	})
 
@@ -304,6 +344,33 @@ func setSearchTestDocumentStatus(
 	if commandTag.RowsAffected() != 1 {
 		t.Fatalf(
 			"set search test document %d affected %d rows, want 1",
+			documentID,
+			commandTag.RowsAffected(),
+		)
+	}
+}
+
+func setSearchTestDocumentTitle(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	documentID int64,
+	title string,
+) {
+	t.Helper()
+
+	commandTag, err := pool.Exec(
+		ctx,
+		"UPDATE documents SET title = $1 WHERE id = $2",
+		title,
+		documentID,
+	)
+	if err != nil {
+		t.Fatalf("set search test document %d title: %v", documentID, err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		t.Fatalf(
+			"set search test document %d title affected %d rows, want 1",
 			documentID,
 			commandTag.RowsAffected(),
 		)

@@ -88,11 +88,19 @@ type ProcessingJobClaimer interface {
 	) (ProcessingJob, error)
 }
 
+// ProcessingCompletion 是处理任务成功收尾时需要持久化的业务结果。
+type ProcessingCompletion struct {
+	// DetectedTitle 是处理器自动识别的可选标题。
+	// Infrastructure 只在文档当前没有标题时采用它，避免覆盖未来的用户标题。
+	DetectedTitle *string
+}
+
 // ProcessingJobFinalizer 定义 Worker 完成一次执行后所需的状态回写能力。
 type ProcessingJobFinalizer interface {
 	MarkProcessingJobSucceeded(
 		ctx context.Context,
 		jobID int64,
+		completion ProcessingCompletion,
 	) error
 
 	MarkProcessingJobFailed(

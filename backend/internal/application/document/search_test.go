@@ -3,6 +3,7 @@ package document
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -27,6 +28,8 @@ func (f *fakeChunkSearcher) Search(
 }
 
 func TestSearchServiceRejectsInvalidInput(t *testing.T) {
+	invalidDocumentID := int64(0)
+
 	tests := []struct {
 		name      string
 		input     SearchInput
@@ -77,6 +80,16 @@ func TestSearchServiceRejectsInvalidInput(t *testing.T) {
 			},
 			wantedErr: ErrInvalidPageSize,
 		},
+		{
+			name: "non-positive document filter",
+			input: SearchInput{
+				Query:      "maglev",
+				DocumentID: &invalidDocumentID,
+				Page:       1,
+				PageSize:   20,
+			},
+			wantedErr: ErrInvalidID,
+		},
 	}
 
 	for _, test := range tests {
@@ -108,6 +121,7 @@ func TestSearchServiceRejectsInvalidInput(t *testing.T) {
 }
 
 func TestSearchServiceNormalizesQueryAndCalculatesPagination(t *testing.T) {
+	documentID := int64(20)
 	pageStart := 3
 	expectedHits := []documentdomain.SearchHit{
 		{
@@ -127,11 +141,12 @@ func TestSearchServiceNormalizesQueryAndCalculatesPagination(t *testing.T) {
 			options documentdomain.SearchOptions,
 		) (documentdomain.SearchResult, error) {
 			expectedOptions := documentdomain.SearchOptions{
-				Query:  "磁悬浮",
-				Limit:  2,
-				Offset: 2,
+				Query:      "磁悬浮",
+				DocumentID: &documentID,
+				Limit:      2,
+				Offset:     2,
 			}
-			if options != expectedOptions {
+			if !reflect.DeepEqual(options, expectedOptions) {
 				t.Fatalf(
 					"Search() options = %+v, want %+v",
 					options,
@@ -150,9 +165,10 @@ func TestSearchServiceNormalizesQueryAndCalculatesPagination(t *testing.T) {
 	output, err := service.Search(
 		context.Background(),
 		SearchInput{
-			Query:    "  磁悬浮  ",
-			Page:     2,
-			PageSize: 2,
+			Query:      "  磁悬浮  ",
+			DocumentID: &documentID,
+			Page:       2,
+			PageSize:   2,
 		},
 	)
 	if err != nil {

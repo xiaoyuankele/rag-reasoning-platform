@@ -227,6 +227,7 @@ func (r *ChunkRepository) Search(
 			ON source_document.id = chunk.document_id
 		WHERE source_document.status = $1
 		  AND STRPOS(LOWER(chunk.content), LOWER($2)) > 0
+		  AND ($3::BIGINT IS NULL OR chunk.document_id = $3)
 	`
 
 	var total int64
@@ -235,6 +236,7 @@ func (r *ChunkRepository) Search(
 		countQuery,
 		document.StatusReady,
 		options.Query,
+		options.DocumentID,
 	).Scan(&total); err != nil {
 		return document.SearchResult{}, fmt.Errorf(
 			"count matching document chunks: %w",
@@ -256,6 +258,7 @@ func (r *ChunkRepository) Search(
 			chunk.id,
 			chunk.document_id,
 			chunk.chunk_index,
+			source_document.title,
 			source_document.original_name,
 			source_document.mime_type,
 			chunk.content,
@@ -266,13 +269,14 @@ func (r *ChunkRepository) Search(
 			ON source_document.id = chunk.document_id
 		WHERE source_document.status = $1
 		  AND STRPOS(LOWER(chunk.content), LOWER($2)) > 0
+		  AND ($3::BIGINT IS NULL OR chunk.document_id = $3)
 		ORDER BY
 			source_document.created_at DESC,
 			source_document.id DESC,
 			chunk.chunk_index ASC,
 			chunk.id ASC
-		LIMIT $3
-		OFFSET $4
+		LIMIT $4
+		OFFSET $5
 	`
 
 	rows, err := r.pool.Query(
@@ -280,6 +284,7 @@ func (r *ChunkRepository) Search(
 		searchQuery,
 		document.StatusReady,
 		options.Query,
+		options.DocumentID,
 		options.Limit,
 		options.Offset,
 	)
@@ -341,6 +346,7 @@ func scanSearchHit(row pgx.Row) (document.SearchHit, error) {
 		&hit.ChunkID,
 		&hit.DocumentID,
 		&hit.ChunkIndex,
+		&hit.Title,
 		&hit.OriginalName,
 		&hit.MIMEType,
 		&hit.Content,

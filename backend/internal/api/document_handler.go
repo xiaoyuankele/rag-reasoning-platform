@@ -50,6 +50,7 @@ func (h *DocumentHandler) RegisterRoutes(router *gin.Engine) {
 // storage_path 是服务器内部路径，因此不放入 HTTP 响应。
 type documentResponse struct {
 	ID           int64                 `json:"id"`
+	Title        *string               `json:"title"`
 	OriginalName string                `json:"original_name"`
 	MIMEType     string                `json:"mime_type"`
 	SizeBytes    int64                 `json:"size_bytes"`
@@ -71,6 +72,7 @@ func newDocumentResponse(
 ) documentResponse {
 	return documentResponse{
 		ID:           source.ID,
+		Title:        source.Title,
 		OriginalName: source.OriginalName,
 		MIMEType:     source.MIMEType,
 		SizeBytes:    source.SizeBytes,

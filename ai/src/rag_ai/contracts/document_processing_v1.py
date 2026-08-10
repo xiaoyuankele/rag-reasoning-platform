@@ -16,6 +16,7 @@ DEFAULT_PDF_FILE_BYTES = 50 * 1024 * 1024
 DEFAULT_PDF_PAGES = 500
 MAX_PDF_FILE_BYTES = 1024 * 1024 * 1024
 MAX_PDF_PAGES = 10_000
+MAX_DETECTED_TITLE_CHARACTERS = 500
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 
@@ -154,12 +155,15 @@ def parse_request(payload: Any) -> ProcessingRequest:
 def success_response(
     request_id: str,
     chunks: list[ProcessingChunk],
+    *,
+    detected_title: str | None = None,
 ) -> dict[str, Any]:
     """校验处理结果并构造供 Go 解码的 v1 成功响应。
 
     Args:
         request_id: 必须与请求相同的关联 ID。
         chunks: 格式处理器生成、顺序稳定的统一文本块列表。
+        detected_title: 处理器自动识别并规范化的可选标题。
 
     Returns:
         可以交给 ``json.dump`` 的成功响应字典。
@@ -170,6 +174,7 @@ def success_response(
 
     _validate_request_id(request_id)
     _validate_processing_chunks(chunks)
+    _validate_detected_title(detected_title)
 
     chunk_payloads: list[dict[str, Any]] = []
     for chunk in chunks:
@@ -183,12 +188,16 @@ def success_response(
 
         chunk_payloads.append(chunk_payload)
 
-    return {
+    response: dict[str, Any] = {
         "contract_version": CONTRACT_VERSION,
         "request_id": request_id,
         "status": "succeeded",
         "chunks": chunk_payloads,
     }
+    if detected_title is not None:
+        response["metadata"] = {"title": detected_title}
+
+    return response
 
 
 def failure_response(
@@ -352,6 +361,24 @@ def _validate_request_id(value: Any) -> str:
             "request_id has an invalid format",
         )
     return request_id
+
+
+def _validate_detected_title(title: str | None) -> None:
+    """校验可选标题已经完成空白规范化并满足长度上限。"""
+
+    if title is None:
+        return
+    if (
+        not isinstance(title, str)
+        or not title
+        or title != title.strip()
+        or len(title) > MAX_DETECTED_TITLE_CHARACTERS
+    ):
+        raise ContractError(
+            "internal_error",
+            "Python processor produced an invalid document title",
+            retryable=True,
+        )
 
 
 def _validate_processing_chunks(chunks: list[ProcessingChunk]) -> None:

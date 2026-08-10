@@ -20,8 +20,10 @@ from rag_ai.domain.models import PageText  # noqa: E402
 from rag_ai.infrastructure.parsing.pypdf_extractor import (  # noqa: E402
     PDFPreflightResult,
     PyPDFPageExtractor,
+    PyPDFTitleExtractor,
     _validate_page_count,
     extract_pdf_pages,
+    normalize_pdf_title,
     preflight_pdf,
 )
 
@@ -238,6 +240,47 @@ class PDFTextExtractionTests(unittest.TestCase):
             pages,
             [PageText(page_number=1, text="")],
         )
+
+
+class PDFTitleExtractionTests(unittest.TestCase):
+    def test_normalize_pdf_title(self) -> None:
+        tests = [
+            ("  Maglev\n  control study  ", "Maglev control study"),
+            ("磁浮列车协同控制", "磁浮列车协同控制"),
+            (None, None),
+            (42, None),
+            (" \n\t ", None),
+            ("a" * 501, None),
+        ]
+
+        for raw_title, expected in tests:
+            with self.subTest(raw_title=raw_title):
+                self.assertEqual(normalize_pdf_title(raw_title), expected)
+
+    def test_pypdf_title_extractor_returns_metadata_title(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "title.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
+            writer.add_metadata({"/Title": "  Maglev\n control study  "})
+            with source_path.open("wb") as output:
+                writer.write(output)
+
+            title = PyPDFTitleExtractor().extract_title(source_path)
+
+        self.assertEqual(title, "Maglev control study")
+
+    def test_pypdf_title_extractor_returns_none_without_metadata_title(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "untitled.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
+            with source_path.open("wb") as output:
+                writer.write(output)
+
+            title = PyPDFTitleExtractor().extract_title(source_path)
+
+        self.assertIsNone(title)
 
 
 

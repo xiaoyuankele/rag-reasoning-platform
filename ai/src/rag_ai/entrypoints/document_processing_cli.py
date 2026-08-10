@@ -15,7 +15,10 @@ from rag_ai.contracts.document_processing_v1 import (
 )
 from rag_ai.domain.errors import DocumentProcessingError
 from rag_ai.entrypoints.document_processing_handler import process_request
-from rag_ai.infrastructure.parsing.pypdf_extractor import PyPDFPageExtractor
+from rag_ai.infrastructure.parsing.pypdf_extractor import (
+    PyPDFPageExtractor,
+    PyPDFTitleExtractor,
+)
 from rag_ai.infrastructure.splitting.simple_text_splitter import (
     SimpleTextSplitter,
 )
@@ -67,6 +70,7 @@ def main() -> int:
         # pypdf 与简单分块适配器，application 层只依赖它们实现的端口。
         service = ProcessDocumentService(
             page_extractor=PyPDFPageExtractor(),
+            title_extractor=PyPDFTitleExtractor(),
             text_splitter=SimpleTextSplitter(),
         )
         response = process_request(request, service)

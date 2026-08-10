@@ -143,6 +143,7 @@ func TestProcessingJobRepositoryRecoversInterruptedJobs(t *testing.T) {
 		documentdomain.ProcessingJobStatusFailed,
 		documentdomain.StatusFailed,
 		&expectedMessage,
+		nil,
 	)
 
 	foundQueuedJob, err := jobRepository.GetProcessingJobByID(

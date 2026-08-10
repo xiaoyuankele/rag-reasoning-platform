@@ -51,7 +51,7 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 
 	documentRepository := postgresrepository.NewDocumentRepository(pool)
 	jobRepository := postgresrepository.NewProcessingJobRepository(pool)
-	createdDocumentIDs := make([]int64, 0, 2)
+	createdDocumentIDs := make([]int64, 0, 3)
 	defer func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(
 			context.Background(),
@@ -75,6 +75,7 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 	}()
 
 	t.Run("succeeded job makes document ready", func(t *testing.T) {
+		detectedTitle := "Automatically detected title"
 		createdDocument, createdJob := createProcessingJobForFinalization(
 			t,
 			ctx,
@@ -91,6 +92,9 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 		if err := jobRepository.MarkProcessingJobSucceeded(
 			ctx,
 			createdJob.ID,
+			documentdomain.ProcessingCompletion{
+				DetectedTitle: &detectedTitle,
+			},
 		); err != nil {
 			t.Fatalf("mark processing job succeeded: %v", err)
 		}
@@ -105,11 +109,15 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			documentdomain.ProcessingJobStatusSucceeded,
 			documentdomain.StatusReady,
 			nil,
+			&detectedTitle,
 		)
 
 		err := jobRepository.MarkProcessingJobSucceeded(
 			ctx,
 			createdJob.ID,
+			documentdomain.ProcessingCompletion{
+				DetectedTitle: &detectedTitle,
+			},
 		)
 		if !errors.Is(
 			err,
@@ -120,6 +128,52 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 				err,
 			)
 		}
+	})
+
+	t.Run("succeeded job preserves existing title", func(t *testing.T) {
+		createdDocument, createdJob := createProcessingJobForFinalization(
+			t,
+			ctx,
+			pool,
+			documentRepository,
+			jobRepository,
+			"existing-title",
+		)
+		createdDocumentIDs = append(createdDocumentIDs, createdDocument.ID)
+
+		existingTitle := "User confirmed title"
+		if _, err := pool.Exec(
+			ctx,
+			"UPDATE documents SET title = $1 WHERE id = $2",
+			existingTitle,
+			createdDocument.ID,
+		); err != nil {
+			t.Fatalf("set existing document title: %v", err)
+		}
+
+		detectedTitle := "Different automatic title"
+		if err := jobRepository.MarkProcessingJobSucceeded(
+			ctx,
+			createdJob.ID,
+			documentdomain.ProcessingCompletion{
+				DetectedTitle: &detectedTitle,
+			},
+		); err != nil {
+			t.Fatalf("mark processing job succeeded: %v", err)
+		}
+
+		assertFinalizedJobAndDocument(
+			t,
+			ctx,
+			jobRepository,
+			documentRepository,
+			createdJob.ID,
+			createdDocument.ID,
+			documentdomain.ProcessingJobStatusSucceeded,
+			documentdomain.StatusReady,
+			nil,
+			&existingTitle,
+		)
 	})
 
 	t.Run("failed job makes document failed", func(t *testing.T) {
@@ -155,6 +209,7 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			documentdomain.ProcessingJobStatusFailed,
 			documentdomain.StatusFailed,
 			&safeErrorMessage,
+			nil,
 		)
 
 		err := jobRepository.MarkProcessingJobFailed(
@@ -272,6 +327,7 @@ func assertFinalizedJobAndDocument(
 	expectedJobStatus documentdomain.ProcessingJobStatus,
 	expectedDocumentStatus documentdomain.Status,
 	expectedErrorMessage *string,
+	expectedTitle *string,
 ) {
 	t.Helper()
 
@@ -315,6 +371,12 @@ func assertFinalizedJobAndDocument(
 		"finalized document error message",
 		foundDocument.ErrorMessage,
 		expectedErrorMessage,
+	)
+	assertOptionalString(
+		t,
+		"finalized document title",
+		foundDocument.Title,
+		expectedTitle,
 	)
 }
 

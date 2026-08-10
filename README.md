@@ -134,6 +134,9 @@ rag_reasoning_platform_individual/
 PDF 文献处理的错误分类、页码来源、资源限制、解析库选择和分阶段验收标准见
 [PDF 文献处理架构与分阶段路线](docs/architecture/pdf-processing-roadmap.md)。
 
+文献标题自动提取、落库、搜索结果展示和未来文献/文件拆分边界见
+[文献标题与文档内检索架构](docs/architecture/document-title-and-search-filter.md)。
+
 Python 类、函数和方法的中文 IDE 悬停说明要求见
 [Python Docstring 与 IDE 悬停说明规范](docs/development/python-docstrings.md)。
 

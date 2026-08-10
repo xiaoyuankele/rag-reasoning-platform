@@ -62,7 +62,10 @@ func (s Status) CanTransitionTo(next Status) bool {
 // Document 表示系统中的一份文档。
 // 该结构体只描述业务数据，不包含 SQL 和 JSON 处理逻辑。
 type Document struct {
-	ID           int64
+	ID int64
+	// Title 是从文档元数据识别或由用户确认的文献标题。
+	// nil 表示尚未获得标题，展示层应回退到 OriginalName。
+	Title        *string
 	OriginalName string
 	StoragePath  string
 	MIMEType     string

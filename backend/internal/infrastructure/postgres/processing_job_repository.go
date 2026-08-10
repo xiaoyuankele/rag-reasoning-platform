@@ -236,6 +236,7 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 func (r *ProcessingJobRepository) MarkProcessingJobSucceeded(
 	ctx context.Context,
 	jobID int64,
+	completion document.ProcessingCompletion,
 ) error {
 	return r.finalizeProcessingJob(
 		ctx,
@@ -243,6 +244,7 @@ func (r *ProcessingJobRepository) MarkProcessingJobSucceeded(
 		document.ProcessingJobStatusSucceeded,
 		document.StatusReady,
 		nil,
+		completion.DetectedTitle,
 	)
 }
 
@@ -259,6 +261,7 @@ func (r *ProcessingJobRepository) MarkProcessingJobFailed(
 		document.ProcessingJobStatusFailed,
 		document.StatusFailed,
 		&errorMessage,
+		nil,
 	)
 }
 
@@ -360,6 +363,7 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 	jobStatus document.ProcessingJobStatus,
 	documentStatus document.Status,
 	errorMessage *string,
+	detectedTitle *string,
 ) error {
 	transaction, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -435,6 +439,7 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		SET
 			status = $2,
 			error_message = $3,
+			title = COALESCE(title, $4),
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 			AND status = 'processing'
@@ -446,6 +451,7 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		documentID,
 		documentStatus,
 		errorMessage,
+		detectedTitle,
 	)
 	if err != nil {
 		return fmt.Errorf(

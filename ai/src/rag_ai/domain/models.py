@@ -74,6 +74,8 @@ class ProcessingResult:
 
     Attributes:
         chunks: 按原文顺序排列的统一文本块。
+        detected_title: 处理器自动识别的可选文献标题；缺失时为 ``None``。
     """
 
     chunks: list[TextChunk]
+    detected_title: str | None = None

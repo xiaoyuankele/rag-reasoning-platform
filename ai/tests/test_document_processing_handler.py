@@ -75,7 +75,8 @@ class DocumentProcessorBoundaryTests(unittest.TestCase):
                         page_start=1,
                         page_end=1,
                     ),
-                ]
+                ],
+                detected_title="Maglev research",
             )
         )
 
@@ -106,6 +107,7 @@ class DocumentProcessorBoundaryTests(unittest.TestCase):
                 "contract_version": CONTRACT_VERSION,
                 "request_id": "request-123",
                 "status": "succeeded",
+                "metadata": {"title": "Maglev research"},
                 "chunks": [
                     {
                         "index": 0,

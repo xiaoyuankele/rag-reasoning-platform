@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -40,14 +41,15 @@ func (h *DocumentSearchHandler) RegisterRoutes(router *gin.Engine) {
 
 // searchHitResponse 是单个文本块搜索命中的 HTTP 响应结构。
 type searchHitResponse struct {
-	ChunkID      int64  `json:"chunk_id"`
-	DocumentID   int64  `json:"document_id"`
-	ChunkIndex   int    `json:"chunk_index"`
-	OriginalName string `json:"original_name"`
-	MIMEType     string `json:"mime_type"`
-	Content      string `json:"content"`
-	PageStart    *int   `json:"page_start"`
-	PageEnd      *int   `json:"page_end"`
+	ChunkID      int64   `json:"chunk_id"`
+	DocumentID   int64   `json:"document_id"`
+	ChunkIndex   int     `json:"chunk_index"`
+	Title        *string `json:"title"`
+	OriginalName string  `json:"original_name"`
+	MIMEType     string  `json:"mime_type"`
+	Content      string  `json:"content"`
+	PageStart    *int    `json:"page_start"`
+	PageEnd      *int    `json:"page_end"`
 }
 
 // documentSearchResponse 是文档关键词搜索成功时的 HTTP 响应结构。
@@ -61,6 +63,19 @@ type documentSearchResponse struct {
 func (h *DocumentSearchHandler) Search(c *gin.Context) {
 	// Handler 负责读取 HTTP 参数；查询词的业务合法性由 Application 层校验。
 	rawQuery := c.Query("q")
+
+	// GetQuery 能区分“没有提供过滤条件”和“显式提供了空值”。
+	var documentID *int64
+	if rawDocumentID, provided := c.GetQuery("document_id"); provided {
+		parsedDocumentID, err := strconv.ParseInt(rawDocumentID, 10, 64)
+		if err != nil || parsedDocumentID <= 0 {
+			c.JSON(http.StatusBadRequest, errorResponse{
+				Error: "document_id must be a positive integer",
+			})
+			return
+		}
+		documentID = &parsedDocumentID
+	}
 
 	page, err := parsePositiveQueryInt(
 		c,
@@ -90,11 +105,18 @@ func (h *DocumentSearchHandler) Search(c *gin.Context) {
 	result, err := h.service.Search(
 		c.Request.Context(),
 		applicationdocument.SearchInput{
-			Query:    rawQuery,
-			Page:     page,
-			PageSize: pageSize,
+			Query:      rawQuery,
+			DocumentID: documentID,
+			Page:       page,
+			PageSize:   pageSize,
 		},
 	)
+	if errors.Is(err, applicationdocument.ErrInvalidID) {
+		c.JSON(http.StatusBadRequest, errorResponse{
+			Error: "document_id must be a positive integer",
+		})
+		return
+	}
 	if errors.Is(err, applicationdocument.ErrInvalidPage) {
 		c.JSON(http.StatusBadRequest, errorResponse{
 			Error: "page must be a positive integer",
@@ -155,6 +177,7 @@ func newSearchHitResponse(source documentdomain.SearchHit) searchHitResponse {
 		ChunkID:      source.ChunkID,
 		DocumentID:   source.DocumentID,
 		ChunkIndex:   source.ChunkIndex,
+		Title:        source.Title,
 		OriginalName: source.OriginalName,
 		MIMEType:     source.MIMEType,
 		Content:      source.Content,

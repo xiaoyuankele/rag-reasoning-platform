@@ -10,7 +10,7 @@ import (
 
 type fakeProcessingJobClaimer struct {
 	claimNextFunc      func(context.Context) (documentdomain.ProcessingJob, error)
-	markSucceededFunc  func(context.Context, int64) error
+	markSucceededFunc  func(context.Context, int64, documentdomain.ProcessingCompletion) error
 	markFailedFunc     func(context.Context, int64, string) error
 	claimNextCalls     int
 	markSucceededCalls int
@@ -27,12 +27,13 @@ func (f *fakeProcessingJobClaimer) ClaimNextProcessingJob(
 func (f *fakeProcessingJobClaimer) MarkProcessingJobSucceeded(
 	ctx context.Context,
 	jobID int64,
+	completion documentdomain.ProcessingCompletion,
 ) error {
 	f.markSucceededCalls++
 	if f.markSucceededFunc == nil {
 		return nil
 	}
-	return f.markSucceededFunc(ctx, jobID)
+	return f.markSucceededFunc(ctx, jobID, completion)
 }
 
 func (f *fakeProcessingJobClaimer) MarkProcessingJobFailed(

@@ -115,11 +115,19 @@ class ProcessingContractTests(unittest.TestCase):
             ),
         ]
 
-        response = success_response("job-123", chunks)
+        response = success_response(
+            "job-123",
+            chunks,
+            detected_title="Maglev control study",
+        )
 
         self.assertEqual(response["contract_version"], "v1")
         self.assertEqual(response["request_id"], "job-123")
         self.assertEqual(response["status"], "succeeded")
+        self.assertEqual(
+            response["metadata"],
+            {"title": "Maglev control study"},
+        )
         self.assertEqual(response["chunks"][0]["page_start"], 2)
         self.assertEqual(response["chunks"][0]["page_end"], 3)
         self.assertNotIn("page_start", response["chunks"][1])
@@ -140,6 +148,26 @@ class ProcessingContractTests(unittest.TestCase):
 
                 self.assertEqual(raised.exception.code, "internal_error")
                 self.assertTrue(raised.exception.retryable)
+
+    def test_success_response_rejects_invalid_detected_title(self) -> None:
+        chunk = ProcessingChunk(index=0, content="content")
+        invalid_titles: list[object] = [
+            "",
+            " title ",
+            "磁" * 501,
+            42,
+        ]
+
+        for title in invalid_titles:
+            with self.subTest(title=title):
+                with self.assertRaises(ContractError) as raised:
+                    success_response(
+                        "job-123",
+                        [chunk],
+                        detected_title=title,  # type: ignore[arg-type]
+                    )
+
+                self.assertEqual(raised.exception.code, "internal_error")
 
 
 class ProcessorCLITests(unittest.TestCase):

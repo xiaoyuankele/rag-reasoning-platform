@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from rag_ai.application.ports import PageTextExtractor, TextSplitter
+from rag_ai.application.ports import (
+    DocumentTitleExtractor,
+    PageTextExtractor,
+    TextSplitter,
+)
 from rag_ai.domain.errors import DocumentProcessingError
 from rag_ai.domain.models import (
     DocumentSource,
@@ -22,11 +26,13 @@ class ProcessDocumentService:
     def __init__(
         self,
         page_extractor: PageTextExtractor,
+        title_extractor: DocumentTitleExtractor,
         text_splitter: TextSplitter,
     ) -> None:
-        """注入页面提取器和文本分块器，不在应用层创建具体工具。"""
+        """注入页面、标题提取器和文本分块器，不在应用层创建具体工具。"""
 
         self._page_extractor = page_extractor
+        self._title_extractor = title_extractor
         self._text_splitter = text_splitter
 
     def process(
@@ -65,8 +71,12 @@ class ProcessDocumentService:
             self._text_splitter,
             max_chunk_characters=limits.max_chunk_characters,
         )
+        detected_title = self._title_extractor.extract_title(source.source_path)
 
-        return ProcessingResult(chunks=chunks)
+        return ProcessingResult(
+            chunks=chunks,
+            detected_title=detected_title,
+        )
 
 
 def normalize_page_text(text: str) -> str:

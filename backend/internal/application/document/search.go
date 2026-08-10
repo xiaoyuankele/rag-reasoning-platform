@@ -33,9 +33,10 @@ var (
 
 // SearchInput 是上层调用关键词检索用例时提供的数据。
 type SearchInput struct {
-	Query    string
-	Page     int64
-	PageSize int64
+	Query      string
+	DocumentID *int64
+	Page       int64
+	PageSize   int64
 }
 
 // SearchOutput 是关键词检索用例返回给 HTTP 层的结果。
@@ -80,6 +81,9 @@ func (s *SearchService) Search(
 	if utf8.RuneCountInString(query) > MaxSearchQueryRunes {
 		return SearchOutput{}, ErrSearchQueryTooLong
 	}
+	if input.DocumentID != nil && *input.DocumentID <= 0 {
+		return SearchOutput{}, ErrInvalidID
+	}
 
 	// 复用文档列表已经建立的分页边界，使同一个 API 中的分页规则一致。
 	if input.Page <= 0 {
@@ -93,9 +97,10 @@ func (s *SearchService) Search(
 	result, err := s.searcher.Search(
 		ctx,
 		documentdomain.SearchOptions{
-			Query:  query,
-			Limit:  input.PageSize,
-			Offset: offset,
+			Query:      query,
+			DocumentID: input.DocumentID,
+			Limit:      input.PageSize,
+			Offset:     offset,
 		},
 	)
 	if err != nil {
