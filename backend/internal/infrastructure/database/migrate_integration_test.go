@@ -44,6 +44,16 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 	}
 	defer adminPool.Close()
 
+	// pg_trgm 安装在 public，属于整个数据库而不是某个测试 schema。
+	// 先记录测试前状态，确保清理阶段只撤销本测试自己创建的扩展。
+	var trigramExtensionExisted bool
+	if err := adminPool.QueryRow(
+		ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')",
+	).Scan(&trigramExtensionExisted); err != nil {
+		t.Fatalf("query existing pg_trgm extension: %v", err)
+	}
+
 	// 每次测试使用独立 schema，不接触开发库中的真实 documents 表。
 	schemaName := fmt.Sprintf(
 		"migration_test_%d",
@@ -67,6 +77,15 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 			fmt.Sprintf(`DROP SCHEMA "%s" CASCADE`, schemaName),
 		); cleanupErr != nil {
 			t.Errorf("drop migration test schema: %v", cleanupErr)
+		}
+
+		if !trigramExtensionExisted {
+			if _, cleanupErr := adminPool.Exec(
+				cleanupContext,
+				"DROP EXTENSION IF EXISTS pg_trgm",
+			); cleanupErr != nil {
+				t.Errorf("drop test-created pg_trgm extension: %v", cleanupErr)
+			}
 		}
 	}()
 
@@ -144,6 +163,58 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 	}
 	if !hasDocumentChunkIndexConstraint {
 		t.Fatal("text_chunks document/index unique constraint was not created")
+	}
+
+	var hasTrigramExtension bool
+	if err := testPool.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_extension
+				WHERE extname = 'pg_trgm'
+				  AND extnamespace = 'public'::regnamespace
+			)
+		`,
+	).Scan(&hasTrigramExtension); err != nil {
+		t.Fatalf("query pg_trgm extension: %v", err)
+	}
+	if !hasTrigramExtension {
+		t.Fatal("pg_trgm extension was not installed in public")
+	}
+
+	var hasChunkContentGINIndex bool
+	if err := testPool.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_index AS index_metadata
+				JOIN pg_class AS index_relation
+					ON index_relation.oid = index_metadata.indexrelid
+				JOIN pg_am AS access_method
+					ON access_method.oid = index_relation.relam
+				JOIN pg_attribute AS indexed_attribute
+					ON indexed_attribute.attrelid = index_metadata.indrelid
+				   AND indexed_attribute.attnum = index_metadata.indkey[0]
+				JOIN pg_opclass AS operator_class
+					ON operator_class.oid = index_metadata.indclass[0]
+				WHERE index_metadata.indrelid = 'text_chunks'::regclass
+				  AND index_relation.relname = 'idx_text_chunks_content_trgm'
+				  AND access_method.amname = 'gin'
+				  AND index_metadata.indnatts = 1
+				  AND index_metadata.indisvalid
+				  AND index_metadata.indisready
+				  AND indexed_attribute.attname = 'content'
+				  AND operator_class.opcname = 'gin_trgm_ops'
+				  AND operator_class.opcnamespace = 'public'::regnamespace
+			)
+		`,
+	).Scan(&hasChunkContentGINIndex); err != nil {
+		t.Fatalf("query text_chunks trigram GIN index: %v", err)
+	}
+	if !hasChunkContentGINIndex {
+		t.Fatal("text_chunks trigram GIN index was not created")
 	}
 
 	var hasCascadeForeignKey bool

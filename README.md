@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P3（检索，进行中）。P2 异步解析链路已经完成；首个文本块关键词检索接口 `GET /search` 已接入 Gin、Application、Domain 端口和 PostgreSQL，并通过自动化测试及真实 HTTP + 数据库验收。下一步继续建设检索过滤、排序和性能测量；DOCX、OCR 和复杂学术版面质量属于后续增量能力。
+> 当前状态：P3（检索，进行中）。P2 异步解析链路已经完成；`GET /search` 已具备关键词检索、分页、可选 `document_id` 过滤及文献标题与原始文件名返回能力。中等数据量测量后已通过第 6 号迁移启用 `pg_trgm + GIN` 字面子串索引，并完成真实 PostgreSQL 全量回归。下一步收尾第一版排序、检索质量记录与 P3 验收边界；DOCX、OCR 和复杂学术版面质量属于后续增量能力。
 
 ## 项目目标
 
@@ -127,7 +127,7 @@ rag_reasoning_platform_individual/
 | P0 | 已完成 | 仓库、目录、忽略规则、配置模板和项目说明已经建立 |
 | P1 | 已完成 | Go 服务、PostgreSQL、迁移、文档增删查和真实 HTTP 验证已经完成 |
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
-| P3 | 进行中 | 文本块关键词检索和分页 HTTP 接口已完成；过滤、排序、索引策略与性能基线尚待建设 |
+| P3 | 进行中 | 关键词检索、分页、`document_id` 过滤、标题来源返回、性能基线及 `pg_trgm + GIN` 已完成；第一版排序和检索质量收尾尚待完成 |
 | P4 | 尚未开始 | 在检索链路可测量后再加入向量检索、摘要和问答 |
 | P5 | 部分进行 | 测试、配置、安全关闭和错误包装持续建设；正式部署和性能记录尚未完成 |
 
@@ -136,6 +136,12 @@ PDF 文献处理的错误分类、页码来源、资源限制、解析库选择�
 
 文献标题自动提取、落库、搜索结果展示和未来文献/文件拆分边界见
 [文献标题与文档内检索架构](docs/architecture/document-title-and-search-filter.md)。
+
+概念词典、同义词、中英文标注、语义检索与缓存后置的未实现设想见
+[概念词典、多语言标注与语义检索设想](docs/architecture/concept-retrieval-roadmap.md)。
+
+P3 关键词搜索的数据规模、表/索引空间、`EXPLAIN ANALYZE` 证据和阶段结论见
+[关键词检索性能基线](docs/performance/search-baseline-2026-08-10.md)。
 
 Python 类、函数和方法的中文 IDE 悬停说明要求见
 [Python Docstring 与 IDE 悬停说明规范](docs/development/python-docstrings.md)。
@@ -188,7 +194,7 @@ Worker Application 已定义可替换的文档处理器端口，并实现单次�
 
 Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义版本化请求、成功响应、失败响应、稳定错误码、示例和进程通信规则。Go 基础设施层已经实现安全绝对路径解析、请求构造、UTF-8 JSON 编码、严格响应解码、文本块不变量校验、结构化 Python 失败错误、子进程超时取消和 stdout/stderr 输出上限。生产 `PythonProcessor` 已注册到 `application/pdf`，自动化测试覆盖成功、结构化失败、非法响应、进程崩溃、超时与输出超限。Python 内部已经按 domain、application、contracts、entrypoints 和 infrastructure 完成轻量分层；pypdf 与简单文本切分器通过 application 定义的 Protocol 接入，不向核心层暴露第三方框架对象。Python PDF 处理能够识别伪造或损坏文件、密码要求、提取权限限制、OCR 需求以及文件和页数超限，并能对普通数字 PDF 逐页提取、规范化、页内分块和返回物理页码。真实英文文献已生成 126 个带页码文本块，真实中文文献已生成 42 个带页码文本块；二者均通过 HTTP 上传、Worker 异步处理、PostgreSQL 入库和 `ready` 状态验收。连字、页眉页脚、双栏和表格阅读顺序等质量改进留在 PDF-4 阶段。
 
-`GET /search` 已实现以统一文本块为结果单位的关键词检索。Handler 接收 `q`、`page` 和 `page_size` 查询参数，Application 负责业务校验、分页换算与总页数计算，PostgreSQL 仓储在 `text_chunks` 与 `documents` 之间执行关联查询并只返回 `ready` 文档。HTTP 响应包含命中文本、来源文档、物理页码和分页元数据。自动化测试覆盖成功、空结果、默认分页、非法参数与应用错误映射；真实数据库验收中关键词 `the` 命中 137 个文本块，真实 HTTP 验证确认命中与空结果返回 `200`，缺少关键词、非法页码和超限单页数量返回 `400`。
+`GET /search` 已实现以统一文本块为结果单位的关键词检索。Handler 接收 `q`、可选 `document_id`、`page` 和 `page_size` 查询参数，Application 负责业务校验、分页换算与总页数计算，PostgreSQL 仓储在 `text_chunks` 与 `documents` 之间执行关联查询并只返回 `ready` 文档。HTTP 响应包含命中文本、文献标题、原始文件名、物理页码和分页元数据。Repository 使用 `ILIKE` 保持中英文大小写不敏感的字面子串语义，并转义 `%`、`_` 与反斜杠；第 6 号迁移通过 `pg_trgm + GIN` 加速数万文本块规模下的稀有子串查询。自动化测试覆盖成功、空结果、默认分页、文档过滤、特殊字符、非法参数与应用错误映射；真实数据库验收中关键词 `the` 命中 137 个文本块，真实 HTTP 验证确认命中与空结果返回 `200`，缺少关键词、非法页码和超限单页数量返回 `400`。
 
 Python PDF 测试依赖 `ai/pyproject.toml` 中锁定的解析库。首次运行前安装项目依赖，然后执行测试：
 

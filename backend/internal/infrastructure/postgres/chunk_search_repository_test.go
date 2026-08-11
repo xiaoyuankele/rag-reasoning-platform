@@ -105,6 +105,12 @@ func TestChunkRepositorySearch(t *testing.T) {
 				PageStart: intPointer(4),
 				PageEnd:   intPointer(4),
 			},
+			{
+				Index:     2,
+				Content:   `Windows source path C:\research\paper.pdf`,
+				PageStart: intPointer(5),
+				PageEnd:   intPointer(5),
+			},
 		},
 	); err != nil {
 		t.Fatalf("replace Chinese search chunks: %v", err)
@@ -238,6 +244,29 @@ func TestChunkRepositorySearch(t *testing.T) {
 		if result.Hits[0].ChunkIndex != 1 {
 			t.Fatalf(
 				"Search() literal wildcard chunk index = %d, want 1",
+				result.Hits[0].ChunkIndex,
+			)
+		}
+	})
+
+	t.Run("treats the SQL escape character literally", func(t *testing.T) {
+		result, err := chunkRepository.Search(
+			ctx,
+			documentdomain.SearchOptions{Query: `\research\`, Limit: 10},
+		)
+		if err != nil {
+			t.Fatalf("Search() literal escape character error = %v", err)
+		}
+		if result.Total != 1 || len(result.Hits) != 1 {
+			t.Fatalf(
+				"Search() literal escape result = total %d, hits %d; want 1/1",
+				result.Total,
+				len(result.Hits),
+			)
+		}
+		if result.Hits[0].ChunkIndex != 2 {
+			t.Fatalf(
+				"Search() literal escape chunk index = %d, want 2",
 				result.Hits[0].ChunkIndex,
 			)
 		}

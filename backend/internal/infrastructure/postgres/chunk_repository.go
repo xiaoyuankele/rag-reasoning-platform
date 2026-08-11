@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -214,19 +215,21 @@ func (r *ChunkRepository) ListByDocumentID(
 
 // Search 跨 ready 文档检索包含指定关键词的统一文本块。
 //
-// P3 第一版使用大小写不敏感的字面子串匹配，保证连续中文和英文都能正确
-// 检索。相关性评分、专用索引和中文分词将在真实数据测量后逐步增加。
+// P3 使用大小写不敏感的字面子串匹配，保证连续中文和英文都能正确
+// 检索；PostgreSQL 通过 pg_trgm GIN 索引加速该 ILIKE 条件。
 func (r *ChunkRepository) Search(
 	ctx context.Context,
 	options document.SearchOptions,
 ) (document.SearchResult, error) {
+	queryPattern := literalSubstringPattern(options.Query)
+
 	const countQuery = `
 		SELECT COUNT(*)
 		FROM text_chunks AS chunk
 		JOIN documents AS source_document
 			ON source_document.id = chunk.document_id
 		WHERE source_document.status = $1
-		  AND STRPOS(LOWER(chunk.content), LOWER($2)) > 0
+		  AND chunk.content ILIKE $2 ESCAPE E'\\'
 		  AND ($3::BIGINT IS NULL OR chunk.document_id = $3)
 	`
 
@@ -235,7 +238,7 @@ func (r *ChunkRepository) Search(
 		ctx,
 		countQuery,
 		document.StatusReady,
-		options.Query,
+		queryPattern,
 		options.DocumentID,
 	).Scan(&total); err != nil {
 		return document.SearchResult{}, fmt.Errorf(
@@ -268,7 +271,7 @@ func (r *ChunkRepository) Search(
 		JOIN documents AS source_document
 			ON source_document.id = chunk.document_id
 		WHERE source_document.status = $1
-		  AND STRPOS(LOWER(chunk.content), LOWER($2)) > 0
+		  AND chunk.content ILIKE $2 ESCAPE E'\\'
 		  AND ($3::BIGINT IS NULL OR chunk.document_id = $3)
 		ORDER BY
 			source_document.created_at DESC,
@@ -283,7 +286,7 @@ func (r *ChunkRepository) Search(
 		ctx,
 		searchQuery,
 		document.StatusReady,
-		options.Query,
+		queryPattern,
 		options.DocumentID,
 		options.Limit,
 		options.Offset,
@@ -317,6 +320,22 @@ func (r *ChunkRepository) Search(
 		Hits:  hits,
 		Total: total,
 	}, nil
+}
+
+// literalSubstringPattern 把用户关键词转换成 ILIKE 字面子串模式。
+//
+// 反斜杠是当前 SQL 的 ESCAPE 字符；百分号和下划线是 LIKE 通配符。
+// 先转义这三类字符，再在两端添加百分号，才能保持“字面子串”语义。
+func literalSubstringPattern(query string) string {
+	replacer := strings.NewReplacer(
+		`\`, `\\`,
+		`%`, `\%`,
+		`_`, `\_`,
+	)
+
+	escapedQuery := replacer.Replace(query)
+
+	return "%" + escapedQuery + "%"
 }
 
 func scanTextChunk(row pgx.Row) (document.TextChunk, error) {

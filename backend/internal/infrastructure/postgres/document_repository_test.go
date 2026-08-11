@@ -42,6 +42,17 @@ func openIsolatedDocumentTestPool(
 		t.Fatalf("open admin database connection: %v", err)
 	}
 
+	// 第 6 号迁移把 pg_trgm 安装在 public。它属于整个数据库，不能只依靠
+	// DROP SCHEMA 清理；先记录原始状态，避免误删测试前已存在的共享扩展。
+	var trigramExtensionExisted bool
+	if err := adminPool.QueryRow(
+		ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')",
+	).Scan(&trigramExtensionExisted); err != nil {
+		adminPool.Close()
+		t.Fatalf("query existing pg_trgm extension: %v", err)
+	}
+
 	// schema 名完全由测试代码生成，不包含外部输入。
 	schemaName := fmt.Sprintf(
 		"document_repository_test_%d",
@@ -74,6 +85,18 @@ func openIsolatedDocumentTestPool(
 				schemaName,
 				cleanupErr,
 			)
+		}
+
+		if !trigramExtensionExisted {
+			if _, cleanupErr := adminPool.Exec(
+				cleanupContext,
+				"DROP EXTENSION IF EXISTS pg_trgm",
+			); cleanupErr != nil {
+				t.Errorf(
+					"drop test-created pg_trgm extension: %v",
+					cleanupErr,
+				)
+			}
 		}
 	})
 
