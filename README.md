@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P3（检索）已完成，准备进入 P4 架构讨论。`GET /search` 已具备关键词检索、分页、可选 `document_id` 过滤、文献标题与原始文件名返回、稳定排序及 `pg_trgm + GIN` 字面子串索引，并通过自动化、真实 PostgreSQL、性能基线和真实 HTTP 验收。P4 将在确认检索目标、Embedding 边界和来源引用契约后，再开发向量检索与 RAG；DOCX、OCR 和复杂学术版面质量仍属于后续增量能力。
+> 当前状态：P4（AI 增强）进行中。`GET /search` 关键词检索保持独立；可切换的远程 Embeddings Worker、独立 `embedding_jobs` 生命周期、pgvector 存储和手动任务触发已经完成。当前默认使用阿里云百炼，OpenAI 适配器继续保留；DashScope 真实纵向验收已经为一份 42 chunks 文档生成并原子保存 42 条 1536 维向量。下一步开发独立的 `POST /semantic-search`；DOCX、OCR 和复杂学术版面质量仍属于后续增量能力。
 
 ## 项目目标
 
@@ -128,7 +128,7 @@ rag_reasoning_platform_individual/
 | P1 | 已完成 | Go 服务、PostgreSQL、迁移、文档增删查和真实 HTTP 验证已经完成 |
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
-| P4 | 尚未开始 | 在检索链路可测量后再加入向量检索、摘要和问答 |
+| P4 | 进行中 | 已完成向量任务入队、执行、重试、pgvector 原子落库与启动恢复；下一步开发语义检索接口 |
 | P5 | 部分进行 | 测试、配置、安全关闭和错误包装持续建设；正式部署和性能记录尚未完成 |
 
 PDF 文献处理的错误分类、页码来源、资源限制、解析库选择和分阶段验收标准见
@@ -154,7 +154,7 @@ PostgreSQL 开发容器已通过 Docker Compose 启动，使用本机 `5433` 端
 
 Go 后端已使用 pgx 连接池连接 PostgreSQL，启动时会在 5 秒超时内执行真实 Ping；连接失败时 HTTP 服务不会启动。
 
-SQL 迁移已经建立 `documents`、`document_jobs` 和 `text_chunks` 表。迁移文件通过 `go:embed` 编译进后端，服务启动时会按数字版本自动执行；执行器使用 PostgreSQL advisory lock、独立事务和 SHA-256 校验，能够防止并发迁移以及历史 SQL 被静默修改。单元测试和真实 PostgreSQL 隔离 schema 测试均已通过。
+SQL 迁移已经建立 `documents`、`document_jobs`、`text_chunks` 和 `embedding_jobs` 表。迁移文件通过 `go:embed` 编译进后端，服务启动时会按数字版本自动执行；执行器使用 PostgreSQL advisory lock、独立事务和 SHA-256 校验，能够防止并发迁移以及历史 SQL 被静默修改。单元测试和真实 PostgreSQL 隔离 schema 测试均已通过。
 
 文档领域模型已定义与数据库字段对应的 Go 结构体、强类型处理状态和合法状态流转，并已通过表驱动测试验证。
 
@@ -196,6 +196,12 @@ Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义�
 
 `GET /search` 已实现以统一文本块为结果单位的关键词检索。Handler 接收 `q`、可选 `document_id`、`page` 和 `page_size` 查询参数，Application 负责业务校验、分页换算与总页数计算，PostgreSQL 仓储在 `text_chunks` 与 `documents` 之间执行关联查询并只返回 `ready` 文档。HTTP 响应包含命中文本、文献标题、原始文件名、物理页码和分页元数据。Repository 使用 `ILIKE` 保持中英文大小写不敏感的字面子串语义，并转义 `%`、`_` 与反斜杠；第 6 号迁移通过 `pg_trgm + GIN` 加速数万文本块规模下的稀有子串查询。第一版采用确定性排序：较新文档优先，同一文档内按照 `chunk_index` 原文顺序返回，不把时间顺序包装成相关性评分。自动化测试覆盖成功、空结果、默认分页、文档过滤、特殊字符、非法参数与应用错误映射；最终真实 HTTP 验收中关键词 `the` 命中 137 个文本块且重复请求顺序一致，中文“协同控制”命中 23 个文本块，文档 20 内搜索“控制”命中 30 个文本块，字面 `%_` 返回空结果而未扩大为通配匹配。
 
+`POST /documents/:id/embeddings` 已实现独立向量任务的手动入队。只有 `ready` 文档可以创建任务，成功返回 `202 Accepted`；非法 ID 返回 `400`，文档不存在返回 `404`，文本未就绪或已经存在活动向量任务返回 `409`。任务会冻结 `model_name` 和 `dimensions`，第一版数据库固定使用 1536 维向量；DashScope 默认模型为 `text-embedding-v4`，OpenAI 默认模型为 `text-embedding-3-small`。接口本身只创建 `queued` 任务；当 `EMBEDDING_WORKER_ENABLED=true` 时，后台单 Worker 会按批调用当前配置的远程 API，并通过 PostgreSQL 事务原子保存全部 chunk 向量与任务成功状态。临时错误按指数退避重新排队，鉴权、参数、余额或额度耗尽等永久错误进入 `failed`，正常 shutdown 遗留的 `processing` 任务会在下次单实例启动时恢复为 `queued`。Worker 默认关闭，不会产生远程调用或模型费用。
+
+DashScope 真实验收已经完成：文档 20 的 42 个文本块创建任务 22，使用 `text-embedding-v4`
+生成 1536 维向量；任务只领取 1 次并进入 `succeeded`，记录 16399 个输入 Token。数据库最终存在
+42 条互不重复、维度一致且非零的向量，没有遗漏文本块，也没有遗留 `queued/processing` 任务。
+
 Python PDF 测试依赖 `ai/pyproject.toml` 中锁定的解析库。首次运行前安装项目依赖，然后执行测试：
 
 ```powershell
@@ -223,6 +229,21 @@ Go 后端当前支持以下环境变量：
 | `PYTHON_SOURCE_ROOT` | `../ai/src` | 包含 `rag_ai` 包的 Python 源码目录，以 `backend` 为当前工作目录 |
 | `PYTHON_PDF_MAX_FILE_SIZE_BYTES` | `52428800` | PDF 解析文件上限，即 50 MiB；独立于上传上限 |
 | `PYTHON_PDF_MAX_PAGES` | `500` | 单份 PDF 允许解析的最大页数 |
+| `EMBEDDING_WORKER_ENABLED` | `false` | 是否启动远程 Embedding Worker；默认关闭以避免意外费用 |
+| `EMBEDDING_PROVIDER` | `dashscope` | 当前远程提供方，可选 `dashscope` 或 `openai` |
+| `DASHSCOPE_API_KEY` | 无 | 选择 DashScope 且 Worker 启用时必填；只能保存在本机 `.env` |
+| `DASHSCOPE_EMBEDDING_ENDPOINT` | 百炼中国内地兼容地址 | DashScope Embeddings HTTP API 地址 |
+| `OPENAI_API_KEY` | 无 | 选择 OpenAI 且 Worker 启用时必填；保留供以后切回 |
+| `OPENAI_EMBEDDING_ENDPOINT` | OpenAI 官方地址 | OpenAI Embeddings HTTP API 地址 |
+| `EMBEDDING_MODEL` | 按提供方决定 | 留空时 DashScope 使用 `text-embedding-v4`，OpenAI 使用 `text-embedding-3-small` |
+| `EMBEDDING_DIMENSIONS` | `1536` | 第一版固定维度；调整前必须迁移数据库并全量重建向量 |
+| `EMBEDDING_BATCH_SIZE` | 按提供方决定 | 留空时 DashScope 为 10、OpenAI 为 32；不能超过提供方上限 |
+| `EMBEDDING_HTTP_TIMEOUT` | `30s` | 单次远程 HTTP 请求超时 |
+| `EMBEDDING_PROCESSING_TIMEOUT` | `5m` | 单个向量任务包含全部批次的总处理超时 |
+| `EMBEDDING_POLL_INTERVAL` | `2s` | 空队列或单轮错误后的轮询等待时间 |
+| `EMBEDDING_MAX_ATTEMPTS` | `5` | 临时错误允许的最大领取次数 |
+| `EMBEDDING_RETRY_BASE_DELAY` | `5s` | 第一次延迟重试的基础等待时间 |
+| `EMBEDDING_RETRY_MAX_DELAY` | `2m` | 指数退避等待时间上限 |
 
 `.env.example` 是可以提交到 Git 的配置模板，不得包含密码或真实密钥。`.env` 用于保存本机配置和密钥，已被 Git 忽略。
 

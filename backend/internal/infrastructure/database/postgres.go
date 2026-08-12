@@ -3,10 +3,13 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	pgxvector "github.com/pgvector/pgvector-go/pgx"
 )
 
 const (
@@ -37,6 +40,7 @@ func Open(
 	poolConfig.MaxConns = maxConnections
 	poolConfig.MinConns = 0
 	poolConfig.MaxConnIdleTime = maxConnectionIdleTime
+	poolConfig.AfterConnect = registerVectorTypesWhenAvailable
 
 	// NewWithConfig 创建并管理并发安全的连接池。
 	// 创建连接池并不代表数据库一定已经能够访问，因此后面还要 Ping。
@@ -64,4 +68,57 @@ func Open(
 	}
 
 	return pool, nil
+}
+
+// registerVectorTypesWhenAvailable 在每条新建 pgx 连接上注册 pgvector 编解码器。
+//
+// 首次启动时连接池先于数据库迁移创建，此时 vector 扩展可能还不存在，因此这里先查询
+// 扩展类型是否可用。迁移完成后 RefreshVectorTypes 会重建现有连接；之后的新连接都会在
+// AfterConnect 中自动注册，不需要 Repository 自己处理数据库类型。
+func registerVectorTypesWhenAvailable(
+	ctx context.Context,
+	connection *pgx.Conn,
+) error {
+	var vectorAvailable bool
+	if err := connection.QueryRow(
+		ctx,
+		"SELECT to_regtype('public.vector') IS NOT NULL",
+	).Scan(&vectorAvailable); err != nil {
+		return fmt.Errorf("check pgvector type availability: %w", err)
+	}
+	if !vectorAvailable {
+		return nil
+	}
+
+	if err := pgxvector.RegisterTypes(ctx, connection); err != nil {
+		return fmt.Errorf("register pgvector types: %w", err)
+	}
+
+	return nil
+}
+
+// RefreshVectorTypes 在创建 vector 扩展的迁移完成后刷新连接池。
+//
+// Reset 只关闭空闲连接，不会中断正在使用的连接。服务启动阶段尚未开始接受 HTTP 请求，
+// 因此随后 Acquire 得到的新连接会通过 AfterConnect 注册 vector 类型。
+func RefreshVectorTypes(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) error {
+	if pool == nil {
+		return errors.New("PostgreSQL connection pool must be provided")
+	}
+
+	pool.Reset()
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire refreshed PostgreSQL connection: %w", err)
+	}
+	defer connection.Release()
+
+	if _, registered := connection.Conn().TypeMap().TypeForName("vector"); !registered {
+		return errors.New("pgvector type was not registered after migrations")
+	}
+
+	return nil
 }

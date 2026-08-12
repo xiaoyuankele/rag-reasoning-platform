@@ -1,7 +1,8 @@
 services:
   postgres:
-    # 复用本机已有的轻量镜像，避免重复下载。
-    image: postgres:15-alpine
+    # 保持 PostgreSQL 主版本 15，并固定 pgvector 扩展版本，避免 latest 漂移。
+    # bookworm 镜像沿用 PostgreSQL 官方数据目录，可继续挂载现有 PG15 数据卷。
+    image: pgvector/pgvector:0.8.2-pg15-bookworm
     container_name: rag_reasoning_postgres
 
     # PostgreSQL 官方镜像使用这三个变量初始化数据库。

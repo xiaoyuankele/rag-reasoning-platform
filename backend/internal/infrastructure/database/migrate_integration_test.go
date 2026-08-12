@@ -54,6 +54,14 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 		t.Fatalf("query existing pg_trgm extension: %v", err)
 	}
 
+	var vectorExtensionExisted bool
+	if err := adminPool.QueryRow(
+		ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')",
+	).Scan(&vectorExtensionExisted); err != nil {
+		t.Fatalf("query existing vector extension: %v", err)
+	}
+
 	// 每次测试使用独立 schema，不接触开发库中的真实 documents 表。
 	schemaName := fmt.Sprintf(
 		"migration_test_%d",
@@ -85,6 +93,15 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 				"DROP EXTENSION IF EXISTS pg_trgm",
 			); cleanupErr != nil {
 				t.Errorf("drop test-created pg_trgm extension: %v", cleanupErr)
+			}
+		}
+
+		if !vectorExtensionExisted {
+			if _, cleanupErr := adminPool.Exec(
+				cleanupContext,
+				"DROP EXTENSION IF EXISTS vector",
+			); cleanupErr != nil {
+				t.Errorf("drop test-created vector extension: %v", cleanupErr)
 			}
 		}
 	}()
@@ -181,6 +198,59 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 	}
 	if !hasTrigramExtension {
 		t.Fatal("pg_trgm extension was not installed in public")
+	}
+
+	var hasVectorExtension bool
+	if err := testPool.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_extension
+				WHERE extname = 'vector'
+				  AND extnamespace = 'public'::regnamespace
+			)
+		`,
+	).Scan(&hasVectorExtension); err != nil {
+		t.Fatalf("query vector extension: %v", err)
+	}
+	if !hasVectorExtension {
+		t.Fatal("vector extension was not installed in public")
+	}
+
+	var chunkEmbeddingsTable string
+	if err := testPool.QueryRow(
+		ctx,
+		"SELECT to_regclass('chunk_embeddings')::text",
+	).Scan(&chunkEmbeddingsTable); err != nil {
+		t.Fatalf("query chunk_embeddings table: %v", err)
+	}
+	if chunkEmbeddingsTable != "chunk_embeddings" {
+		t.Fatalf(
+			"chunk_embeddings table = %q, want %q",
+			chunkEmbeddingsTable,
+			"chunk_embeddings",
+		)
+	}
+
+	var embeddingType string
+	if err := testPool.QueryRow(
+		ctx,
+		`
+			SELECT format_type(attribute.atttypid, attribute.atttypmod)
+			FROM pg_attribute AS attribute
+			WHERE attribute.attrelid = 'chunk_embeddings'::regclass
+			  AND attribute.attname = 'embedding'
+			  AND NOT attribute.attisdropped
+		`,
+	).Scan(&embeddingType); err != nil {
+		t.Fatalf("query chunk_embeddings vector type: %v", err)
+	}
+	if embeddingType != "public.vector(1536)" && embeddingType != "vector(1536)" {
+		t.Fatalf(
+			"chunk_embeddings.embedding type = %q, want vector(1536)",
+			embeddingType,
+		)
 	}
 
 	var hasChunkContentGINIndex bool

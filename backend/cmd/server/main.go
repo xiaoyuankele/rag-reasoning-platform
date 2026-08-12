@@ -9,14 +9,19 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"rag-reasoning-platform/backend/internal/api"
 	documentapplication "rag-reasoning-platform/backend/internal/application/document"
+	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
 	"rag-reasoning-platform/backend/internal/config"
+	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
+	"rag-reasoning-platform/backend/internal/infrastructure/dashscopeembedding"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
+	"rag-reasoning-platform/backend/internal/infrastructure/openaiembedding"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
 	"rag-reasoning-platform/backend/internal/infrastructure/pythonprocessor"
 	"rag-reasoning-platform/backend/migrations"
@@ -78,6 +83,11 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("load Python processor configuration: %w", err)
 	}
 
+	embeddingConfig, err := config.LoadEmbedding()
+	if err != nil {
+		return fmt.Errorf("load embedding configuration: %w", err)
+	}
+
 	// ConnectionString 包含密码，只传给数据库层，不写入日志。
 	databasePool, err := database.Open(
 		ctx,
@@ -104,9 +114,19 @@ func run(ctx context.Context) error {
 		)
 	}
 
+	// 第 9 号迁移首次创建 vector 扩展后，刷新迁移前已经建立的连接。
+	// Repository 随后可以直接传递 pgvector.Vector，而不需要拼接向量字符串。
+	if err := database.RefreshVectorTypes(ctx, databasePool); err != nil {
+		return fmt.Errorf(
+			"refresh pgvector database types: %w",
+			err,
+		)
+	}
+
 	// Repository 负责 PostgreSQL 数据访问。
 	documentRepository := postgres.NewDocumentRepository(databasePool)
 	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
+	embeddingJobRepository := postgres.NewEmbeddingJobRepository(databasePool)
 	chunkRepository := postgres.NewChunkRepository(databasePool)
 
 	// Worker 启动前，先恢复上一次异常退出遗留的 processing 任务。
@@ -127,6 +147,29 @@ func run(ctx context.Context) error {
 		log.Printf(
 			"recovered %d interrupted processing jobs",
 			recoveredJobCount,
+		)
+	}
+
+	// Embedding Worker 在 shutdown 时保留 processing，避免把正常停机伪装成业务失败。
+	// 单实例服务重新启动后，必须先把这些遗留任务放回 queued，随后才能启动 Worker。
+	embeddingRecoveryService, err :=
+		embeddingapplication.NewInterruptedJobRecoveryService(
+			embeddingJobRepository,
+		)
+	if err != nil {
+		return fmt.Errorf("create embedding recovery service: %w", err)
+	}
+	embeddingRecoveredJobCount, err := embeddingRecoveryService.Recover(ctx)
+	if err != nil {
+		return fmt.Errorf(
+			"recover interrupted embedding jobs during startup: %w",
+			err,
+		)
+	}
+	if embeddingRecoveredJobCount > 0 {
+		log.Printf(
+			"requeued %d interrupted embedding jobs",
+			embeddingRecoveredJobCount,
 		)
 	}
 
@@ -173,19 +216,101 @@ func run(ctx context.Context) error {
 	processingJobService := documentapplication.NewProcessingJobService(
 		processingJobRepository,
 	)
-	worker := documentapplication.NewWorker(
+	embeddingQueueService := embeddingapplication.NewQueueService(
+		documentRepository,
+		embeddingJobRepository,
+		embeddingConfig.ModelName,
+		embeddingConfig.Dimensions,
+	)
+	documentWorker := documentapplication.NewWorker(
 		processingJobRepository,
 		documentRepository,
 		processorDispatcher,
 		chunkRepository,
 		workerConfig.ProcessingTimeout,
 	)
-	workerErrorReporter := func(err error) {
-		log.Printf("worker error: %v", err)
+	documentWorkerErrorReporter := func(err error) {
+		log.Printf("document worker error: %v", err)
 	}
-	workerLoop, err := documentapplication.NewWorkerLoop(worker, workerConfig.PollInterval, workerErrorReporter)
+	documentWorkerLoop, err := documentapplication.NewWorkerLoop(
+		documentWorker,
+		workerConfig.PollInterval,
+		documentWorkerErrorReporter,
+	)
 	if err != nil {
-		return fmt.Errorf("create worker loop: %w", err)
+		return fmt.Errorf("create document worker loop: %w", err)
+	}
+
+	// 默认不启动远程向量 Worker，避免开发者未明确授权时产生 API 调用和费用。
+	// 启用后，下面只负责把已经实现各自接口的积木组装起来。
+	var embeddingWorkerLoop *documentapplication.WorkerLoop
+	if embeddingConfig.WorkerEnabled {
+		embeddingHTTPClient := &http.Client{
+			Timeout: embeddingConfig.HTTPTimeout,
+		}
+
+		// main 是组合根：Config 决定本次运行把哪个 Infrastructure 实现注入 Application。
+		// Embedder 接口不会自动寻找实现；以后切回 OpenAI 只需修改环境变量，
+		// Embedding Worker、业务编排和数据库代码都不需要修改。
+		var embedder embeddingdomain.Embedder
+		switch embeddingConfig.Provider {
+		case config.EmbeddingProviderDashScope:
+			embedder, err = dashscopeembedding.NewClient(
+				embeddingConfig.APIKey,
+				embeddingConfig.Endpoint,
+				embeddingHTTPClient,
+			)
+		case config.EmbeddingProviderOpenAI:
+			embedder, err = openaiembedding.NewClient(
+				embeddingConfig.APIKey,
+				embeddingConfig.Endpoint,
+				embeddingHTTPClient,
+			)
+		default:
+			return fmt.Errorf(
+				"create embedding client: unsupported provider %q",
+				embeddingConfig.Provider,
+			)
+		}
+		if err != nil {
+			return fmt.Errorf(
+				"create %s embedding client: %w",
+				embeddingConfig.Provider,
+				err,
+			)
+		}
+
+		retryPolicy, err := embeddingapplication.NewRetryPolicy(
+			embeddingConfig.MaxAttempts,
+			embeddingConfig.RetryBaseDelay,
+			embeddingConfig.RetryMaxDelay,
+		)
+		if err != nil {
+			return fmt.Errorf("create embedding retry policy: %w", err)
+		}
+
+		embeddingWorker, err := embeddingapplication.NewWorker(
+			embeddingJobRepository,
+			chunkRepository,
+			embedder,
+			embeddingConfig.BatchSize,
+			embeddingConfig.ProcessingTimeout,
+			retryPolicy,
+		)
+		if err != nil {
+			return fmt.Errorf("create embedding worker: %w", err)
+		}
+
+		embeddingWorkerLoop, err = documentapplication.NewWorkerLoop(
+			embeddingWorker,
+			embeddingConfig.PollInterval,
+			func(err error) {
+				log.Printf("embedding worker error: %v", err)
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create embedding worker loop: %w", err)
+		}
 	}
 
 	// workerContext 专门控制后台 Worker 的生命周期。
@@ -193,23 +318,26 @@ func run(ctx context.Context) error {
 	// WorkerLoop 就能结束等待并退出循环。
 	workerContext, cancelWorker := context.WithCancel(ctx)
 
-	// workerDone 不传递具体数据，只表示“Worker goroutine 已经退出”。
-	workerDone := make(chan struct{})
+	// WaitGroup 记录仍未退出的 Worker goroutine 数量。
+	var workerGroup sync.WaitGroup
+	startWorkerLoop := func(loop *documentapplication.WorkerLoop) {
+		workerGroup.Add(1)
+		go func() {
+			defer workerGroup.Done()
+			loop.Run(workerContext)
+		}()
+	}
 
-	// go 关键字让 WorkerLoop 在新的 goroutine 中运行。
-	// 当前主 goroutine 不会被 WorkerLoop 的循环阻塞，可以继续启动 HTTP 服务。
-	go func() {
-		// 无论 WorkerLoop 如何正常返回，退出当前 goroutine 前都关闭 workerDone。
-		defer close(workerDone)
-
-		workerLoop.Run(workerContext)
-	}()
+	startWorkerLoop(documentWorkerLoop)
+	if embeddingWorkerLoop != nil {
+		startWorkerLoop(embeddingWorkerLoop)
+	}
 
 	// defer 在 run 返回前执行。
 	// 先通知 Worker 停止，再等待它完全退出。
 	defer func() {
 		cancelWorker()
-		<-workerDone
+		workerGroup.Wait()
 	}()
 
 	// Handler 负责把 HTTP 请求转换成应用服务调用。
@@ -224,6 +352,9 @@ func run(ctx context.Context) error {
 	processingJobHandler := api.NewProcessingJobHandler(
 		processingJobService,
 	)
+	documentEmbeddingHandler := api.NewDocumentEmbeddingHandler(
+		embeddingQueueService,
+	)
 
 	router := api.NewRouter()
 	documentHandler.RegisterRoutes(router)
@@ -233,6 +364,7 @@ func run(ctx context.Context) error {
 	documentDeleteHandler.RegisterRoutes(router)
 	documentProcessingHandler.RegisterRoutes(router)
 	processingJobHandler.RegisterRoutes(router)
+	documentEmbeddingHandler.RegisterRoutes(router)
 
 	// Gin Engine 实现了 http.Handler，所以可以交给标准库 http.Server。
 	// 不再使用 router.Run，是因为我们需要持有 Server，才能在收到退出信号时
