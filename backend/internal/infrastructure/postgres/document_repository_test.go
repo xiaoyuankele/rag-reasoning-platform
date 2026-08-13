@@ -108,6 +108,9 @@ func openIsolatedDocumentTestPool(
 	}
 	poolConfig.MaxConns = 2
 	poolConfig.ConnConfig.RuntimeParams["search_path"] = schemaName
+	// 隔离测试自己创建连接池，因此必须显式复用生产环境的 AfterConnect 钩子。
+	// vector 扩展尚未安装时该钩子安全跳过；迁移后 Reset 会让新连接完成类型注册。
+	poolConfig.AfterConnect = database.RegisterVectorTypesWhenAvailable
 
 	testPool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {

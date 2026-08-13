@@ -40,7 +40,7 @@ func Open(
 	poolConfig.MaxConns = maxConnections
 	poolConfig.MinConns = 0
 	poolConfig.MaxConnIdleTime = maxConnectionIdleTime
-	poolConfig.AfterConnect = registerVectorTypesWhenAvailable
+	poolConfig.AfterConnect = RegisterVectorTypesWhenAvailable
 
 	// NewWithConfig 创建并管理并发安全的连接池。
 	// 创建连接池并不代表数据库一定已经能够访问，因此后面还要 Ping。
@@ -70,12 +70,13 @@ func Open(
 	return pool, nil
 }
 
-// registerVectorTypesWhenAvailable 在每条新建 pgx 连接上注册 pgvector 编解码器。
+// RegisterVectorTypesWhenAvailable 在每条新建 pgx 连接上注册 pgvector 编解码器。
 //
 // 首次启动时连接池先于数据库迁移创建，此时 vector 扩展可能还不存在，因此这里先查询
 // 扩展类型是否可用。迁移完成后 RefreshVectorTypes 会重建现有连接；之后的新连接都会在
-// AfterConnect 中自动注册，不需要 Repository 自己处理数据库类型。
-func registerVectorTypesWhenAvailable(
+// AfterConnect 中自动注册，不需要 Repository 自己处理数据库类型。导出该函数是为了让
+// 使用自定义 search_path 的隔离测试连接池复用与生产环境完全相同的注册规则。
+func RegisterVectorTypesWhenAvailable(
 	ctx context.Context,
 	connection *pgx.Conn,
 ) error {
@@ -90,11 +91,47 @@ func registerVectorTypesWhenAvailable(
 		return nil
 	}
 
-	if err := pgxvector.RegisterTypes(ctx, connection); err != nil {
-		return fmt.Errorf("register pgvector types: %w", err)
+	// pgvector-go v0.4.0 内部使用裸类型名 vector/halfvec/sparsevec 查询 OID。
+	// 自定义 search_path（例如隔离测试 schema）可能看不到安装在 public 的扩展类型。
+	// AfterConnect 尚未把连接交给业务代码，因此可以在注册期间临时把 public 放到最前面，
+	// 注册完成后再恢复原值，不改变 Repository 随后的表解析范围。
+	var originalSearchPath string
+	if err := connection.QueryRow(
+		ctx,
+		"SELECT current_setting('search_path')",
+	).Scan(&originalSearchPath); err != nil {
+		return fmt.Errorf("read PostgreSQL search_path before pgvector registration: %w", err)
+	}
+
+	if _, err := connection.Exec(
+		ctx,
+		"SELECT set_config('search_path', 'public,' || $1, false)",
+		originalSearchPath,
+	); err != nil {
+		return fmt.Errorf("make public pgvector types visible during registration: %w", err)
+	}
+
+	registerErr := pgxvector.RegisterTypes(ctx, connection)
+	_, restoreErr := connection.Exec(
+		ctx,
+		"SELECT set_config('search_path', $1, false)",
+		originalSearchPath,
+	)
+	if registerErr != nil || restoreErr != nil {
+		return errors.Join(
+			wrapDatabaseError("register pgvector types", registerErr),
+			wrapDatabaseError("restore search_path after pgvector registration", restoreErr),
+		)
 	}
 
 	return nil
+}
+
+func wrapDatabaseError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 // RefreshVectorTypes 在创建 vector 扩展的迁移完成后刷新连接池。

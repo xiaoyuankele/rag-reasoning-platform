@@ -17,6 +17,9 @@ func TestLoadEmbeddingUsesDefaults(t *testing.T) {
 	if embeddingConfig.WorkerEnabled {
 		t.Fatal("WorkerEnabled = true, want false by default")
 	}
+	if embeddingConfig.SemanticSearchEnabled {
+		t.Fatal("SemanticSearchEnabled = true, want false by default")
+	}
 	if embeddingConfig.APIKey != "" {
 		t.Fatal("APIKey must be empty when it was not configured")
 	}
@@ -118,13 +121,42 @@ func TestLoadEmbeddingRejectsInvalidDimensions(t *testing.T) {
 	}
 }
 
-func TestLoadEmbeddingRequiresAPIKeyOnlyWhenWorkerIsEnabled(t *testing.T) {
-	clearEmbeddingEnvironment(t)
-	t.Setenv("EMBEDDING_WORKER_ENABLED", "true")
+func TestLoadEmbeddingRequiresAPIKeyWhenRemoteCapabilityIsEnabled(t *testing.T) {
+	tests := []struct {
+		name        string
+		environment string
+	}{
+		{name: "worker", environment: "EMBEDDING_WORKER_ENABLED"},
+		{name: "semantic search", environment: "SEMANTIC_SEARCH_ENABLED"},
+	}
 
-	_, err := LoadEmbedding()
-	if !errors.Is(err, ErrEmbeddingAPIKeyRequired) {
-		t.Fatalf("LoadEmbedding() error = %v, want ErrEmbeddingAPIKeyRequired", err)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearEmbeddingEnvironment(t)
+			t.Setenv(test.environment, "true")
+
+			_, err := LoadEmbedding()
+			if !errors.Is(err, ErrEmbeddingAPIKeyRequired) {
+				t.Fatalf("LoadEmbedding() error = %v, want ErrEmbeddingAPIKeyRequired", err)
+			}
+		})
+	}
+}
+
+func TestLoadEmbeddingEnablesSemanticSearch(t *testing.T) {
+	clearEmbeddingEnvironment(t)
+	t.Setenv("SEMANTIC_SEARCH_ENABLED", "true")
+	t.Setenv("DASHSCOPE_API_KEY", "test-api-key")
+
+	embeddingConfig, err := LoadEmbedding()
+	if err != nil {
+		t.Fatalf("LoadEmbedding() error = %v, want nil", err)
+	}
+	if !embeddingConfig.SemanticSearchEnabled {
+		t.Fatal("SemanticSearchEnabled = false, want true")
+	}
+	if embeddingConfig.WorkerEnabled {
+		t.Fatal("WorkerEnabled = true, want independent false value")
 	}
 }
 
@@ -169,6 +201,15 @@ func TestLoadEmbeddingRejectsInvalidWorkerEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadEmbeddingRejectsInvalidSemanticSearchEnabled(t *testing.T) {
+	clearEmbeddingEnvironment(t)
+	t.Setenv("SEMANTIC_SEARCH_ENABLED", "sometimes")
+
+	if _, err := LoadEmbedding(); err == nil {
+		t.Fatal("LoadEmbedding() error = nil for invalid semantic search enabled value")
+	}
+}
+
 func TestLoadEmbeddingRejectsReversedRetryDelays(t *testing.T) {
 	clearEmbeddingEnvironment(t)
 	t.Setenv("EMBEDDING_RETRY_BASE_DELAY", "2m")
@@ -185,6 +226,7 @@ func clearEmbeddingEnvironment(t *testing.T) {
 
 	for _, name := range []string{
 		"EMBEDDING_WORKER_ENABLED",
+		"SEMANTIC_SEARCH_ENABLED",
 		"EMBEDDING_PROVIDER",
 		"DASHSCOPE_API_KEY",
 		"DASHSCOPE_EMBEDDING_ENDPOINT",

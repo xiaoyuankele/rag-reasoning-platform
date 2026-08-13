@@ -18,10 +18,8 @@ import (
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
 	"rag-reasoning-platform/backend/internal/config"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
-	"rag-reasoning-platform/backend/internal/infrastructure/dashscopeembedding"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
-	"rag-reasoning-platform/backend/internal/infrastructure/openaiembedding"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
 	"rag-reasoning-platform/backend/internal/infrastructure/pythonprocessor"
 	"rag-reasoning-platform/backend/migrations"
@@ -241,44 +239,33 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create document worker loop: %w", err)
 	}
 
-	// 默认不启动远程向量 Worker，避免开发者未明确授权时产生 API 调用和费用。
-	// 启用后，下面只负责把已经实现各自接口的积木组装起来。
+	// Worker 和在线语义检索都依赖 Embedder，但可以独立启用。只要任一能力
+	// 开启，就创建一个客户端并在两者之间复用；两者都关闭时不访问远程服务。
+	var embedder embeddingdomain.Embedder
+	if embeddingConfig.WorkerEnabled || embeddingConfig.SemanticSearchEnabled {
+		embedder, err = newEmbeddingClient(embeddingConfig)
+		if err != nil {
+			return err
+		}
+	}
+
+	var semanticSearchService *embeddingapplication.SemanticSearchService
+	if embeddingConfig.SemanticSearchEnabled {
+		semanticSearchService, err =
+			embeddingapplication.NewSemanticSearchService(
+				embedder,
+				chunkRepository,
+				embeddingConfig.ModelName,
+				embeddingConfig.Dimensions,
+			)
+		if err != nil {
+			return fmt.Errorf("create semantic search service: %w", err)
+		}
+	}
+
+	// 默认不启动远程向量 Worker，避免开发者未明确授权时产生后台 API 调用。
 	var embeddingWorkerLoop *documentapplication.WorkerLoop
 	if embeddingConfig.WorkerEnabled {
-		embeddingHTTPClient := &http.Client{
-			Timeout: embeddingConfig.HTTPTimeout,
-		}
-
-		// main 是组合根：Config 决定本次运行把哪个 Infrastructure 实现注入 Application。
-		// Embedder 接口不会自动寻找实现；以后切回 OpenAI 只需修改环境变量，
-		// Embedding Worker、业务编排和数据库代码都不需要修改。
-		var embedder embeddingdomain.Embedder
-		switch embeddingConfig.Provider {
-		case config.EmbeddingProviderDashScope:
-			embedder, err = dashscopeembedding.NewClient(
-				embeddingConfig.APIKey,
-				embeddingConfig.Endpoint,
-				embeddingHTTPClient,
-			)
-		case config.EmbeddingProviderOpenAI:
-			embedder, err = openaiembedding.NewClient(
-				embeddingConfig.APIKey,
-				embeddingConfig.Endpoint,
-				embeddingHTTPClient,
-			)
-		default:
-			return fmt.Errorf(
-				"create embedding client: unsupported provider %q",
-				embeddingConfig.Provider,
-			)
-		}
-		if err != nil {
-			return fmt.Errorf(
-				"create %s embedding client: %w",
-				embeddingConfig.Provider,
-				err,
-			)
-		}
 
 		retryPolicy, err := embeddingapplication.NewRetryPolicy(
 			embeddingConfig.MaxAttempts,
@@ -355,6 +342,12 @@ func run(ctx context.Context) error {
 	documentEmbeddingHandler := api.NewDocumentEmbeddingHandler(
 		embeddingQueueService,
 	)
+	var semanticSearchHandler *api.SemanticSearchHandler
+	if semanticSearchService != nil {
+		semanticSearchHandler = api.NewSemanticSearchHandler(
+			semanticSearchService,
+		)
+	}
 
 	router := api.NewRouter()
 	documentHandler.RegisterRoutes(router)
@@ -365,6 +358,9 @@ func run(ctx context.Context) error {
 	documentProcessingHandler.RegisterRoutes(router)
 	processingJobHandler.RegisterRoutes(router)
 	documentEmbeddingHandler.RegisterRoutes(router)
+	if semanticSearchHandler != nil {
+		semanticSearchHandler.RegisterRoutes(router)
+	}
 
 	// Gin Engine 实现了 http.Handler，所以可以交给标准库 http.Server。
 	// 不再使用 router.Run，是因为我们需要持有 Server，才能在收到退出信号时

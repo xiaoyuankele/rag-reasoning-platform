@@ -51,7 +51,7 @@ var (
 		"embedding dimensions must be 1536 until the vector schema is migrated",
 	)
 	ErrEmbeddingAPIKeyRequired = errors.New(
-		"embedding provider API key must be provided when the embedding worker is enabled",
+		"embedding provider API key must be provided when a remote embedding capability is enabled",
 	)
 	ErrUnsupportedEmbeddingProvider = errors.New(
 		"embedding provider must be dashscope or openai",
@@ -61,28 +61,36 @@ var (
 	)
 )
 
-// EmbeddingConfig 保存任务入队和后台执行需要的向量配置。
+// EmbeddingConfig 保存任务入队、后台执行和在线语义检索需要的向量配置。
 //
 // APIKey 只允许传给远程 HTTP 适配器，禁止写入日志、数据库或 HTTP 响应。
 type EmbeddingConfig struct {
-	WorkerEnabled     bool
-	Provider          EmbeddingProvider
-	APIKey            string
-	Endpoint          string
-	ModelName         string
-	Dimensions        int
-	BatchSize         int
-	HTTPTimeout       time.Duration
-	ProcessingTimeout time.Duration
-	PollInterval      time.Duration
-	MaxAttempts       int
-	RetryBaseDelay    time.Duration
-	RetryMaxDelay     time.Duration
+	WorkerEnabled         bool
+	SemanticSearchEnabled bool
+	Provider              EmbeddingProvider
+	APIKey                string
+	Endpoint              string
+	ModelName             string
+	Dimensions            int
+	BatchSize             int
+	HTTPTimeout           time.Duration
+	ProcessingTimeout     time.Duration
+	PollInterval          time.Duration
+	MaxAttempts           int
+	RetryBaseDelay        time.Duration
+	RetryMaxDelay         time.Duration
 }
 
-// LoadEmbedding 从环境变量加载向量任务与 Worker 配置。
+// LoadEmbedding 从环境变量加载向量任务、Worker 与语义检索配置。
 func LoadEmbedding() (EmbeddingConfig, error) {
 	workerEnabled, err := loadOptionalBool("EMBEDDING_WORKER_ENABLED", false)
+	if err != nil {
+		return EmbeddingConfig{}, err
+	}
+	semanticSearchEnabled, err := loadOptionalBool(
+		"SEMANTIC_SEARCH_ENABLED",
+		false,
+	)
 	if err != nil {
 		return EmbeddingConfig{}, err
 	}
@@ -95,7 +103,9 @@ func LoadEmbedding() (EmbeddingConfig, error) {
 	providerConfig := embeddingProviderDefaults(provider)
 
 	apiKey := strings.TrimSpace(os.Getenv(providerConfig.apiKeyEnvironment))
-	if workerEnabled && apiKey == "" {
+	// Worker 和在线语义检索都会调用远程 Embedding API。只有两项能力都关闭时，
+	// 才允许不配置 API Key，从而避免基础文档功能被 AI 配置阻塞。
+	if (workerEnabled || semanticSearchEnabled) && apiKey == "" {
 		return EmbeddingConfig{}, fmt.Errorf(
 			"%w: %s",
 			ErrEmbeddingAPIKeyRequired,
@@ -190,19 +200,20 @@ func LoadEmbedding() (EmbeddingConfig, error) {
 	}
 
 	return EmbeddingConfig{
-		WorkerEnabled:     workerEnabled,
-		Provider:          provider,
-		APIKey:            apiKey,
-		Endpoint:          endpoint,
-		ModelName:         modelName,
-		Dimensions:        dimensions,
-		BatchSize:         batchSize,
-		HTTPTimeout:       httpTimeout,
-		ProcessingTimeout: processingTimeout,
-		PollInterval:      pollInterval,
-		MaxAttempts:       maxAttempts,
-		RetryBaseDelay:    retryBaseDelay,
-		RetryMaxDelay:     retryMaxDelay,
+		WorkerEnabled:         workerEnabled,
+		SemanticSearchEnabled: semanticSearchEnabled,
+		Provider:              provider,
+		APIKey:                apiKey,
+		Endpoint:              endpoint,
+		ModelName:             modelName,
+		Dimensions:            dimensions,
+		BatchSize:             batchSize,
+		HTTPTimeout:           httpTimeout,
+		ProcessingTimeout:     processingTimeout,
+		PollInterval:          pollInterval,
+		MaxAttempts:           maxAttempts,
+		RetryBaseDelay:        retryBaseDelay,
+		RetryMaxDelay:         retryMaxDelay,
 	}, nil
 }
 

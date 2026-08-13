@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P4（AI 增强）进行中。`GET /search` 关键词检索保持独立；可切换的远程 Embeddings Worker、独立 `embedding_jobs` 生命周期、pgvector 存储和手动任务触发已经完成。当前默认使用阿里云百炼，OpenAI 适配器继续保留；DashScope 真实纵向验收已经为一份 42 chunks 文档生成并原子保存 42 条 1536 维向量。下一步开发独立的 `POST /semantic-search`；DOCX、OCR 和复杂学术版面质量仍属于后续增量能力。
+> 当前状态：P4（AI 增强）进行中。`GET /search` 关键词检索保持独立；可切换的远程 Embeddings Worker、独立 `embedding_jobs` 生命周期、pgvector 存储和手动任务触发已经完成。当前默认使用阿里云百炼，OpenAI 适配器继续保留；DashScope 真实纵向验收已经为一份 42 chunks 文档生成并原子保存 42 条 1536 维向量。独立的 `POST /semantic-search` 已完成 Domain、Application、PostgreSQL、Handler、生产组合和真实 DashScope HTTP 验收；下一步建立中英文真实问题测试集并评估检索质量。DOCX、OCR 和复杂学术版面质量仍属于后续增量能力。
 
 ## 项目目标
 
@@ -120,7 +120,7 @@ rag_reasoning_platform_individual/
 - **P4：AI 增强**——向量检索、带来源引用的摘要或问答，以及失败降级。
 - **P5：工程化**——测试、日志、配置校验、部署、性能记录和求职材料。
 
-### 当前里程碑进度（2026-08-10）
+### 当前里程碑进度（2026-08-13）
 
 | 阶段 | 状态 | 当前结论 |
 | --- | --- | --- |
@@ -128,7 +128,7 @@ rag_reasoning_platform_individual/
 | P1 | 已完成 | Go 服务、PostgreSQL、迁移、文档增删查和真实 HTTP 验证已经完成 |
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
-| P4 | 进行中 | 已完成向量任务入队、执行、重试、pgvector 原子落库与启动恢复；下一步开发语义检索接口 |
+| P4 | 进行中 | 向量生产链路与独立语义检索接口均通过真实验收；下一步建立中英文问题质量测试集 |
 | P5 | 部分进行 | 测试、配置、安全关闭和错误包装持续建设；正式部署和性能记录尚未完成 |
 
 PDF 文献处理的错误分类、页码来源、资源限制、解析库选择和分阶段验收标准见
@@ -202,6 +202,14 @@ DashScope 真实验收已经完成：文档 20 的 42 个文本块创建任务 2
 生成 1536 维向量；任务只领取 1 次并进入 `succeeded`，记录 16399 个输入 Token。数据库最终存在
 42 条互不重复、维度一致且非零的向量，没有遗漏文本块，也没有遗留 `queued/processing` 任务。
 
+`POST /semantic-search` 使用 JSON 请求体接收自然语言 `query`、可选 `document_id` 和可选 `top_k`。
+Application 使用当前配置的同一模型生成一条查询向量，PostgreSQL + pgvector 再按照精确余弦相似度
+返回最接近的文本块及文献标题、原始文件名和物理页码。查询只比较模型名称与维度都一致的向量；
+`top_k` 默认是 5，第一版上限为 20。该接口由 `SEMANTIC_SEARCH_ENABLED` 独立控制，默认关闭；
+启用后每次请求都会调用远程 Embedding API，可能产生费用。内部各层、错误映射、真实 PostgreSQL
+查询和真实 DashScope HTTP 均已经通过验收。中文问题“磁悬浮列车如何通过控制方法提高系统稳定性？”
+在文档 20 中返回 5 条相似度降序结果；不提供 `top_k` 时默认返回 5 条，明确提供 0 时返回 400。
+
 Python PDF 测试依赖 `ai/pyproject.toml` 中锁定的解析库。首次运行前安装项目依赖，然后执行测试：
 
 ```powershell
@@ -230,10 +238,11 @@ Go 后端当前支持以下环境变量：
 | `PYTHON_PDF_MAX_FILE_SIZE_BYTES` | `52428800` | PDF 解析文件上限，即 50 MiB；独立于上传上限 |
 | `PYTHON_PDF_MAX_PAGES` | `500` | 单份 PDF 允许解析的最大页数 |
 | `EMBEDDING_WORKER_ENABLED` | `false` | 是否启动远程 Embedding Worker；默认关闭以避免意外费用 |
+| `SEMANTIC_SEARCH_ENABLED` | `false` | 是否注册在线语义检索接口；启用后每次检索会调用远程 Embedding API |
 | `EMBEDDING_PROVIDER` | `dashscope` | 当前远程提供方，可选 `dashscope` 或 `openai` |
-| `DASHSCOPE_API_KEY` | 无 | 选择 DashScope 且 Worker 启用时必填；只能保存在本机 `.env` |
+| `DASHSCOPE_API_KEY` | 无 | 选择 DashScope 且 Worker 或语义检索启用时必填；只能保存在本机 `.env` |
 | `DASHSCOPE_EMBEDDING_ENDPOINT` | 百炼中国内地兼容地址 | DashScope Embeddings HTTP API 地址 |
-| `OPENAI_API_KEY` | 无 | 选择 OpenAI 且 Worker 启用时必填；保留供以后切回 |
+| `OPENAI_API_KEY` | 无 | 选择 OpenAI 且 Worker 或语义检索启用时必填；保留供以后切回 |
 | `OPENAI_EMBEDDING_ENDPOINT` | OpenAI 官方地址 | OpenAI Embeddings HTTP API 地址 |
 | `EMBEDDING_MODEL` | 按提供方决定 | 留空时 DashScope 使用 `text-embedding-v4`，OpenAI 使用 `text-embedding-3-small` |
 | `EMBEDDING_DIMENSIONS` | `1536` | 第一版固定维度；调整前必须迁移数据库并全量重建向量 |

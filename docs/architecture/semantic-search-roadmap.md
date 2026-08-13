@@ -118,14 +118,25 @@ PostgreSQL + pgvector 计算相似度
 - shutdown 遗留任务的单实例启动恢复；
 - 配置化 API 超时、任务超时、批大小、轮询与指数退避；
 - `main` 组合根中的可关闭 Embedding Worker 和多 goroutine 等待。
+- Domain `SemanticChunkSearcher`、语义命中模型和模型隔离条件；
+- Application “问题向量化 → 相似 chunks 查询”编排与输入校验；
+- PostgreSQL 精确余弦检索、文档过滤、模型/维度过滤和真实集成测试；
+- `POST /semantic-search` JSON Handler、DTO 转换和 HTTP 错误映射；
+- Worker 与语义检索独立开关，以及共享 Embedder 的生产组合代码。
 
-当前 `main.go` 已接入 Embedding Worker，但 `EMBEDDING_WORKER_ENABLED` 默认是 `false`，因此默认
-运行不会调用远程 API 或产生费用。只有显式启用时才要求 API Key。真实 API Key 不写入源码、
-数据库、日志、HTTP 响应或 Git，只能通过本机私有环境注入。
+`EMBEDDING_WORKER_ENABLED` 与 `SEMANTIC_SEARCH_ENABLED` 默认都是 `false`，因此默认运行不会调用
+远程 API 或产生费用。两者可以独立启用；只要任一能力开启就要求对应提供方的 API Key，二者同时
+开启时复用同一个无状态 Embedder HTTP 客户端。真实 API Key 不写入源码、数据库、日志、HTTP
+响应或 Git，只能通过本机私有环境注入。
 
 2026-08-12 已完成 DashScope 真实纵向验收：文档 20 的任务 22 使用 `text-embedding-v4` 一次成功，
 42 个文本块全部获得 1536 维非零向量并通过同一事务落库，任务进入 `succeeded`，不存在重复、遗漏或
 活动任务残留。这证明 P4 的“入队—领取—远程生成—原子落库”主链路已经可运行。
+
+2026-08-13 已完成 `POST /semantic-search` 真实 HTTP 验收：在
+`EMBEDDING_WORKER_ENABLED=false`、`SEMANTIC_SEARCH_ENABLED=true` 的情况下路由正常注册，证明在线
+检索与后台 Worker 已解耦。中文问题通过 DashScope 生成查询向量后，在文档 20 的 42 条向量中返回
+5 条相似度降序结果，包含原始文件名和物理页码；默认 `top_k=5` 与非法 `top_k=0` 分支均符合契约。
 
 ## 六、后续实施顺序
 
@@ -136,6 +147,7 @@ PostgreSQL + pgvector 计算相似度
 5. ~~创建 `chunk_embeddings` 表并验证向量落库；~~
 6. ~~为真实 HTTP 客户端和 Worker 增加配置化超时并接入组合根；~~
 7. ~~使用 DashScope 完成一份真实文档的完整向量生成与落库验收；~~
-8. 开发 `POST /semantic-search`；
-9. 使用中英文真实问题建立检索测试集；
-10. 根据关键词与语义检索对比结果决定是否开发混合检索。
+8. ~~开发 `POST /semantic-search` 的各层、生产组合与自动化/数据库测试；~~
+9. ~~完成 `POST /semantic-search` 的真实远程 HTTP 验收；~~
+10. 使用中英文真实问题建立检索测试集；
+11. 根据关键词与语义检索对比结果决定是否开发混合检索。
