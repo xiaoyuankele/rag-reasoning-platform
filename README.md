@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P4（AI 增强）进行中。`GET /search` 关键词检索保持独立；可切换的远程 Embeddings Worker、独立 `embedding_jobs` 生命周期、pgvector 存储和手动任务触发已经完成。当前默认使用阿里云百炼，OpenAI 适配器继续保留；DashScope 真实纵向验收已经为一份 42 chunks 文档生成并原子保存 42 条 1536 维向量。独立的 `POST /semantic-search` 已完成 Domain、Application、PostgreSQL、Handler、生产组合和真实 DashScope HTTP 验收；下一步建立中英文真实问题测试集并评估检索质量。DOCX、OCR 和复杂学术版面质量仍属于后续增量能力。
+> 当前状态：P4（AI 增强）进行中。`GET /search` 关键词检索保持独立；可切换的远程 Embeddings Worker、独立 `embedding_jobs` 生命周期、pgvector 存储和手动任务触发已经完成。当前默认使用阿里云百炼，OpenAI 适配器继续保留；DashScope 真实纵向验收已经为一份 42 chunks 文档生成并原子保存 42 条 1536 维向量。独立的 `POST /semantic-search` 已完成 Domain、Application、PostgreSQL、Handler、生产组合和真实 DashScope HTTP 验收；下一步建立中英文真实问题测试集并评估检索质量。混合检索只保留在后续路线中，当前不开发。DOCX、OCR 和复杂学术版面质量仍属于后续增量能力。
 
 ## 项目目标
 
@@ -142,6 +142,9 @@ PDF 文献处理的错误分类、页码来源、资源限制、解析库选择�
 
 P3 关键词搜索的数据规模、表/索引空间、`EXPLAIN ANALYZE` 证据和阶段结论见
 [关键词检索性能基线](docs/performance/search-baseline-2026-08-10.md)。
+
+关键词检索与语义检索的中英文真实问题、排名、相关性评分和混合检索重新评估条件见
+[检索质量评估计划](docs/evaluation/retrieval-quality-evaluation-plan.md)。
 
 Python 类、函数和方法的中文 IDE 悬停说明要求见
 [Python Docstring 与 IDE 悬停说明规范](docs/development/python-docstrings.md)。
