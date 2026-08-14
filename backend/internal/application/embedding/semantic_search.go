@@ -51,7 +51,21 @@ var (
 	ErrInvalidSemanticSearchTopK = errors.New(
 		"semantic search top_k must be between 1 and 20",
 	)
+
+	// ErrDocumentEmbeddingsNotReady 表示指定文档还没有当前模型的完整可用向量。
+	ErrDocumentEmbeddingsNotReady = errors.New(
+		"document embeddings are not ready",
+	)
 )
+
+// semanticSearchRepository 组合语义检索用例需要的两项仓储能力。
+//
+// Application 只依赖这个小接口，不依赖 PostgreSQL 的具体实现。生产环境和测试 Fake
+// 都必须同时提供“检查向量就绪状态”和“执行相似度查询”这两个插口。
+type semanticSearchRepository interface {
+	documentdomain.SemanticEmbeddingReadinessChecker
+	documentdomain.SemanticChunkSearcher
+}
 
 // SemanticSearchInput 是 HTTP 等上层入口交给语义检索用例的数据。
 type SemanticSearchInput struct {
@@ -72,7 +86,7 @@ type SemanticSearchOutput struct {
 // PostgreSQL pgvector 还是其他向量数据库。
 type SemanticSearchService struct {
 	embedder   embeddingdomain.Embedder
-	searcher   documentdomain.SemanticChunkSearcher
+	repository semanticSearchRepository
 	modelName  string
 	dimensions int
 }
@@ -80,11 +94,11 @@ type SemanticSearchService struct {
 // NewSemanticSearchService 创建语义检索应用服务。
 func NewSemanticSearchService(
 	embedder embeddingdomain.Embedder,
-	searcher documentdomain.SemanticChunkSearcher,
+	repository semanticSearchRepository,
 	modelName string,
 	dimensions int,
 ) (*SemanticSearchService, error) {
-	if embedder == nil || searcher == nil {
+	if embedder == nil || repository == nil {
 		return nil, ErrSemanticSearchDependencies
 	}
 
@@ -95,7 +109,7 @@ func NewSemanticSearchService(
 
 	return &SemanticSearchService{
 		embedder:   embedder,
-		searcher:   searcher,
+		repository: repository,
 		modelName:  modelName,
 		dimensions: dimensions,
 	}, nil
@@ -109,6 +123,29 @@ func (s *SemanticSearchService) Search(
 	query, err := validateSemanticSearchInput(input)
 	if err != nil {
 		return SemanticSearchOutput{}, err
+	}
+
+	// 全库检索允许搜索所有已经存在的向量；指定文档检索则必须先证明该文档的
+	// 当前模型向量完整。这个检查位于远程 Embedder 调用之前，可以避免为一个
+	// 明知无法检索的文档产生 API 费用。
+	if input.DocumentID != nil {
+		ready, err := s.repository.HasCompleteSemanticEmbeddings(
+			ctx,
+			documentdomain.SemanticEmbeddingReadinessOptions{
+				DocumentID: *input.DocumentID,
+				ModelName:  s.modelName,
+				Dimensions: s.dimensions,
+			},
+		)
+		if err != nil {
+			return SemanticSearchOutput{}, fmt.Errorf(
+				"check document semantic embedding readiness: %w",
+				err,
+			)
+		}
+		if !ready {
+			return SemanticSearchOutput{}, ErrDocumentEmbeddingsNotReady
+		}
 	}
 
 	embeddedQuery, err := s.embedder.Embed(
@@ -138,7 +175,7 @@ func (s *SemanticSearchService) Search(
 		)
 	}
 
-	hits, err := s.searcher.SearchSimilar(
+	hits, err := s.repository.SearchSimilar(
 		ctx,
 		documentdomain.SemanticSearchOptions{
 			QueryVector: embeddedQuery.Vectors[0],

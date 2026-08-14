@@ -13,11 +13,27 @@ import (
 
 // fakeSemanticSearcher 模拟语义搜索仓储，并记录 Application 传入的查询条件。
 type fakeSemanticSearcher struct {
+	readinessFunc func(
+		context.Context,
+		documentdomain.SemanticEmbeddingReadinessOptions,
+	) (bool, error)
 	searchFunc func(
 		context.Context,
 		documentdomain.SemanticSearchOptions,
 	) ([]documentdomain.SemanticSearchHit, error)
-	calls int
+	calls          int
+	readinessCalls int
+}
+
+func (f *fakeSemanticSearcher) HasCompleteSemanticEmbeddings(
+	ctx context.Context,
+	options documentdomain.SemanticEmbeddingReadinessOptions,
+) (bool, error) {
+	f.readinessCalls++
+	if f.readinessFunc == nil {
+		return true, nil
+	}
+	return f.readinessFunc(ctx, options)
 }
 
 func (f *fakeSemanticSearcher) SearchSimilar(
@@ -35,7 +51,7 @@ func TestNewSemanticSearchServiceValidatesDependencies(t *testing.T) {
 	tests := []struct {
 		name       string
 		embedder   embeddingdomain.Embedder
-		searcher   documentdomain.SemanticChunkSearcher
+		searcher   semanticSearchRepository
 		modelName  string
 		dimensions int
 		wantedErr  error
@@ -128,6 +144,24 @@ func TestSemanticSearchServiceEmbedsQueryAndSearchesSimilarChunks(t *testing.T) 
 		},
 	}
 	searcher := &fakeSemanticSearcher{
+		readinessFunc: func(
+			_ context.Context,
+			options documentdomain.SemanticEmbeddingReadinessOptions,
+		) (bool, error) {
+			expectedOptions := documentdomain.SemanticEmbeddingReadinessOptions{
+				DocumentID: documentID,
+				ModelName:  "test-model",
+				Dimensions: 3,
+			}
+			if !reflect.DeepEqual(options, expectedOptions) {
+				t.Fatalf(
+					"HasCompleteSemanticEmbeddings() options = %+v, want %+v",
+					options,
+					expectedOptions,
+				)
+			}
+			return true, nil
+		},
 		searchFunc: func(
 			_ context.Context,
 			options documentdomain.SemanticSearchOptions,
@@ -162,8 +196,75 @@ func TestSemanticSearchServiceEmbedsQueryAndSearchesSimilarChunks(t *testing.T) 
 		!reflect.DeepEqual(output.Hits, expectedHits) {
 		t.Fatalf("Search() output = %+v, want normalized query and expected hits", output)
 	}
-	if embedder.embedCalls != 1 || searcher.calls != 1 {
-		t.Fatalf("dependency calls = embedder:%d searcher:%d, want 1/1", embedder.embedCalls, searcher.calls)
+	if searcher.readinessCalls != 1 || embedder.embedCalls != 1 || searcher.calls != 1 {
+		t.Fatalf(
+			"dependency calls = readiness:%d embedder:%d searcher:%d, want 1/1/1",
+			searcher.readinessCalls,
+			embedder.embedCalls,
+			searcher.calls,
+		)
+	}
+}
+
+func TestSemanticSearchServiceRejectsDocumentWithoutCompleteEmbeddings(t *testing.T) {
+	documentID := int64(20)
+	embedder := &fakeEmbedder{embedFunc: failSemanticEmbed(t)}
+	searcher := &fakeSemanticSearcher{
+		readinessFunc: func(
+			context.Context,
+			documentdomain.SemanticEmbeddingReadinessOptions,
+		) (bool, error) {
+			return false, nil
+		},
+		searchFunc: failSemanticSearch(t),
+	}
+	service := newSemanticSearchServiceForTest(t, embedder, searcher)
+
+	_, err := service.Search(
+		context.Background(),
+		SemanticSearchInput{Query: "问题", DocumentID: &documentID, TopK: 5},
+	)
+	if !errors.Is(err, ErrDocumentEmbeddingsNotReady) {
+		t.Fatalf("Search() error = %v, want ErrDocumentEmbeddingsNotReady", err)
+	}
+	if searcher.readinessCalls != 1 || embedder.embedCalls != 0 || searcher.calls != 0 {
+		t.Fatalf(
+			"dependency calls = readiness:%d embedder:%d searcher:%d, want 1/0/0",
+			searcher.readinessCalls,
+			embedder.embedCalls,
+			searcher.calls,
+		)
+	}
+}
+
+func TestSemanticSearchServicePreservesReadinessError(t *testing.T) {
+	documentID := int64(999)
+	embedder := &fakeEmbedder{embedFunc: failSemanticEmbed(t)}
+	searcher := &fakeSemanticSearcher{
+		readinessFunc: func(
+			context.Context,
+			documentdomain.SemanticEmbeddingReadinessOptions,
+		) (bool, error) {
+			return false, documentdomain.ErrNotFound
+		},
+		searchFunc: failSemanticSearch(t),
+	}
+	service := newSemanticSearchServiceForTest(t, embedder, searcher)
+
+	_, err := service.Search(
+		context.Background(),
+		SemanticSearchInput{Query: "问题", DocumentID: &documentID, TopK: 5},
+	)
+	if !errors.Is(err, documentdomain.ErrNotFound) {
+		t.Fatalf("Search() error = %v, want wrapped ErrNotFound", err)
+	}
+	if searcher.readinessCalls != 1 || embedder.embedCalls != 0 || searcher.calls != 0 {
+		t.Fatalf(
+			"dependency calls = readiness:%d embedder:%d searcher:%d, want 1/0/0",
+			searcher.readinessCalls,
+			embedder.embedCalls,
+			searcher.calls,
+		)
 	}
 }
 
@@ -274,7 +375,7 @@ func TestSemanticSearchServiceNormalizesEmptyHits(t *testing.T) {
 func newSemanticSearchServiceForTest(
 	t *testing.T,
 	embedder embeddingdomain.Embedder,
-	searcher documentdomain.SemanticChunkSearcher,
+	searcher semanticSearchRepository,
 ) *SemanticSearchService {
 	t.Helper()
 	service, err := NewSemanticSearchService(embedder, searcher, "test-model", 3)

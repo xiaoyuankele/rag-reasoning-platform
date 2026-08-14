@@ -211,6 +211,10 @@ func run(ctx context.Context) error {
 	documentService := documentapplication.NewService(documentRepository)
 	documentUploadService := documentapplication.NewUploadService(documentRepository, localFileStorage)
 	documentListService := documentapplication.NewListService(documentRepository)
+	documentChunkListService := documentapplication.NewChunkListService(
+		documentRepository,
+		chunkRepository,
+	)
 	documentSearchService := documentapplication.NewSearchService(chunkRepository)
 	documentDeleteService := documentapplication.NewDeleteService(documentRepository, localFileStorage)
 	documentProcessingService := documentapplication.NewQueueProcessingService(
@@ -225,6 +229,9 @@ func run(ctx context.Context) error {
 		embeddingJobRepository,
 		embeddingConfig.ModelName,
 		embeddingConfig.Dimensions,
+	)
+	embeddingJobQueryService := embeddingapplication.NewJobQueryService(
+		embeddingJobRepository,
 	)
 	documentWorker := documentapplication.NewWorker(
 		processingJobRepository,
@@ -364,6 +371,9 @@ func run(ctx context.Context) error {
 	documentHandler := api.NewDocumentHandler(documentService)
 	documentUploadHandler := api.NewDocumentUploadHandler(documentUploadService, storageConfig.MaxFileSizeBytes)
 	documentListHandler := api.NewDocumentListHandler(documentListService)
+	documentChunkHandler := api.NewDocumentChunkHandler(
+		documentChunkListService,
+	)
 	documentSearchHandler := api.NewDocumentSearchHandler(documentSearchService)
 	documentDeleteHandler := api.NewDocumentDeleteHandler(documentDeleteService)
 	documentProcessingHandler := api.NewDocumentProcessingHandler(
@@ -374,6 +384,9 @@ func run(ctx context.Context) error {
 	)
 	documentEmbeddingHandler := api.NewDocumentEmbeddingHandler(
 		embeddingQueueService,
+	)
+	embeddingJobHandler := api.NewEmbeddingJobHandler(
+		embeddingJobQueryService,
 	)
 	var semanticSearchHandler *api.SemanticSearchHandler
 	if embeddingConfig.SemanticSearchEnabled {
@@ -390,11 +403,13 @@ func run(ctx context.Context) error {
 	documentHandler.RegisterRoutes(router)
 	documentUploadHandler.RegisterRoutes(router)
 	documentListHandler.RegisterRoutes(router)
+	documentChunkHandler.RegisterRoutes(router)
 	documentSearchHandler.RegisterRoutes(router)
 	documentDeleteHandler.RegisterRoutes(router)
 	documentProcessingHandler.RegisterRoutes(router)
 	processingJobHandler.RegisterRoutes(router)
 	documentEmbeddingHandler.RegisterRoutes(router)
+	embeddingJobHandler.RegisterRoutes(router)
 	if semanticSearchHandler != nil {
 		semanticSearchHandler.RegisterRoutes(router)
 	}

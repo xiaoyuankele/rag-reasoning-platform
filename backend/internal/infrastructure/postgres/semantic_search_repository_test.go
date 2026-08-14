@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"errors"
 	"math"
 	"os"
 	"testing"
@@ -191,6 +192,158 @@ func TestChunkRepositorySearchSimilar(t *testing.T) {
 			t.Fatalf("empty hits = %#v, want non-nil empty slice", hits)
 		}
 	})
+}
+
+// TestChunkRepositoryHasCompleteSemanticEmbeddings 使用真实表关系验证“向量完整”的定义。
+//
+// 这个测试不是在验证某条 SQL 能否运行，而是在保护跨表业务事实：文档、文本块、
+// 向量和生成任务必须完整对应，指定文档才可以进入在线语义检索。
+func TestChunkRepositoryHasCompleteSemanticEmbeddings(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	if err := database.RefreshVectorTypes(ctx, pool); err != nil {
+		t.Fatalf("refresh pgvector types for isolated readiness schema: %v", err)
+	}
+
+	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	chunkRepository := postgresrepository.NewChunkRepository(pool)
+	jobRepository := postgresrepository.NewEmbeddingJobRepository(pool)
+
+	completeDocument := createSemanticSearchFixture(
+		t,
+		ctx,
+		pool,
+		documentRepository,
+		chunkRepository,
+		jobRepository,
+		"readiness-complete",
+		"text-embedding-v4",
+		[]semanticChunkFixture{
+			{content: "完整向量的第一个文本块", page: 1, vector: semanticTestVector(1, 0)},
+			{content: "完整向量的第二个文本块", page: 2, vector: semanticTestVector(0, 1)},
+		},
+	)
+
+	partialDocument := createSemanticSearchFixture(
+		t,
+		ctx,
+		pool,
+		documentRepository,
+		chunkRepository,
+		jobRepository,
+		"readiness-partial",
+		"text-embedding-v4",
+		[]semanticChunkFixture{
+			{content: "保留向量的文本块", page: 3, vector: semanticTestVector(1, 0)},
+			{content: "模拟向量丢失的文本块", page: 4, vector: semanticTestVector(0, 1)},
+		},
+	)
+	if _, err := pool.Exec(
+		ctx,
+		`
+			DELETE FROM chunk_embeddings
+			WHERE chunk_id = (
+				SELECT id
+				FROM text_chunks
+				WHERE document_id = $1
+				ORDER BY chunk_index DESC
+				LIMIT 1
+			)
+		`,
+		partialDocument.ID,
+	); err != nil {
+		t.Fatalf("remove one vector from partial readiness fixture: %v", err)
+	}
+
+	emptyDocument := createSearchTestDocument(
+		t,
+		ctx,
+		documentRepository,
+		"readiness-empty.pdf",
+		"semantic/readiness-empty.pdf",
+		"application/pdf",
+		"b",
+	)
+	setSearchTestDocumentStatus(
+		t,
+		ctx,
+		pool,
+		emptyDocument.ID,
+		documentdomain.StatusReady,
+	)
+
+	notReadyDocument := createSemanticSearchFixture(
+		t,
+		ctx,
+		pool,
+		documentRepository,
+		chunkRepository,
+		jobRepository,
+		"readiness-document-status",
+		"text-embedding-v4",
+		[]semanticChunkFixture{
+			{content: "文档状态尚未就绪", page: 5, vector: semanticTestVector(1, 0)},
+		},
+	)
+	setSearchTestDocumentStatus(
+		t,
+		ctx,
+		pool,
+		notReadyDocument.ID,
+		documentdomain.StatusProcessing,
+	)
+
+	tests := []struct {
+		name       string
+		documentID int64
+		modelName  string
+		dimensions int
+		wantReady  bool
+	}{
+		{name: "complete current embeddings", documentID: completeDocument.ID, modelName: "text-embedding-v4", dimensions: semanticSearchTestDimensions, wantReady: true},
+		{name: "one chunk vector is missing", documentID: partialDocument.ID, modelName: "text-embedding-v4", dimensions: semanticSearchTestDimensions, wantReady: false},
+		{name: "document has no chunks", documentID: emptyDocument.ID, modelName: "text-embedding-v4", dimensions: semanticSearchTestDimensions, wantReady: false},
+		{name: "document status is not ready", documentID: notReadyDocument.ID, modelName: "text-embedding-v4", dimensions: semanticSearchTestDimensions, wantReady: false},
+		{name: "model does not match", documentID: completeDocument.ID, modelName: "other-model", dimensions: semanticSearchTestDimensions, wantReady: false},
+		{name: "dimensions do not match", documentID: completeDocument.ID, modelName: "text-embedding-v4", dimensions: 3072, wantReady: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ready, err := chunkRepository.HasCompleteSemanticEmbeddings(
+				ctx,
+				documentdomain.SemanticEmbeddingReadinessOptions{
+					DocumentID: test.documentID,
+					ModelName:  test.modelName,
+					Dimensions: test.dimensions,
+				},
+			)
+			if err != nil {
+				t.Fatalf("HasCompleteSemanticEmbeddings() error = %v, want nil", err)
+			}
+			if ready != test.wantReady {
+				t.Fatalf("HasCompleteSemanticEmbeddings() = %t, want %t", ready, test.wantReady)
+			}
+		})
+	}
+
+	_, err := chunkRepository.HasCompleteSemanticEmbeddings(
+		ctx,
+		documentdomain.SemanticEmbeddingReadinessOptions{
+			DocumentID: completeDocument.ID + 1_000_000,
+			ModelName:  "text-embedding-v4",
+			Dimensions: semanticSearchTestDimensions,
+		},
+	)
+	if !errors.Is(err, documentdomain.ErrNotFound) {
+		t.Fatalf("missing document error = %v, want ErrNotFound", err)
+	}
 }
 
 type semanticChunkFixture struct {

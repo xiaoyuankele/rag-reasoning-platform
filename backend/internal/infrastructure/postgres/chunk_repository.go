@@ -18,6 +18,7 @@ type ChunkRepository struct {
 }
 
 var _ document.ChunkRepository = (*ChunkRepository)(nil)
+var _ document.ChunkPageLister = (*ChunkRepository)(nil)
 var _ document.ChunkSearcher = (*ChunkRepository)(nil)
 
 // NewChunkRepository 创建 PostgreSQL 文本块仓储。
@@ -211,6 +212,90 @@ func (r *ChunkRepository) ListByDocumentID(
 	}
 
 	return textChunks, nil
+}
+
+// ListPageByDocumentID 按 chunk_index 升序分页读取一份文档的文本块。
+func (r *ChunkRepository) ListPageByDocumentID(
+	ctx context.Context,
+	documentID int64,
+	options document.ChunkPageOptions,
+) (document.ChunkPageResult, error) {
+	// LEFT JOIN 让“文档存在但没有 chunks”仍然产生一行 total=0；
+	// 如果文档不存在，GROUP BY 查询没有结果，便可准确返回 ErrNotFound。
+	const countQuery = `
+		SELECT COUNT(chunk.id)
+		FROM documents AS source_document
+		LEFT JOIN text_chunks AS chunk
+			ON chunk.document_id = source_document.id
+		WHERE source_document.id = $1
+		GROUP BY source_document.id
+	`
+
+	var total int64
+	err := r.pool.QueryRow(ctx, countQuery, documentID).Scan(&total)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return document.ChunkPageResult{}, document.ErrNotFound
+	}
+	if err != nil {
+		return document.ChunkPageResult{}, fmt.Errorf(
+			"count document chunks: %w",
+			err,
+		)
+	}
+
+	const listQuery = `
+		SELECT
+			id,
+			document_id,
+			chunk_index,
+			content,
+			page_start,
+			page_end,
+			created_at
+		FROM text_chunks
+		WHERE document_id = $1
+		ORDER BY chunk_index ASC
+		LIMIT $2
+		OFFSET $3
+	`
+
+	rows, err := r.pool.Query(
+		ctx,
+		listQuery,
+		documentID,
+		options.Limit,
+		options.Offset,
+	)
+	if err != nil {
+		return document.ChunkPageResult{}, fmt.Errorf(
+			"query document chunk page: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	chunks := make([]document.TextChunk, 0)
+	for rows.Next() {
+		chunk, err := scanTextChunk(rows)
+		if err != nil {
+			return document.ChunkPageResult{}, fmt.Errorf(
+				"scan document chunk page: %w",
+				err,
+			)
+		}
+		chunks = append(chunks, chunk)
+	}
+	if err := rows.Err(); err != nil {
+		return document.ChunkPageResult{}, fmt.Errorf(
+			"iterate document chunk page: %w",
+			err,
+		)
+	}
+
+	return document.ChunkPageResult{
+		Chunks: chunks,
+		Total:  total,
+	}, nil
 }
 
 // Search 跨 ready 文档检索包含指定关键词的统一文本块。

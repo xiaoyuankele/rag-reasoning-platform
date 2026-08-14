@@ -43,3 +43,24 @@ type SemanticChunkSearcher interface {
 		options SemanticSearchOptions,
 	) ([]SemanticSearchHit, error)
 }
+
+// SemanticEmbeddingReadinessOptions 表示核对一份文档语义检索就绪状态所需的条件。
+//
+// 同一个维度的不同模型并不一定处于同一向量空间，因此 ModelName 和 Dimensions
+// 必须同时匹配当前语义检索服务的配置。
+type SemanticEmbeddingReadinessOptions struct {
+	DocumentID int64
+	ModelName  string
+	Dimensions int
+}
+
+// SemanticEmbeddingReadinessChecker 定义“指定文档是否已有完整可用向量”的最小仓储能力。
+//
+// 文档不存在时，实现应返回 ErrNotFound；文档存在但尚未 ready、没有文本块，或并非
+// 每个文本块都有当前模型和维度生成的成功向量时，应返回 (false, nil)。
+type SemanticEmbeddingReadinessChecker interface {
+	HasCompleteSemanticEmbeddings(
+		ctx context.Context,
+		options SemanticEmbeddingReadinessOptions,
+	) (bool, error)
+}

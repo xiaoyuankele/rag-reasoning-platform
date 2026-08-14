@@ -9,6 +9,7 @@ import (
 
 	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	generationdomain "rag-reasoning-platform/backend/internal/domain/generation"
 )
@@ -153,6 +154,14 @@ func writeAnswerError(c *gin.Context, err error) bool {
 	case errors.Is(err, embeddingapplication.ErrInvalidSemanticSearchTopK):
 		c.JSON(http.StatusBadRequest, errorResponse{
 			Error: "top_k must be between 1 and 20",
+		})
+	case errors.Is(err, documentdomain.ErrNotFound):
+		c.JSON(http.StatusNotFound, errorResponse{
+			Error: "document not found",
+		})
+	case errors.Is(err, embeddingapplication.ErrDocumentEmbeddingsNotReady):
+		c.JSON(http.StatusConflict, errorResponse{
+			Error: "document embeddings are not ready",
 		})
 
 	case errors.Is(err, embeddingdomain.ErrEmbeddingRequestRejected),

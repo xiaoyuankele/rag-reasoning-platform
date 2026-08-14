@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -12,6 +13,67 @@ import (
 )
 
 var _ documentdomain.SemanticChunkSearcher = (*ChunkRepository)(nil)
+var _ documentdomain.SemanticEmbeddingReadinessChecker = (*ChunkRepository)(nil)
+
+// HasCompleteSemanticEmbeddings 核对指定文档是否具备当前模型的完整向量。
+//
+// 一份文档只有同时满足以下条件才算就绪：
+//  1. 文档状态为 ready；
+//  2. 文档至少有一个文本块；
+//  3. 每个文本块都关联一条由成功任务生成、且模型和维度匹配的向量。
+//
+// 这里返回的是数据库事实，不负责决定 HTTP 状态码；Application 会把 false 转换成
+// 稳定的业务错误，再由 Handler 决定如何向前端表达。
+func (r *ChunkRepository) HasCompleteSemanticEmbeddings(
+	ctx context.Context,
+	options documentdomain.SemanticEmbeddingReadinessOptions,
+) (bool, error) {
+	const query = `
+		SELECT
+			source_document.status,
+			COUNT(chunk.id) AS chunk_count,
+			COUNT(chunk_embedding.chunk_id) FILTER (
+				WHERE embedding_job.status = $2
+					AND embedding_job.model_name = $3
+					AND embedding_job.dimensions = $4
+			) AS matching_embedding_count
+		FROM documents AS source_document
+		LEFT JOIN text_chunks AS chunk
+			ON chunk.document_id = source_document.id
+		LEFT JOIN chunk_embeddings AS chunk_embedding
+			ON chunk_embedding.chunk_id = chunk.id
+		LEFT JOIN embedding_jobs AS embedding_job
+			ON embedding_job.id = chunk_embedding.embedding_job_id
+		WHERE source_document.id = $1
+		GROUP BY source_document.id, source_document.status
+	`
+
+	var status documentdomain.Status
+	var chunkCount int64
+	var matchingEmbeddingCount int64
+	err := r.pool.QueryRow(
+		ctx,
+		query,
+		options.DocumentID,
+		embeddingdomain.JobStatusSucceeded,
+		options.ModelName,
+		options.Dimensions,
+	).Scan(
+		&status,
+		&chunkCount,
+		&matchingEmbeddingCount,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, documentdomain.ErrNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("check document semantic embedding readiness: %w", err)
+	}
+
+	return status == documentdomain.StatusReady &&
+		chunkCount > 0 &&
+		matchingEmbeddingCount == chunkCount, nil
+}
 
 // SearchSimilar 使用 pgvector 的精确余弦距离查询最相近的文本块。
 //

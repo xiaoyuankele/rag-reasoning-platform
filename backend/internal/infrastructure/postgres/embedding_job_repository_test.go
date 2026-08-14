@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,33 @@ func TestEmbeddingJobRepositoryCreate(t *testing.T) {
 	}
 	if createdJob.CreatedAt.IsZero() || createdJob.UpdatedAt.IsZero() {
 		t.Fatal("new queued embedding job must contain database timestamps")
+	}
+
+	// 再通过查询端口读取刚创建的任务，验证 SELECT 列顺序和 Scan 映射完整。
+	foundJob, err := embeddingJobRepository.GetEmbeddingJobByID(
+		ctx,
+		createdJob.ID,
+	)
+	if err != nil {
+		t.Fatalf("get embedding job by ID: %v", err)
+	}
+	if !reflect.DeepEqual(foundJob, createdJob) {
+		t.Fatalf(
+			"found embedding job = %+v, want %+v",
+			foundJob,
+			createdJob,
+		)
+	}
+
+	_, err = embeddingJobRepository.GetEmbeddingJobByID(
+		ctx,
+		createdJob.ID+1_000_000_000,
+	)
+	if !errors.Is(err, embeddingdomain.ErrJobNotFound) {
+		t.Fatalf(
+			"missing GetEmbeddingJobByID() error = %v, want ErrJobNotFound",
+			err,
+		)
 	}
 
 	_, err = embeddingJobRepository.CreateEmbeddingJob(

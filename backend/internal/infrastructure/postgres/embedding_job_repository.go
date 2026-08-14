@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -17,6 +18,7 @@ type EmbeddingJobRepository struct {
 }
 
 var _ embeddingdomain.JobCreator = (*EmbeddingJobRepository)(nil)
+var _ embeddingdomain.JobFinder = (*EmbeddingJobRepository)(nil)
 
 // NewEmbeddingJobRepository 创建 PostgreSQL 向量任务仓储。
 func NewEmbeddingJobRepository(
@@ -82,6 +84,49 @@ func (r *EmbeddingJobRepository) CreateEmbeddingJob(
 	return createdJob, nil
 }
 
+// GetEmbeddingJobByID 按主键读取一条向量任务记录。
+func (r *EmbeddingJobRepository) GetEmbeddingJobByID(
+	ctx context.Context,
+	jobID int64,
+) (embeddingdomain.Job, error) {
+	const query = `
+		SELECT
+			id,
+			document_id,
+			model_name,
+			dimensions,
+			status,
+			attempt_count,
+			error_message,
+			next_attempt_at,
+			prompt_tokens,
+			total_tokens,
+			created_at,
+			updated_at,
+			started_at,
+			completed_at
+		FROM embedding_jobs
+		WHERE id = $1
+	`
+
+	foundJob, err := scanEmbeddingJob(
+		r.pool.QueryRow(ctx, query, jobID),
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return embeddingdomain.Job{}, embeddingdomain.ErrJobNotFound
+	}
+	if err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf(
+			"get embedding job by ID: %w",
+			err,
+		)
+	}
+
+	return foundJob, nil
+}
+
+// scanEmbeddingJob 按照 SQL SELECT/RETURNING 的固定列顺序，把一行数据库
+// 结果转换成领域层 Job。所有向量任务查询共用它，避免各方法重复 Scan 逻辑。
 func scanEmbeddingJob(row pgx.Row) (embeddingdomain.Job, error) {
 	var job embeddingdomain.Job
 	var status string

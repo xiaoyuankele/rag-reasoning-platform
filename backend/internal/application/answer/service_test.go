@@ -165,6 +165,140 @@ func TestServiceAnswerRetrievesEvidenceBeforeGeneration(t *testing.T) {
 	}
 }
 
+func TestServiceAnswerDiversifiesGlobalEvidence(t *testing.T) {
+	hits := []documentdomain.SemanticSearchHit{
+		{
+			ChunkID:    1,
+			DocumentID: 225,
+			Content:    "document 225 best evidence",
+			Similarity: 0.95,
+		},
+		{
+			ChunkID:    2,
+			DocumentID: 225,
+			Content:    "document 225 second evidence",
+			Similarity: 0.94,
+		},
+		{
+			ChunkID:    3,
+			DocumentID: 225,
+			Content:    "document 225 third evidence",
+			Similarity: 0.93,
+		},
+		{
+			ChunkID:    4,
+			DocumentID: 208,
+			Content:    "document 208 best evidence",
+			Similarity: 0.92,
+		},
+		{
+			ChunkID:    5,
+			DocumentID: 20,
+			Content:    "document 20 best evidence",
+			Similarity: 0.91,
+		},
+		{
+			ChunkID:    6,
+			DocumentID: 208,
+			Content:    "document 208 second evidence",
+			Similarity: 0.90,
+		},
+	}
+
+	searcher := &fakeSemanticSearcher{
+		searchFunc: func(
+			_ context.Context,
+			input embeddingapplication.SemanticSearchInput,
+		) (embeddingapplication.SemanticSearchOutput, error) {
+			if input.DocumentID != nil {
+				t.Fatalf("DocumentID = %v, want nil for global answer", input.DocumentID)
+			}
+			if input.TopK != embeddingapplication.MaxSemanticSearchTopK {
+				t.Fatalf(
+					"search TopK = %d, want candidate pool %d",
+					input.TopK,
+					embeddingapplication.MaxSemanticSearchTopK,
+				)
+			}
+
+			return embeddingapplication.SemanticSearchOutput{
+				Query: strings.TrimSpace(input.Query),
+				Hits:  hits,
+			}, nil
+		},
+	}
+
+	generator := &fakeGenerator{
+		generateFunc: func(
+			_ context.Context,
+			request generationdomain.GenerateRequest,
+		) (generationdomain.GenerateResult, error) {
+			// 最终 Prompt 的顺序应为三篇文档各自的最高命中，随后再按
+			// 原相似度顺序使用文档 225 的第二、第三条补满 TopK。
+			wantedContents := []string{
+				"document 225 best evidence",
+				"document 208 best evidence",
+				"document 20 best evidence",
+				"document 225 second evidence",
+				"document 225 third evidence",
+			}
+
+			previousPosition := -1
+			for _, content := range wantedContents {
+				position := strings.Index(request.UserPrompt, content)
+				if position < 0 {
+					t.Fatalf("UserPrompt does not contain selected evidence %q", content)
+				}
+				if position <= previousPosition {
+					t.Fatalf(
+						"UserPrompt evidence order is invalid near %q: %s",
+						content,
+						request.UserPrompt,
+					)
+				}
+				previousPosition = position
+			}
+
+			if strings.Contains(request.UserPrompt, "document 208 second evidence") {
+				t.Fatal("UserPrompt contains evidence beyond the final TopK")
+			}
+
+			return generationdomain.GenerateResult{Text: "diversified answer"}, nil
+		},
+	}
+
+	service := newServiceForTest(t, searcher, generator)
+	result, err := service.Answer(context.Background(), Input{
+		Query: "global question",
+		TopK:  5,
+	})
+	if err != nil {
+		t.Fatalf("Answer() error = %v, want nil", err)
+	}
+
+	wantedChunkIDs := []int64{1, 4, 5, 2, 3}
+	if len(result.Sources) != len(wantedChunkIDs) {
+		t.Fatalf(
+			"len(Sources) = %d, want %d: %+v",
+			len(result.Sources),
+			len(wantedChunkIDs),
+			result.Sources,
+		)
+	}
+	for index, wantedChunkID := range wantedChunkIDs {
+		source := result.Sources[index]
+		if source.ChunkID != wantedChunkID || source.Citation != index+1 {
+			t.Fatalf(
+				"Sources[%d] = %+v, want chunk %d with citation %d",
+				index,
+				source,
+				wantedChunkID,
+				index+1,
+			)
+		}
+	}
+}
+
 func TestServiceAnswerDoesNotGenerateWithoutEvidence(t *testing.T) {
 	generatorCalled := false
 	searcher := successfulSearcher(make([]documentdomain.SemanticSearchHit, 0))

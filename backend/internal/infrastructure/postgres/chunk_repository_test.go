@@ -115,6 +115,26 @@ func TestChunkRepositoryReplaceAndList(t *testing.T) {
 	}
 	assertChunkContents(t, foundChunks, firstChunks)
 
+	pageResult, err := chunkRepository.ListPageByDocumentID(
+		ctx,
+		createdDocument.ID,
+		documentdomain.ChunkPageOptions{
+			Limit:  2,
+			Offset: 1,
+		},
+	)
+	if err != nil {
+		t.Fatalf("list document chunk page: %v", err)
+	}
+	if pageResult.Total != int64(len(firstChunks)) {
+		t.Fatalf(
+			"chunk page total = %d, want %d",
+			pageResult.Total,
+			len(firstChunks),
+		)
+	}
+	assertChunkContents(t, pageResult.Chunks, firstChunks[1:])
+
 	replacementChunks := []documentdomain.ChunkInput{
 		{
 			Index:     0,
@@ -213,6 +233,18 @@ func TestChunkRepositoryReplaceAndList(t *testing.T) {
 	if !errors.Is(err, documentdomain.ErrNotFound) {
 		t.Fatalf(
 			"missing ListByDocumentID() error = %v, want ErrNotFound",
+			err,
+		)
+	}
+
+	_, err = chunkRepository.ListPageByDocumentID(
+		ctx,
+		missingDocumentID,
+		documentdomain.ChunkPageOptions{Limit: 20},
+	)
+	if !errors.Is(err, documentdomain.ErrNotFound) {
+		t.Fatalf(
+			"missing ListPageByDocumentID() error = %v, want ErrNotFound",
 			err,
 		)
 	}

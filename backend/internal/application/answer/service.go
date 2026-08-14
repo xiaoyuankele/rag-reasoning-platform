@@ -124,20 +124,35 @@ func (s *Service) Answer(
 		return Output{}, err
 	}
 
+	candidateTopK := input.TopK
+
+	if input.DocumentID == nil &&
+		input.TopK > 0 &&
+		input.TopK <= embeddingapplication.MaxSemanticSearchTopK {
+		candidateTopK = embeddingapplication.MaxSemanticSearchTopK
+	}
+
 	searchResult, err := s.searcher.Search(
 		ctx,
 		embeddingapplication.SemanticSearchInput{
 			Query:      input.Query,
 			DocumentID: input.DocumentID,
-			TopK:       input.TopK,
+			TopK:       candidateTopK,
 		},
 	)
+
 	if err != nil {
 		return Output{}, fmt.Errorf("retrieve evidence for answer: %w", err)
 	}
 
-	sources := newSources(searchResult.Hits)
-	if len(searchResult.Hits) == 0 {
+	selectedHits := selectAnswerEvidence(
+		searchResult.Hits,
+		input.TopK,
+		input.DocumentID == nil,
+	)
+
+	sources := newSources(selectedHits)
+	if len(selectedHits) == 0 {
 		return Output{
 			Query:            searchResult.Query,
 			Answer:           insufficientEvidenceAnswer(responseLanguage),
@@ -148,7 +163,7 @@ func (s *Service) Answer(
 
 	userPrompt, err := buildUserPrompt(
 		searchResult.Query,
-		searchResult.Hits,
+		selectedHits,
 		responseLanguage,
 	)
 	if err != nil {

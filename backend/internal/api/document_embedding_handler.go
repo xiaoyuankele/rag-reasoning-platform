@@ -41,32 +41,38 @@ func (h *DocumentEmbeddingHandler) RegisterRoutes(router *gin.Engine) {
 
 // embeddingJobResponse 是创建任务后返回给客户端的 JSON 契约。
 type embeddingJobResponse struct {
-	ID           int64                     `json:"id"`
-	DocumentID   int64                     `json:"document_id"`
-	ModelName    string                    `json:"model_name"`
-	Dimensions   int                       `json:"dimensions"`
-	Status       embeddingdomain.JobStatus `json:"status"`
-	AttemptCount int                       `json:"attempt_count"`
-	ErrorMessage *string                   `json:"error_message"`
-	CreatedAt    time.Time                 `json:"created_at"`
-	UpdatedAt    time.Time                 `json:"updated_at"`
-	StartedAt    *time.Time                `json:"started_at"`
-	CompletedAt  *time.Time                `json:"completed_at"`
+	ID            int64                     `json:"id"`
+	DocumentID    int64                     `json:"document_id"`
+	ModelName     string                    `json:"model_name"`
+	Dimensions    int                       `json:"dimensions"`
+	Status        embeddingdomain.JobStatus `json:"status"`
+	AttemptCount  int                       `json:"attempt_count"`
+	ErrorMessage  *string                   `json:"error_message"`
+	NextAttemptAt time.Time                 `json:"next_attempt_at"`
+	PromptTokens  *int                      `json:"prompt_tokens"`
+	TotalTokens   *int                      `json:"total_tokens"`
+	CreatedAt     time.Time                 `json:"created_at"`
+	UpdatedAt     time.Time                 `json:"updated_at"`
+	StartedAt     *time.Time                `json:"started_at"`
+	CompletedAt   *time.Time                `json:"completed_at"`
 }
 
 func newEmbeddingJobResponse(job embeddingdomain.Job) embeddingJobResponse {
 	return embeddingJobResponse{
-		ID:           job.ID,
-		DocumentID:   job.DocumentID,
-		ModelName:    job.ModelName,
-		Dimensions:   job.Dimensions,
-		Status:       job.Status,
-		AttemptCount: job.AttemptCount,
-		ErrorMessage: job.ErrorMessage,
-		CreatedAt:    job.CreatedAt,
-		UpdatedAt:    job.UpdatedAt,
-		StartedAt:    job.StartedAt,
-		CompletedAt:  job.CompletedAt,
+		ID:            job.ID,
+		DocumentID:    job.DocumentID,
+		ModelName:     job.ModelName,
+		Dimensions:    job.Dimensions,
+		Status:        job.Status,
+		AttemptCount:  job.AttemptCount,
+		ErrorMessage:  job.ErrorMessage,
+		NextAttemptAt: job.NextAttemptAt,
+		PromptTokens:  job.PromptTokens,
+		TotalTokens:   job.TotalTokens,
+		CreatedAt:     job.CreatedAt,
+		UpdatedAt:     job.UpdatedAt,
+		StartedAt:     job.StartedAt,
+		CompletedAt:   job.CompletedAt,
 	}
 }
 

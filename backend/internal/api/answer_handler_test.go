@@ -13,6 +13,7 @@ import (
 
 	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	generationdomain "rag-reasoning-platform/backend/internal/domain/generation"
 )
@@ -223,6 +224,8 @@ func TestAnswerHandlerMapsServiceErrors(t *testing.T) {
 		{name: "query UTF-8", err: embeddingapplication.ErrSemanticSearchQueryInvalidUTF8, wantStatus: http.StatusBadRequest, wantError: "query must be valid UTF-8"},
 		{name: "query too long", err: embeddingapplication.ErrSemanticSearchQueryTooLong, wantStatus: http.StatusBadRequest, wantError: "query must not exceed 1000 characters"},
 		{name: "top k", err: embeddingapplication.ErrInvalidSemanticSearchTopK, wantStatus: http.StatusBadRequest, wantError: "top_k must be between 1 and 20"},
+		{name: "document not found", err: documentdomain.ErrNotFound, wantStatus: http.StatusNotFound, wantError: "document not found"},
+		{name: "document embeddings not ready", err: embeddingapplication.ErrDocumentEmbeddingsNotReady, wantStatus: http.StatusConflict, wantError: "document embeddings are not ready"},
 		{name: "response language", err: answerapplication.ErrInvalidResponseLanguage, wantStatus: http.StatusBadRequest, wantError: "response_language must be auto, zh, or en"},
 		{name: "embedding rejected", err: embeddingdomain.ErrEmbeddingRequestRejected, wantStatus: http.StatusBadGateway, wantError: "embedding provider returned an invalid response"},
 		{name: "invalid embedding response", err: embeddingdomain.ErrInvalidEmbeddingResponse, wantStatus: http.StatusBadGateway, wantError: "embedding provider returned an invalid response"},

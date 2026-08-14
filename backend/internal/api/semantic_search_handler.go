@@ -97,6 +97,18 @@ func (h *SemanticSearchHandler) Search(c *gin.Context) {
 			TopK:       topK,
 		},
 	)
+	if errors.Is(err, documentdomain.ErrNotFound) {
+		c.JSON(http.StatusNotFound, errorResponse{
+			Error: "document not found",
+		})
+		return
+	}
+	if errors.Is(err, embeddingapplication.ErrDocumentEmbeddingsNotReady) {
+		c.JSON(http.StatusConflict, errorResponse{
+			Error: "document embeddings are not ready",
+		})
+		return
+	}
 	if errors.Is(err, embeddingapplication.ErrInvalidDocumentID) {
 		c.JSON(http.StatusBadRequest, errorResponse{
 			Error: "document_id must be a positive integer",

@@ -195,6 +195,8 @@ func TestSemanticSearchHandlerMapsServiceErrors(t *testing.T) {
 		{name: "quota", err: embeddingdomain.ErrEmbeddingQuotaExceeded, wantStatus: http.StatusServiceUnavailable, wantError: "semantic search is temporarily unavailable"},
 		{name: "provider unavailable", err: embeddingdomain.ErrEmbeddingUnavailable, wantStatus: http.StatusServiceUnavailable, wantError: "semantic search is temporarily unavailable"},
 		{name: "database", err: errors.New("database unavailable"), wantStatus: http.StatusInternalServerError, wantError: "internal server error"},
+		{name: "document not found", err: documentdomain.ErrNotFound, wantStatus: http.StatusNotFound, wantError: "document not found"},
+		{name: "document embeddings not ready", err: embeddingapplication.ErrDocumentEmbeddingsNotReady, wantStatus: http.StatusConflict, wantError: "document embeddings are not ready"},
 	}
 
 	for _, test := range tests {

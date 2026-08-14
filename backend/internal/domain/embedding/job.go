@@ -76,6 +76,14 @@ type JobCreator interface {
 	) (Job, error)
 }
 
+// JobFinder 定义按照任务 ID 查询单个向量任务所需的最小能力。
+//
+// Application 只依赖这个接口，不需要知道数据来自 PostgreSQL、测试 fake，
+// 还是未来的其他存储实现。
+type JobFinder interface {
+	GetEmbeddingJobByID(ctx context.Context, jobID int64) (Job, error)
+}
+
 // JobClaimer 定义 Worker 原子领取下一条到期任务所需的能力。
 //
 // 具体仓储必须保证同一条任务不会被两个并发 Worker 同时领取。

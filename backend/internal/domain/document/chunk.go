@@ -65,6 +65,29 @@ type ChunkLister interface {
 	) ([]TextChunk, error)
 }
 
+// ChunkPageOptions 表示仓储分页读取文本块时使用的参数。
+// Limit 是最多返回多少条，Offset 是从原文顺序中跳过多少条。
+type ChunkPageOptions struct {
+	Limit  int64
+	Offset int64
+}
+
+// ChunkPageResult 表示一页文本块和该文档的文本块总数。
+type ChunkPageResult struct {
+	Chunks []TextChunk
+	Total  int64
+}
+
+// ChunkPageLister 定义按文档分页读取文本块的能力。
+// 该端口服务于 HTTP 浏览，不改变 Worker 使用的全量 ChunkLister。
+type ChunkPageLister interface {
+	ListPageByDocumentID(
+		ctx context.Context,
+		documentID int64,
+		options ChunkPageOptions,
+	) (ChunkPageResult, error)
+}
+
 // ChunkRepository 组合 Worker 入库和后续查询所需的文本块能力。
 type ChunkRepository interface {
 	ChunkReplacer
