@@ -7,9 +7,13 @@ P4 保留 `GET /search` 作为独立关键词检索，并新增独立语义检�
 
 ```text
 GET /search                关键词检索，保持可独立使用
-POST /semantic-search      语义检索，P4 后续实现
+POST /semantic-search      语义检索，已完成并作为原子能力保留
 混合检索                   暂不实现，等待真实测试集结论
 ```
+
+2026-08-14 决定冻结当前接口为独立原子能力，不继续把专业任务选择、语言路由、邻接扩展或 rerank
+堆入同一个 Service。未来由独立的 Application 检索编排器组合关键词、语义、元数据、概念和专业
+Search；详见 `search-orchestration-roadmap.md`。
 
 ## 二、已经确认的生命周期边界
 
@@ -107,6 +111,7 @@ PostgreSQL + pgvector 计算相似度
 - PostgreSQL 任务仓储；
 - Application 就绪状态检查；
 - Gin 手动入队接口和 HTTP 错误映射；
+- `GET /embedding-jobs/:id` 状态查询接口，覆盖重试时间、Token 用量和生命周期时间戳；
 - 模型名称与向量维度配置；
 - 可替换的 `Embedder` 领域端口；
 - 基于标准库 HTTP 客户端的 OpenAI 兼容协议适配器，以及 DashScope/OpenAI 提供方选择；
@@ -123,6 +128,9 @@ PostgreSQL + pgvector 计算相似度
 - PostgreSQL 精确余弦检索、文档过滤、模型/维度过滤和真实集成测试；
 - `POST /semantic-search` JSON Handler、DTO 转换和 HTTP 错误映射；
 - Worker 与语义检索独立开关，以及共享 Embedder 的生产组合代码。
+- 指定文档检索前的向量完整性检查：Domain 定义最小端口，PostgreSQL 核对文档状态、chunk 数量、
+  成功任务模型/维度和向量数量，Application 在远程 Embedder 之前执行检查；不存在返回 `404`，
+  未完整就绪返回 `409`，全库检索保持原有行为。
 
 `EMBEDDING_WORKER_ENABLED` 与 `SEMANTIC_SEARCH_ENABLED` 默认都是 `false`，因此默认运行不会调用
 远程 API 或产生费用。两者可以独立启用；只要任一能力开启就要求对应提供方的 API Key，二者同时
@@ -138,6 +146,11 @@ PostgreSQL + pgvector 计算相似度
 检索与后台 Worker 已解耦。中文问题通过 DashScope 生成查询向量后，在文档 20 的 42 条向量中返回
 5 条相似度降序结果，包含原始文件名和物理页码；默认 `top_k=5` 与非法 `top_k=0` 分支均符合契约。
 
+2026-08-14 已补齐指定文档的向量就绪语义。真实 PostgreSQL 隔离测试覆盖完整向量、缺失单条向量、
+无 chunks、文档未 ready、模型不匹配、维度不匹配和文档不存在；真实 HTTP 使用文档 238 验证
+`POST /semantic-search` 在 84 个 chunks、0 个向量时返回 `409`，不存在文档返回 `404`，且检查发生在
+远程 Embedding 调用之前。
+
 ### 当前范围决策（2026-08-13）
 
 本阶段不开发混合检索。2026-08-13 已选择 8 篇中英文文献并为 460 个 chunks 完整生成向量，随后在
@@ -148,8 +161,8 @@ PostgreSQL + pgvector 计算相似度
 关键词检索覆盖全部 ready 文档，语义检索只覆盖本轮 8 篇向量文档，因此第一版关键词数据只作为探索性
 参照，不包装成严格公平对照。混合检索仍留在后续计划中，不自动进入开发队列；只有证据显示两路结果
 存在稳定且有价值的互补性时，才重新讨论融合算法、分数归一化和接口契约。详细方法见
-`docs/evaluation/retrieval-quality-evaluation-plan.md`，本机完整原始结果和初测报告保存在 Git 忽略的
-`chatgpt/检索评估/2026-08-13/`。
+`docs/backend/evaluation/retrieval-quality-evaluation-plan.md`，本机完整原始结果和初测报告保存在 Git 忽略的
+`chatgpt/后端/评估/检索评估/2026-08-13/`。
 
 ## 六、后续实施顺序
 

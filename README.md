@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P4（AI 增强）进行中。`GET /search` 关键词检索保持独立；可切换的远程 Embeddings Worker、独立 `embedding_jobs` 生命周期、pgvector 存储和手动任务触发已经完成。当前默认使用阿里云百炼，OpenAI 适配器继续保留。独立的 `POST /semantic-search` 已完成全部分层、生产组合与真实 DashScope HTTP 验收；首版 8 篇中英文文献的 460 个 chunks 已完整生成向量，冻结的 12 个问题中预期来源语义 Hit@5 为 11/12。带来源引用的 `POST /answers` 已完成全部分层、生产组合、自动化测试和首次真实文献 HTTP 验收；下一步扩大答案与引用质量评估。混合检索继续后置，DOCX、OCR 和复杂学术版面质量仍属于后续增量能力。
+> 当前状态：P4（AI 增强）第一版已完成，进入 P5（工程化）。`GET /search` 关键词检索保持独立；远程 Embeddings Worker、独立 `embedding_jobs` 生命周期、pgvector、`POST /semantic-search` 和带来源引用的 `POST /answers` 已完成分层、生产组合与真实 DashScope 验收。8 篇中英文文献的 460 个 chunks 已完整生成向量；P4 收尾冻结的 15 条问答、跨语言、拒答和未就绪样本均已执行并人工核对。当前能力适合普通段落型文献问答，但复杂表格解释和“命中文档后选到最可回答 chunk”仍有已登记质量边界。混合检索、DOCX、OCR 和复杂学术版面质量继续作为后续增量能力。
 
 ## 项目目标
 
@@ -14,7 +14,7 @@
 - 解析失败原因记录和手动重试
 - 文本分块与 PostgreSQL 持久化
 - 关键词检索、分页和基础过滤
-- 简单的原生 Web 页面
+- 简洁的 Vue Web 工作台
 - 核心接口与任务状态测试
 
 项目强调低资源占用：文件流式处理、worker 默认单并发、Python 按需启动、AI 能力可关闭且失败可降级。
@@ -26,7 +26,7 @@
 | 业务后端 | Go + Gin + pgx | REST API、参数校验、业务编排、任务状态、数据库访问、文件管理以及 Markdown/TXT 规范化分块 |
 | AI 与复杂文档处理 | Python | PDF、DOCX 等复杂来源的解析，以及后期的向量化、语义检索、摘要和问答 |
 | 数据库 | PostgreSQL | 文档元数据、任务、文本块和检索数据 |
-| 前端 | HTML/CSS/JavaScript | 上传、列表、状态展示和搜索 |
+| 前端 | Vue 3 + TypeScript + Vite | 上传、列表、状态展示、检索和带来源问答 |
 
 ### Go 与 Python 如何协作
 
@@ -70,9 +70,13 @@ rag_reasoning_platform_individual/
 │  │  └─ generation/            # 摘要与问答（后期）
 │  └─ tests/                    # Python 测试
 ├─ contracts/                   # Go 与 Python 的 JSON 数据契约
-├─ web/                         # 原生前端
+├─ web/                         # Vue 3 + TypeScript + Vite 前端
+├─ docs/
+│  ├─ shared/                   # 前后端共同遵守的正式接口契约
+│  ├─ backend/                  # 后端、AI、数据库、评估与性能文档
+│  └─ frontend/                 # 前端架构、规范与路线图
 ├─ storage/                     # 本地运行数据，不提交 Git
-├─ chatgpt/                     # 对话和非项目资料，不提交 Git
+├─ chatgpt/                     # 前后端分区的对话学习资料与运行产物，不提交 Git
 ├─ .gitignore
 └─ README.md
 ```
@@ -118,9 +122,13 @@ rag_reasoning_platform_individual/
 - **P2：异步解析链路**——任务表、单并发 worker、Python 解析、失败重试与幂等。
 - **P3：检索**——关键词/全文检索、分页、过滤、排序和测量。
 - **P4：AI 增强**——向量检索、带来源引用的摘要或问答，以及失败降级。
-- **P5：工程化**——测试、日志、配置校验、部署、性能记录和求职材料。
+- **P5：个人版后端工程化**——运行路径、测试、日志、配置校验、部署、备份和性能/成本记录。
+- **P6：多用户产品化（未来）**——用户认证、工作区、成员权限、数据隔离、配额与审计；只有出现明确多人需求后启动。
 
-### 当前里程碑进度（2026-08-13）
+前端不复用后端的 P 阶段编号，而是沿着独立的 `F0～F5` 路线推进：从 Vue 工程骨架、统一 API Client，
+逐步完成文档管理、检索、AI 工作台和前端工程化。当前版本仍是没有登录和租户切换的个人工作区。
+
+### 当前里程碑进度（2026-08-14）
 
 | 阶段 | 状态 | 当前结论 |
 | --- | --- | --- |
@@ -128,32 +136,43 @@ rag_reasoning_platform_individual/
 | P1 | 已完成 | Go 服务、PostgreSQL、迁移、文档增删查和真实 HTTP 验证已经完成 |
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
-| P4 | 进行中 | 向量生产链路、独立语义检索与首版质量测试均已完成；带来源问答已通过首次真实 HTTP 验收，下一步扩大答案与引用质量评估 |
-| P5 | 部分进行 | 测试、配置、安全关闭和错误包装持续建设；正式部署和性能记录尚未完成 |
+| P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
+| P5 | 进行中 | 面向个人版完成运行路径、配置、日志、部署、备份、可观测性和性能/成本基线，不包含用户与租户系统 |
+| P6 | 未开始 | 用户、工作区、成员权限和全链路数据隔离尚未设计或实现；当前服务不能作为公开多人 SaaS 直接部署 |
+
+前端当前处于 `F0` 联调收尾：工程分层、统一 API Client、健康检查、测试与构建已经完成，下一步先完成
+浏览器到真实 Go `/health` 的联调，再进入 F1/F2 的接口基础和文档管理。
 
 PDF 文献处理的错误分类、页码来源、资源限制、解析库选择和分阶段验收标准见
-[PDF 文献处理架构与分阶段路线](docs/architecture/pdf-processing-roadmap.md)。
+[PDF 文献处理架构与分阶段路线](docs/backend/architecture/pdf-processing-roadmap.md)。
 
 文献标题自动提取、落库、搜索结果展示和未来文献/文件拆分边界见
-[文献标题与文档内检索架构](docs/architecture/document-title-and-search-filter.md)。
+[文献标题与文档内检索架构](docs/backend/architecture/document-title-and-search-filter.md)。
 
 概念词典、同义词、中英文标注、语义检索与缓存后置的未实现设想见
-[概念词典、多语言标注与语义检索设想](docs/architecture/concept-retrieval-roadmap.md)。
+[概念词典、多语言标注与语义检索设想](docs/backend/architecture/concept-retrieval-roadmap.md)。
 
 P3 关键词搜索的数据规模、表/索引空间、`EXPLAIN ANALYZE` 证据和阶段结论见
-[关键词检索性能基线](docs/performance/search-baseline-2026-08-10.md)。
+[关键词检索性能基线](docs/backend/performance/search-baseline-2026-08-10.md)。
 
 关键词检索与语义检索的中英文真实问题、排名、相关性评分和混合检索重新评估条件见
-[检索质量评估计划](docs/evaluation/retrieval-quality-evaluation-plan.md)。
+[检索质量评估计划](docs/backend/evaluation/retrieval-quality-evaluation-plan.md)。
 
 第一版“问题 → 语义证据 → 远程生成 → 答案与来源”的职责、接口和安全边界见
-[带来源引用问答（RAG 第一版）架构](docs/architecture/rag-answer-roadmap.md)。
+[带来源引用问答（RAG 第一版）架构](docs/backend/architecture/rag-answer-roadmap.md)。
 
 问答质量的冻结样本类型、引用一致性检查、人工评分与失败保留规则见
-[带来源问答质量评估计划](docs/evaluation/rag-answer-quality-evaluation-plan.md)。
+[带来源问答质量评估计划](docs/backend/evaluation/rag-answer-quality-evaluation-plan.md)。
 
 Python 类、函数和方法的中文 IDE 悬停说明要求见
-[Python Docstring 与 IDE 悬停说明规范](docs/development/python-docstrings.md)。
+[Python Docstring 与 IDE 悬停说明规范](docs/backend/development/python-docstrings.md)。
+
+前端技术栈、模块边界、状态归属、接口适配与测试策略见
+[前端应用架构](docs/frontend/architecture/frontend-application-architecture.md) 和
+[前端分层与阶段路线](docs/frontend/architecture/frontend-roadmap.md)。
+
+个人版 P5、前端 F0～F5 与未来 P6 用户/工作区/多租户之间的边界和推荐执行顺序见
+[产品演进路线](docs/shared/architecture/product-evolution-roadmap.md)。
 
 ## 本地开发状态
 
@@ -178,6 +197,8 @@ PostgreSQL 文档仓储已实现 `Create`、`GetByID`、分页 `List` 和 `Delet
 `POST /documents` 已使用 Gin 的流式 multipart 读取接入上传应用服务，并通过 `http.MaxBytesReader` 限制整个请求体。接口自动化测试已覆盖缺少文件、创建成功、应用错误映射和超大请求体；真实 HTTP 验证已确认 PDF、MD、MARKDOWN 和 TXT 均返回 `201` 及正确 MIME，数据库保存规范化物理扩展名，不支持的 DOCX 返回 `415 Unsupported Media Type`。测试记录和物理文件随后均通过删除接口清理。
 
 `GET /documents` 已提供分页列表，默认 `page=1`、`page_size=20`，单页最多 100 条。接口自动化测试已覆盖默认值、自定义参数、非法输入、应用错误映射、内部字段隐藏和空数组响应；真实 HTTP 请求已验证空数据库下的 `200` 分页响应，以及非法页码和超大单页数量的 `400` 响应。
+
+`GET /documents/:id/chunks` 已提供文档文本块分页浏览，默认 `page=1`、`page_size=20`，单页最多 100 条。响应按照 `chunk_index` 原文顺序返回内容、物理页码和稳定 chunk ID；只有 `ready` 文档可以读取，其他状态返回 `409`，避免重新处理期间把旧 chunks 当成正式结果。接口已通过 Handler、Application、真实 PostgreSQL 分页和 HTTP 纵向测试。
 
 `DELETE /documents/:id` 已完成领域仓储能力、应用服务、PostgreSQL 实现、Gin Handler、路由注册和启动依赖注入。自动化测试覆盖非法 ID、文档不存在、文件删除失败、数据库删除失败、删除顺序以及 HTTP `204`、`400`、`404`、`500` 映射。真实 HTTP 冒烟测试已验证上传返回 `201`、删除前查询返回 `200`、删除返回空响应体的 `204`、删除后查询返回 `404`，并确认数据库记录数归零且物理文件已经删除。
 
@@ -207,6 +228,8 @@ Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义�
 
 `POST /documents/:id/embeddings` 已实现独立向量任务的手动入队。只有 `ready` 文档可以创建任务，成功返回 `202 Accepted`；非法 ID 返回 `400`，文档不存在返回 `404`，文本未就绪或已经存在活动向量任务返回 `409`。任务会冻结 `model_name` 和 `dimensions`，第一版数据库固定使用 1536 维向量；DashScope 默认模型为 `text-embedding-v4`，OpenAI 默认模型为 `text-embedding-3-small`。接口本身只创建 `queued` 任务；当 `EMBEDDING_WORKER_ENABLED=true` 时，后台单 Worker 会按批调用当前配置的远程 API，并通过 PostgreSQL 事务原子保存全部 chunk 向量与任务成功状态。临时错误按指数退避重新排队，鉴权、参数、余额或额度耗尽等永久错误进入 `failed`，正常 shutdown 遗留的 `processing` 任务会在下次单实例启动时恢复为 `queued`。Worker 默认关闭，不会产生远程调用或模型费用。
 
+`GET /embedding-jobs/:id` 已提供向量任务状态查询。接口返回任务所属文档、冻结的模型与维度、当前状态、尝试次数、下次重试时间、错误信息、Token 用量和各阶段时间戳；非法 ID 返回 `400`，任务不存在返回 `404`。前端可以在创建任务获得 ID 后轮询该接口，而不需要读取数据库或依赖后端日志。
+
 DashScope 真实验收已经完成：文档 20 的 42 个文本块创建任务 22，使用 `text-embedding-v4`
 生成 1536 维向量；任务只领取 1 次并进入 `succeeded`，记录 16399 个输入 Token。数据库最终存在
 42 条互不重复、维度一致且非零的向量，没有遗漏文本块，也没有遗留 `queued/processing` 任务。
@@ -214,18 +237,21 @@ DashScope 真实验收已经完成：文档 20 的 42 个文本块创建任务 2
 `POST /semantic-search` 使用 JSON 请求体接收自然语言 `query`、可选 `document_id` 和可选 `top_k`。
 Application 使用当前配置的同一模型生成一条查询向量，PostgreSQL + pgvector 再按照精确余弦相似度
 返回最接近的文本块及文献标题、原始文件名和物理页码。查询只比较模型名称与维度都一致的向量；
-`top_k` 默认是 5，第一版上限为 20。该接口由 `SEMANTIC_SEARCH_ENABLED` 独立控制，默认关闭；
-启用后每次请求都会调用远程 Embedding API，可能产生费用。内部各层、错误映射、真实 PostgreSQL
+`top_k` 默认是 5，第一版上限为 20。指定文档不存在时返回 `404`；文档存在但状态、chunks 或当前
+模型向量尚未完整就绪时返回 `409`，并在调用远程 API 前终止。该接口由 `SEMANTIC_SEARCH_ENABLED`
+独立控制，默认关闭；通过就绪检查后的检索会调用远程 Embedding API，可能产生费用。内部各层、错误映射、真实 PostgreSQL
 查询和真实 DashScope HTTP 均已经通过验收。中文问题“磁悬浮列车如何通过控制方法提高系统稳定性？”
 在文档 20 中返回 5 条相似度降序结果；不提供 `top_k` 时默认返回 5 条，明确提供 0 时返回 400。
 
 `POST /answers` 使用同样的 `query`、可选 `document_id`、可选 `top_k` 和可选 `response_language`，先通过语义检索取得已编号
 证据，再调用 DashScope Chat Completions 生成带 `[1]`、`[2]` 引用标记的回答。响应同时返回来源文献、
-原始文件名、物理页码、相似度和 Token 用量。没有证据时返回稳定降级答案与空 `sources`，不会调用
-生成模型。该接口由 `ANSWER_ENABLED` 独立控制且默认关闭；应用分层、远程适配器、错误映射和
-`main.go` 生产组合已经通过自动化测试。首次真实文献验收中，文档 20 的中文问题返回 3 条来源和带引用
-答案，Token 用量为 prompt 1537、completion 348、total 1885；这只证明链路与基本相关性，后续仍需
-扩大问题集并人工核对事实—引用一致性。`response_language` 支持 `auto`、`zh` 和 `en`；省略时等同于
+原始文件名、物理页码、相似度和 Token 用量。当前模型向量完整但没有证据时返回稳定降级答案与空
+`sources`，不会调用生成模型；指定文档不存在返回 `404`，向量未完整就绪返回 `409`。该接口由
+`ANSWER_ENABLED` 独立控制且默认关闭；应用分层、远程适配器、错误映射和
+`main.go` 生产组合已经通过自动化测试。P4 收尾使用 8 篇中英文文献、460 个完整向量和 15 条冻结样本
+完成真实远程验收：15/15 HTTP 行为符合预期，14/14 回答语言和引用编号通过，答案/行为人工支持度为
+25/28；未向量化文档在远程调用前返回 `409` 并消耗 0 Token。该结果建立了第一版基线，不代表生产级
+准确率；复杂表格列关系和全库问答的最佳证据选择仍是已登记问题。`response_language` 支持 `auto`、`zh` 和 `en`；省略时等同于
 `auto`，由问题中的主要字符选择语言，响应会返回最终解析后的 `zh` 或 `en`。真实 HTTP 验收已确认
 英文问题、省略、自动中文和显式语言覆盖均生效，非法值返回 400。
 

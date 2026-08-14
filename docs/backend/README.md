@@ -1,0 +1,34 @@
+# 后端正式文档
+
+本目录保存 Go API、Python 文档处理、PostgreSQL、检索、向量化和 RAG 问答的正式文档。
+
+## 分类
+
+- `architecture/`：系统能力与阶段性架构方案；
+- `development/`：需要长期执行的开发规范；
+- `evaluation/`：检索、回答等能力的评估方法；
+- `performance/`：数据库和接口性能基线。
+
+## 主要架构入口
+
+- [PDF 与复杂文档处理路线](architecture/pdf-processing-roadmap.md)
+- [语义检索路线](architecture/semantic-search-roadmap.md)
+- [带来源问答路线](architecture/rag-answer-roadmap.md)
+- [多能力检索编排路线](architecture/search-orchestration-roadmap.md)
+- [概念词典与多语言检索设想](architecture/concept-retrieval-roadmap.md)
+- [文档文本块浏览接口](architecture/document-chunk-browsing.md)
+
+## 质量评估入口
+
+- [关键词与语义检索质量评估](evaluation/retrieval-quality-evaluation-plan.md)
+- [带来源问答质量评估与 P4 收尾结论](evaluation/rag-answer-quality-evaluation-plan.md)
+
+截至 2026-08-14，P4 AI 增强第一版已经完成质量收尾：15 条冻结样本的 HTTP 行为全部符合预期，
+问答/拒答样本的语言和引用编号全部通过，复杂表格解释与最佳证据选择仍作为已知质量边界保留。
+
+当前后端进入 P5 个人版工程化，优先处理运行路径、配置、日志、部署、备份、回归和性能/成本记录。
+P5 不包含用户认证和多租户；未来 P6 的工作区、权限与数据隔离计划见
+[产品演进路线](../shared/architecture/product-evolution-roadmap.md)。
+
+前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
+[HTTP API 总览](../shared/api/http-api-overview.md)。
