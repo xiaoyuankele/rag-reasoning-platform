@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P4（AI 增强）进行中。`GET /search` 关键词检索保持独立；可切换的远程 Embeddings Worker、独立 `embedding_jobs` 生命周期、pgvector 存储和手动任务触发已经完成。当前默认使用阿里云百炼，OpenAI 适配器继续保留；DashScope 真实纵向验收已经为一份 42 chunks 文档生成并原子保存 42 条 1536 维向量。独立的 `POST /semantic-search` 已完成 Domain、Application、PostgreSQL、Handler、生产组合和真实 DashScope HTTP 验收；下一步建立中英文真实问题测试集并评估检索质量。混合检索只保留在后续路线中，当前不开发。DOCX、OCR 和复杂学术版面质量仍属于后续增量能力。
+> 当前状态：P4（AI 增强）进行中。`GET /search` 关键词检索保持独立；可切换的远程 Embeddings Worker、独立 `embedding_jobs` 生命周期、pgvector 存储和手动任务触发已经完成。当前默认使用阿里云百炼，OpenAI 适配器继续保留。独立的 `POST /semantic-search` 已完成全部分层、生产组合与真实 DashScope HTTP 验收；首版 8 篇中英文文献的 460 个 chunks 已完整生成向量，冻结的 12 个问题中预期来源语义 Hit@5 为 11/12。带来源引用的 `POST /answers` 已完成全部分层、生产组合、自动化测试和首次真实文献 HTTP 验收；下一步扩大答案与引用质量评估。混合检索继续后置，DOCX、OCR 和复杂学术版面质量仍属于后续增量能力。
 
 ## 项目目标
 
@@ -128,7 +128,7 @@ rag_reasoning_platform_individual/
 | P1 | 已完成 | Go 服务、PostgreSQL、迁移、文档增删查和真实 HTTP 验证已经完成 |
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
-| P4 | 进行中 | 向量生产链路与独立语义检索接口均通过真实验收；下一步建立中英文问题质量测试集 |
+| P4 | 进行中 | 向量生产链路、独立语义检索与首版质量测试均已完成；带来源问答已通过首次真实 HTTP 验收，下一步扩大答案与引用质量评估 |
 | P5 | 部分进行 | 测试、配置、安全关闭和错误包装持续建设；正式部署和性能记录尚未完成 |
 
 PDF 文献处理的错误分类、页码来源、资源限制、解析库选择和分阶段验收标准见
@@ -145,6 +145,12 @@ P3 关键词搜索的数据规模、表/索引空间、`EXPLAIN ANALYZE` 证据�
 
 关键词检索与语义检索的中英文真实问题、排名、相关性评分和混合检索重新评估条件见
 [检索质量评估计划](docs/evaluation/retrieval-quality-evaluation-plan.md)。
+
+第一版“问题 → 语义证据 → 远程生成 → 答案与来源”的职责、接口和安全边界见
+[带来源引用问答（RAG 第一版）架构](docs/architecture/rag-answer-roadmap.md)。
+
+问答质量的冻结样本类型、引用一致性检查、人工评分与失败保留规则见
+[带来源问答质量评估计划](docs/evaluation/rag-answer-quality-evaluation-plan.md)。
 
 Python 类、函数和方法的中文 IDE 悬停说明要求见
 [Python Docstring 与 IDE 悬停说明规范](docs/development/python-docstrings.md)。
@@ -213,6 +219,16 @@ Application 使用当前配置的同一模型生成一条查询向量，PostgreS
 查询和真实 DashScope HTTP 均已经通过验收。中文问题“磁悬浮列车如何通过控制方法提高系统稳定性？”
 在文档 20 中返回 5 条相似度降序结果；不提供 `top_k` 时默认返回 5 条，明确提供 0 时返回 400。
 
+`POST /answers` 使用同样的 `query`、可选 `document_id`、可选 `top_k` 和可选 `response_language`，先通过语义检索取得已编号
+证据，再调用 DashScope Chat Completions 生成带 `[1]`、`[2]` 引用标记的回答。响应同时返回来源文献、
+原始文件名、物理页码、相似度和 Token 用量。没有证据时返回稳定降级答案与空 `sources`，不会调用
+生成模型。该接口由 `ANSWER_ENABLED` 独立控制且默认关闭；应用分层、远程适配器、错误映射和
+`main.go` 生产组合已经通过自动化测试。首次真实文献验收中，文档 20 的中文问题返回 3 条来源和带引用
+答案，Token 用量为 prompt 1537、completion 348、total 1885；这只证明链路与基本相关性，后续仍需
+扩大问题集并人工核对事实—引用一致性。`response_language` 支持 `auto`、`zh` 和 `en`；省略时等同于
+`auto`，由问题中的主要字符选择语言，响应会返回最终解析后的 `zh` 或 `en`。真实 HTTP 验收已确认
+英文问题、省略、自动中文和显式语言覆盖均生效，非法值返回 400。
+
 Python PDF 测试依赖 `ai/pyproject.toml` 中锁定的解析库。首次运行前安装项目依赖，然后执行测试：
 
 ```powershell
@@ -256,6 +272,13 @@ Go 后端当前支持以下环境变量：
 | `EMBEDDING_MAX_ATTEMPTS` | `5` | 临时错误允许的最大领取次数 |
 | `EMBEDDING_RETRY_BASE_DELAY` | `5s` | 第一次延迟重试的基础等待时间 |
 | `EMBEDDING_RETRY_MAX_DELAY` | `2m` | 指数退避等待时间上限 |
+| `ANSWER_ENABLED` | `false` | 是否注册带来源问答接口；启用后会调用 Embedding 与 Generation API |
+| `DASHSCOPE_GENERATION_ENDPOINT` | 百炼中国内地兼容地址 | DashScope Chat Completions HTTP API 地址 |
+| `GENERATION_MODEL` | `qwen3.6-flash` | 第一版回答生成模型；由后端配置，不接受前端任意指定 |
+| `GENERATION_HTTP_TIMEOUT` | `60s` | 单次远程回答生成请求超时 |
+| `GENERATION_MAX_OUTPUT_TOKENS` | `1024` | 生成答案的最大输出 Token，上限为 8192 |
+| `GENERATION_TEMPERATURE` | `0.1` | 生成温度，有效范围为 0 到 2；低温度用于减少回答随机性 |
+| `GENERATION_THINKING_ENABLED` | `false` | 是否启用百炼混合思考；首版默认关闭以控制延迟、Token 和空最终答案风险 |
 
 `.env.example` 是可以提交到 Git 的配置模板，不得包含密码或真实密钥。`.env` 用于保存本机配置和密钥，已被 Git 忽略。
 

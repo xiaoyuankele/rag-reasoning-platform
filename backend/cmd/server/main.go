@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"rag-reasoning-platform/backend/internal/api"
+	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
 	documentapplication "rag-reasoning-platform/backend/internal/application/document"
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
 	"rag-reasoning-platform/backend/internal/config"
@@ -84,6 +85,11 @@ func run(ctx context.Context) error {
 	embeddingConfig, err := config.LoadEmbedding()
 	if err != nil {
 		return fmt.Errorf("load embedding configuration: %w", err)
+	}
+
+	generationConfig, err := config.LoadGeneration()
+	if err != nil {
+		return fmt.Errorf("load generation configuration: %w", err)
 	}
 
 	// ConnectionString 包含密码，只传给数据库层，不写入日志。
@@ -239,18 +245,24 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create document worker loop: %w", err)
 	}
 
-	// Worker 和在线语义检索都依赖 Embedder，但可以独立启用。只要任一能力
-	// 开启，就创建一个客户端并在两者之间复用；两者都关闭时不访问远程服务。
+	// Worker、公开语义检索和问答内部检索都依赖 Embedder。只要任一能力开启，
+	// 就创建一个无状态客户端并复用；三者都关闭时不创建远程客户端。
 	var embedder embeddingdomain.Embedder
-	if embeddingConfig.WorkerEnabled || embeddingConfig.SemanticSearchEnabled {
+	if embeddingConfig.WorkerEnabled ||
+		embeddingConfig.SemanticSearchEnabled ||
+		generationConfig.Enabled {
 		embedder, err = newEmbeddingClient(embeddingConfig)
 		if err != nil {
 			return err
 		}
 	}
 
+	// 语义检索服务有两种消费者：
+	// 1. SEMANTIC_SEARCH_ENABLED 控制的公开 POST /semantic-search；
+	// 2. ANSWER_ENABLED 控制的 AnswerService 内部证据检索。
+	// 因此“创建应用能力”和“是否暴露独立 HTTP 路由”必须分开判断。
 	var semanticSearchService *embeddingapplication.SemanticSearchService
-	if embeddingConfig.SemanticSearchEnabled {
+	if embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled {
 		semanticSearchService, err =
 			embeddingapplication.NewSemanticSearchService(
 				embedder,
@@ -260,6 +272,27 @@ func run(ctx context.Context) error {
 			)
 		if err != nil {
 			return fmt.Errorf("create semantic search service: %w", err)
+		}
+	}
+
+	// 第一版问答使用 DashScope 的 OpenAI 兼容生成接口。Generator 只在显式
+	// 启用 ANSWER_ENABLED 时创建，避免基础服务启动后意外产生生成费用。
+	var answerService *answerapplication.Service
+	if generationConfig.Enabled {
+		generator, err := newGenerationClient(generationConfig)
+		if err != nil {
+			return err
+		}
+
+		answerService, err = answerapplication.NewService(
+			semanticSearchService,
+			generator,
+			generationConfig.ModelName,
+			generationConfig.MaxOutputTokens,
+			generationConfig.Temperature,
+		)
+		if err != nil {
+			return fmt.Errorf("create answer service: %w", err)
 		}
 	}
 
@@ -343,10 +376,14 @@ func run(ctx context.Context) error {
 		embeddingQueueService,
 	)
 	var semanticSearchHandler *api.SemanticSearchHandler
-	if semanticSearchService != nil {
+	if embeddingConfig.SemanticSearchEnabled {
 		semanticSearchHandler = api.NewSemanticSearchHandler(
 			semanticSearchService,
 		)
+	}
+	var answerHandler *api.AnswerHandler
+	if answerService != nil {
+		answerHandler = api.NewAnswerHandler(answerService)
 	}
 
 	router := api.NewRouter()
@@ -360,6 +397,9 @@ func run(ctx context.Context) error {
 	documentEmbeddingHandler.RegisterRoutes(router)
 	if semanticSearchHandler != nil {
 		semanticSearchHandler.RegisterRoutes(router)
+	}
+	if answerHandler != nil {
+		answerHandler.RegisterRoutes(router)
 	}
 
 	// Gin Engine 实现了 http.Handler，所以可以交给标准库 http.Server。
