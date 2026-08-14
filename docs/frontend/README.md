@@ -1,8 +1,8 @@
 # 前端正式文档
 
-> 当前状态：F0 工程代码与自动化验收已完成，真实后端联调待验收。Vue 3 + TypeScript + Vite、
+> 当前状态：F0 工程骨架已完成，并通过真实后端健康检查联调。Vue 3 + TypeScript + Vite、
 > Vue Router、Pinia、Axios、Vitest、Vue Test Utils、ESLint 和 Prettier 已安装并接入；
-> Element Plus 仍按需后置，不作为基础架构依赖。
+> 下一步进入 F1 API 基础扩展；Element Plus 仍按需后置，不作为基础架构依赖。
 > 当前前端面向单个本地用户和一个隐含个人工作区，不包含登录、成员管理或租户切换。
 
 前端开发必须先阅读：
