@@ -345,6 +345,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			embeddingJobRepository,
 			chunkRepository,
 			embedder,
+			observability.NewEmbeddingJobLogger(logger),
 			embeddingConfig.BatchSize,
 			embeddingConfig.ProcessingTimeout,
 			retryPolicy,

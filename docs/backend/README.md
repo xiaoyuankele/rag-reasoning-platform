@@ -40,7 +40,8 @@ P5.2.1 已建立 `X-Request-ID` 与 JSON HTTP 访问日志：请求编号同时�
 前端使用稳定 `code` 判断错误，未知内部错误只返回安全消息，原始错误、诊断码和请求 ID 仅进入后端日志。
 P5.2.3 已为文档解析 Worker 增加 `started`、`succeeded`、`failed` 和 `unfinished` 结构化生命周期事件，
 能够通过任务 ID、文档 ID、尝试次数、状态和耗时排查异步任务。Embedding 任务事件和外部供应商错误分类
-仍在后续 P5.2 中推进。
+已在 P5.2.4 接入：日志覆盖成功、重试、永久失败、停机中断和数据库收尾失败，并记录模型、维度、远程调用次数、
+远程耗时、Token、生成向量数及稳定错误分类。Generation 调用指标仍在后续 P5.2 中推进。
 
 前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
 [HTTP API 总览](../shared/api/http-api-overview.md)。

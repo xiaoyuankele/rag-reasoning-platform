@@ -54,7 +54,8 @@ P5 不新增复杂业务能力，目标是把当前可运行后端变成可重�
 请求 ID 会进入响应头与标准 `context.Context`，访问日志按 `INFO/WARN/ERROR` 区分最终 HTTP 状态。
 第二小步第一版已在文档查询与解析任务查询中建立安全响应和内部诊断双通道：调用方收到稳定错误码，
 未知原始错误仅进入带请求 ID、诊断码和业务 ID 的后端日志。第三小步已为文档解析 Worker 建立
-`started`、`succeeded`、`failed` 和 `unfinished` 生命周期事件。下一步继续覆盖 Embedding 任务与供应商错误映射。
+`started`、`succeeded`、`failed` 和 `unfinished` 生命周期事件。第四小步已覆盖 Embedding 任务的成功、重试、
+永久失败、停机中断和未完成状态，并记录远程调用次数、延迟、Token 与供应商错误分类。下一步继续 Generation 指标。
 
 ### P5.3 构建、部署与数据维护
 

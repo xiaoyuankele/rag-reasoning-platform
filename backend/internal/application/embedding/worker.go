@@ -46,6 +46,7 @@ type Worker struct {
 	jobs              embeddingJobWorkerRepository
 	chunks            documentdomain.ChunkLister
 	embedder          embeddingdomain.Embedder
+	events            JobEventObserver
 	batchSize         int
 	processingTimeout time.Duration
 	retryPolicy       RetryPolicy
@@ -57,6 +58,7 @@ func NewWorker(
 	jobs embeddingJobWorkerRepository,
 	chunks documentdomain.ChunkLister,
 	embedder embeddingdomain.Embedder,
+	events JobEventObserver,
 	batchSize int,
 	processingTimeout time.Duration,
 	retryPolicy RetryPolicy,
@@ -65,6 +67,7 @@ func NewWorker(
 		jobs,
 		chunks,
 		embedder,
+		events,
 		batchSize,
 		processingTimeout,
 		retryPolicy,
@@ -77,12 +80,13 @@ func newWorker(
 	jobs embeddingJobWorkerRepository,
 	chunks documentdomain.ChunkLister,
 	embedder embeddingdomain.Embedder,
+	events JobEventObserver,
 	batchSize int,
 	processingTimeout time.Duration,
 	retryPolicy RetryPolicy,
 	now func() time.Time,
 ) (*Worker, error) {
-	if jobs == nil || chunks == nil || embedder == nil || now == nil {
+	if jobs == nil || chunks == nil || embedder == nil || events == nil || now == nil {
 		return nil, ErrEmbeddingWorkerDependencies
 	}
 	if batchSize <= 0 {
@@ -99,6 +103,7 @@ func newWorker(
 		jobs:              jobs,
 		chunks:            chunks,
 		embedder:          embedder,
+		events:            events,
 		batchSize:         batchSize,
 		processingTimeout: processingTimeout,
 		retryPolicy:       retryPolicy,
@@ -119,15 +124,54 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 		return false, fmt.Errorf("claim next embedding job: %w", err)
 	}
 
+	startedAt := time.Now()
+	finalEventType := JobEventUnfinished
+	finalStatus := embeddingdomain.JobStatusProcessing
+	var completion embeddingdomain.JobCompletion
+	var metrics embeddingProcessingMetrics
+	var nextAttemptAt *time.Time
+	var processingErr error
+
+	w.events.ObserveEmbeddingJobEvent(ctx, JobEvent{
+		Type:         JobEventStarted,
+		JobID:        job.ID,
+		DocumentID:   job.DocumentID,
+		ModelName:    job.ModelName,
+		Dimensions:   job.Dimensions,
+		AttemptCount: job.AttemptCount,
+		Status:       finalStatus,
+	})
+	defer func() {
+		w.events.ObserveEmbeddingJobEvent(ctx, JobEvent{
+			Type:                 finalEventType,
+			JobID:                job.ID,
+			DocumentID:           job.DocumentID,
+			ModelName:            job.ModelName,
+			Dimensions:           job.Dimensions,
+			AttemptCount:         job.AttemptCount,
+			Status:               finalStatus,
+			Duration:             time.Since(startedAt),
+			ProviderDuration:     metrics.providerDuration,
+			ProviderCallCount:    metrics.providerCallCount,
+			PromptTokens:         completion.PromptTokens,
+			TotalTokens:          completion.TotalTokens,
+			GeneratedVectorCount: len(completion.Vectors),
+			NextAttemptAt:        nextAttemptAt,
+			ErrorCategory:        classifyJobError(err),
+			Err:                  err,
+		})
+	}()
+
 	// timeoutContext 覆盖读取 chunks 和所有远程批次，但不覆盖最后的数据库收尾。
 	// 收尾使用父 ctx，避免任务刚完成时恰好触发处理超时而无法更新状态。
 	timeoutContext, cancel := context.WithTimeout(ctx, w.processingTimeout)
-	completion, processingErr := w.process(timeoutContext, job)
+	completion, metrics, processingErr = w.process(timeoutContext, job)
 	cancel()
 
 	// 父 ctx 被取消通常表示程序正在 shutdown。此时不要把正常停机伪装成业务失败；
 	// 任务暂时保留 processing，后续由启动恢复机制重新排队。
 	if ctx.Err() != nil {
+		finalEventType = JobEventInterrupted
 		return true, fmt.Errorf(
 			"embedding job %d interrupted: %w",
 			job.ID,
@@ -136,7 +180,11 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 	}
 
 	if processingErr != nil {
-		return true, w.finalizeFailure(ctx, job, processingErr)
+		outcome, failureErr := w.finalizeFailure(ctx, job, processingErr)
+		finalEventType = outcome.eventType
+		finalStatus = outcome.status
+		nextAttemptAt = outcome.nextAttemptAt
+		return true, failureErr
 	}
 
 	if err := w.jobs.MarkEmbeddingJobSucceeded(ctx, job.ID, completion); err != nil {
@@ -147,29 +195,41 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 		)
 	}
 
+	finalEventType = JobEventSucceeded
+	finalStatus = embeddingdomain.JobStatusSucceeded
 	return true, nil
+}
+
+type embeddingProcessingMetrics struct {
+	providerCallCount int
+	providerDuration  time.Duration
 }
 
 // process 读取文本块、分批生成向量，并把批次结果重新绑定到 chunk ID。
 func (w *Worker) process(
 	ctx context.Context,
 	job embeddingdomain.Job,
-) (embeddingdomain.JobCompletion, error) {
+) (
+	embeddingdomain.JobCompletion,
+	embeddingProcessingMetrics,
+	error,
+) {
+	completion := embeddingdomain.JobCompletion{}
+	metrics := embeddingProcessingMetrics{}
+
 	chunks, err := w.chunks.ListByDocumentID(ctx, job.DocumentID)
 	if err != nil {
-		return embeddingdomain.JobCompletion{}, fmt.Errorf(
+		return completion, metrics, fmt.Errorf(
 			"list chunks for embedding document %d: %w",
 			job.DocumentID,
 			err,
 		)
 	}
 	if len(chunks) == 0 {
-		return embeddingdomain.JobCompletion{}, ErrDocumentHasNoChunks
+		return completion, metrics, ErrDocumentHasNoChunks
 	}
 
-	completion := embeddingdomain.JobCompletion{
-		Vectors: make([]embeddingdomain.ChunkVector, 0, len(chunks)),
-	}
+	completion.Vectors = make([]embeddingdomain.ChunkVector, 0, len(chunks))
 
 	for start := 0; start < len(chunks); start += w.batchSize {
 		end := min(start+w.batchSize, len(chunks))
@@ -180,13 +240,16 @@ func (w *Worker) process(
 			inputs[index] = chunk.Content
 		}
 
+		providerStartedAt := time.Now()
 		result, err := w.embedder.Embed(ctx, embeddingdomain.EmbedRequest{
 			Inputs:     inputs,
 			Model:      job.ModelName,
 			Dimensions: job.Dimensions,
 		})
+		metrics.providerCallCount++
+		metrics.providerDuration += time.Since(providerStartedAt)
 		if err != nil {
-			return embeddingdomain.JobCompletion{}, fmt.Errorf(
+			return completion, metrics, fmt.Errorf(
 				"embed document %d chunk batch [%d:%d]: %w",
 				job.DocumentID,
 				start,
@@ -194,8 +257,13 @@ func (w *Worker) process(
 				err,
 			)
 		}
+
+		// 使用量在向量结构校验前累计，因为远程提供方已经完成本次计费调用。
+		completion.PromptTokens += result.PromptTokens
+		completion.TotalTokens += result.TotalTokens
+
 		if len(result.Vectors) != len(batch) {
-			return embeddingdomain.JobCompletion{}, fmt.Errorf(
+			return completion, metrics, fmt.Errorf(
 				"%w: received %d vectors for %d chunks",
 				embeddingdomain.ErrInvalidEmbeddingResponse,
 				len(result.Vectors),
@@ -205,7 +273,7 @@ func (w *Worker) process(
 
 		for index, values := range result.Vectors {
 			if len(values) != job.Dimensions {
-				return embeddingdomain.JobCompletion{}, fmt.Errorf(
+				return completion, metrics, fmt.Errorf(
 					"%w: chunk %d vector has %d dimensions, want %d",
 					embeddingdomain.ErrInvalidEmbeddingResponse,
 					batch[index].ID,
@@ -221,12 +289,15 @@ func (w *Worker) process(
 				},
 			)
 		}
-
-		completion.PromptTokens += result.PromptTokens
-		completion.TotalTokens += result.TotalTokens
 	}
 
-	return completion, nil
+	return completion, metrics, nil
+}
+
+type embeddingFailureOutcome struct {
+	eventType     JobEventType
+	status        embeddingdomain.JobStatus
+	nextAttemptAt *time.Time
 }
 
 // finalizeFailure 根据错误类型决定永久失败还是延迟重试。
@@ -234,7 +305,12 @@ func (w *Worker) finalizeFailure(
 	ctx context.Context,
 	job embeddingdomain.Job,
 	processingErr error,
-) error {
+) (embeddingFailureOutcome, error) {
+	unfinished := embeddingFailureOutcome{
+		eventType: JobEventUnfinished,
+		status:    embeddingdomain.JobStatusProcessing,
+	}
+
 	if !isPermanentEmbeddingError(processingErr) {
 		if nextAttemptAt, retry := w.retryPolicy.NextAttempt(
 			job.AttemptCount,
@@ -246,13 +322,17 @@ func (w *Worker) finalizeFailure(
 				nextAttemptAt,
 				safeEmbeddingRetryMessage,
 			); err != nil {
-				return errors.Join(
+				return unfinished, errors.Join(
 					processingErr,
 					fmt.Errorf("requeue embedding job %d: %w", job.ID, err),
 				)
 			}
 
-			return processingErr
+			return embeddingFailureOutcome{
+				eventType:     JobEventRequeued,
+				status:        embeddingdomain.JobStatusQueued,
+				nextAttemptAt: &nextAttemptAt,
+			}, processingErr
 		}
 	}
 
@@ -261,13 +341,16 @@ func (w *Worker) finalizeFailure(
 		job.ID,
 		safeEmbeddingFailureMessage,
 	); err != nil {
-		return errors.Join(
+		return unfinished, errors.Join(
 			processingErr,
 			fmt.Errorf("mark embedding job %d failed: %w", job.ID, err),
 		)
 	}
 
-	return processingErr
+	return embeddingFailureOutcome{
+		eventType: JobEventFailed,
+		status:    embeddingdomain.JobStatusFailed,
+	}, processingErr
 }
 
 // isPermanentEmbeddingError 只识别“原样重试无法解决”的错误。

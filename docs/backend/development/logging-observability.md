@@ -141,10 +141,32 @@ Application 只报告任务事实，不依赖具体日志框架；`main.go` 负�
 当前中断恢复策略是服务启动后将遗留 `processing` 任务标记为失败，并不存在重新排队行为，
 因此这一版没有记录与实际业务不一致的 `requeued` 事件。
 
+### 7.2 Embedding 任务生命周期与调用成本
+
+P5.2.4 为 Embedding Worker 建立独立的 `JobEventObserver`。它与文档解析观察器采用相同依赖方向：
+Application 定义事件，`internal/observability` 使用 slog 实现，`main.go` 完成注入。
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `embedding_job_started` | `INFO` | 已领取任务并进入 `processing` |
+| `embedding_job_succeeded` | `INFO` | 全部向量与 Token 使用量已经原子落库 |
+| `embedding_job_requeued` | `WARN` | 临时错误，已经设置下一次执行时间 |
+| `embedding_job_failed` | `ERROR` | 永久错误或重试耗尽，已经写入 `failed` |
+| `embedding_job_interrupted` | `WARN` | 服务 shutdown 中断，留给启动恢复重新排队 |
+| `embedding_job_unfinished` | `ERROR` | 数据库收尾失败，任务可能仍停留在 `processing` |
+
+终结事件记录 `model_name`、`dimensions`、`provider_call_count`、`provider_duration_ms`、
+`prompt_tokens`、`total_tokens` 和 `generated_vector_count`。重试事件额外记录 `next_attempt_at`；失败事件使用
+`provider_authentication`、`provider_quota`、`provider_rate_limit`、`provider_request_rejected`、
+`provider_invalid_response`、`timeout`、`canceled`、`document_has_no_chunks` 或 `internal` 分类。
+
+成本统计遵循“调用已经发生就必须记录”的原则：如果第一批向量成功而第二批失败，第一批产生的 Token、
+远程耗时和调用次数仍然保留在日志中；这些部分向量不会被持久化，只有 `succeeded` 才表示全部向量已经落库。
+
 ## 8. 后续计划
 
 1. 按实际联调需要把统一错误响应逐步迁移到其余 Handler；
-2. 把任务生命周期事件扩展到 Embedding Worker；
-3. 建立外部供应商错误到安全响应、重试策略和内部诊断码的映射；
+2. 为 Generation/问答调用建立延迟、Token 和供应商错误分类；
+3. 将 Embedding 与 Generation 指标整理成可重复执行的成本基线；
 4. 增加日志级别与输出格式配置；
-5. 建立远程模型延迟、Token、重试和失败分类基线。
+5. 继续部署、备份和恢复流程。

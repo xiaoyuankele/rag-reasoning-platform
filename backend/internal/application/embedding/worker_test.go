@@ -116,7 +116,8 @@ func TestEmbeddingWorkerReturnsIdleForEmptyQueue(t *testing.T) {
 			return embeddingdomain.EmbedResult{}, nil
 		},
 	}
-	worker := newTestEmbeddingWorker(t, jobs, chunks, embedder, 2, time.Now)
+	events := newRecordingJobEventObserver()
+	worker := newTestEmbeddingWorker(t, jobs, chunks, embedder, 2, time.Now, events)
 
 	handled, err := worker.RunOnce(context.Background())
 
@@ -127,6 +128,9 @@ func TestEmbeddingWorkerReturnsIdleForEmptyQueue(t *testing.T) {
 		t.Fatal("RunOnce() handled = true, want false")
 	}
 	assertEmbeddingFinalizationCalls(t, jobs, 0, 0, 0)
+	if len(events.events) != 0 {
+		t.Fatalf("empty queue events = %d, want 0", len(events.events))
+	}
 }
 
 func TestEmbeddingWorkerBatchesChunksAndCompletesJob(t *testing.T) {
@@ -216,7 +220,8 @@ func TestEmbeddingWorkerBatchesChunksAndCompletesJob(t *testing.T) {
 			}
 		},
 	}
-	worker := newTestEmbeddingWorker(t, jobs, chunkLister, embedder, 2, time.Now)
+	events := newRecordingJobEventObserver()
+	worker := newTestEmbeddingWorker(t, jobs, chunkLister, embedder, 2, time.Now, events)
 
 	handled, err := worker.RunOnce(context.Background())
 
@@ -230,6 +235,22 @@ func TestEmbeddingWorkerBatchesChunksAndCompletesJob(t *testing.T) {
 		t.Fatalf("Embed() calls = %d, want 2", embedder.embedCalls)
 	}
 	assertEmbeddingFinalizationCalls(t, jobs, 1, 0, 0)
+	if len(events.events) != 2 {
+		t.Fatalf("embedding events = %d, want 2", len(events.events))
+	}
+	assertJobEventIdentity(
+		t,
+		events.events[1],
+		JobEventSucceeded,
+		embeddingdomain.JobStatusSucceeded,
+		job,
+	)
+	if events.events[1].ProviderCallCount != 2 ||
+		events.events[1].PromptTokens != 6 ||
+		events.events[1].TotalTokens != 9 ||
+		events.events[1].GeneratedVectorCount != 3 {
+		t.Fatalf("succeeded metrics = %+v", events.events[1])
+	}
 }
 
 func TestEmbeddingWorkerRequeuesTemporaryProviderFailure(t *testing.T) {
@@ -266,7 +287,16 @@ func TestEmbeddingWorkerRequeuesTemporaryProviderFailure(t *testing.T) {
 			return embeddingdomain.EmbedResult{}, embeddingdomain.ErrEmbeddingRateLimited
 		},
 	}
-	worker := newTestEmbeddingWorker(t, jobs, chunks, embedder, 2, func() time.Time { return fixedNow })
+	events := newRecordingJobEventObserver()
+	worker := newTestEmbeddingWorker(
+		t,
+		jobs,
+		chunks,
+		embedder,
+		2,
+		func() time.Time { return fixedNow },
+		events,
+	)
 
 	handled, err := worker.RunOnce(context.Background())
 
@@ -277,6 +307,119 @@ func TestEmbeddingWorkerRequeuesTemporaryProviderFailure(t *testing.T) {
 		t.Fatalf("RunOnce() error = %v, want ErrEmbeddingRateLimited", err)
 	}
 	assertEmbeddingFinalizationCalls(t, jobs, 0, 1, 0)
+	if len(events.events) != 2 {
+		t.Fatalf("embedding events = %d, want 2", len(events.events))
+	}
+	assertJobEventIdentity(
+		t,
+		events.events[1],
+		JobEventRequeued,
+		embeddingdomain.JobStatusQueued,
+		job,
+	)
+	if events.events[1].ErrorCategory != JobErrorCategoryProviderRateLimit {
+		t.Fatalf("error category = %q, want rate limit", events.events[1].ErrorCategory)
+	}
+	if events.events[1].NextAttemptAt == nil ||
+		!events.events[1].NextAttemptAt.Equal(fixedNow.Add(30*time.Second)) {
+		t.Fatalf("next attempt = %v", events.events[1].NextAttemptAt)
+	}
+}
+
+func TestEmbeddingWorkerPreservesPartialUsageBeforeLaterBatchFailure(t *testing.T) {
+	fixedNow := time.Date(2026, time.August, 15, 10, 0, 0, 0, time.UTC)
+	job := embeddingdomain.Job{
+		ID: 27, DocumentID: 31, ModelName: "test-model", Dimensions: 2,
+		Status: embeddingdomain.JobStatusProcessing, AttemptCount: 1,
+	}
+	jobs := &fakeEmbeddingJobWorkerRepository{
+		claimFunc:   func(context.Context) (embeddingdomain.Job, error) { return job, nil },
+		succeedFunc: failOnEmbeddingSuccess(t),
+		requeueFunc: func(context.Context, int64, time.Time, string) error { return nil },
+		failFunc:    failOnEmbeddingFailure(t),
+	}
+	chunks := &fakeEmbeddingChunkLister{
+		listFunc: func(context.Context, int64) ([]documentdomain.TextChunk, error) {
+			return []documentdomain.TextChunk{
+				{ID: 301, DocumentID: job.DocumentID, Index: 0, Content: "first"},
+				{ID: 302, DocumentID: job.DocumentID, Index: 1, Content: "second"},
+			}, nil
+		},
+	}
+	embedder := &fakeEmbedder{
+		embedFunc: func(
+			_ context.Context,
+			request embeddingdomain.EmbedRequest,
+		) (embeddingdomain.EmbedResult, error) {
+			if request.Inputs[0] == "first" {
+				return embeddingdomain.EmbedResult{
+					Vectors:      [][]float32{{1, 1}},
+					PromptTokens: 4,
+					TotalTokens:  6,
+				}, nil
+			}
+			return embeddingdomain.EmbedResult{}, embeddingdomain.ErrEmbeddingRateLimited
+		},
+	}
+	events := newRecordingJobEventObserver()
+	worker := newTestEmbeddingWorker(
+		t,
+		jobs,
+		chunks,
+		embedder,
+		1,
+		func() time.Time { return fixedNow },
+		events,
+	)
+
+	_, err := worker.RunOnce(context.Background())
+
+	if !errors.Is(err, embeddingdomain.ErrEmbeddingRateLimited) {
+		t.Fatalf("RunOnce() error = %v, want rate limit", err)
+	}
+	assertEmbeddingFinalizationCalls(t, jobs, 0, 1, 0)
+	finalEvent := events.events[1]
+	if finalEvent.ProviderCallCount != 2 ||
+		finalEvent.PromptTokens != 4 ||
+		finalEvent.TotalTokens != 6 ||
+		finalEvent.GeneratedVectorCount != 1 {
+		t.Fatalf("partial usage metrics = %+v", finalEvent)
+	}
+}
+
+func TestEmbeddingWorkerReportsUnfinishedWhenRequeueFails(t *testing.T) {
+	providerError := embeddingdomain.ErrEmbeddingRateLimited
+	requeueError := errors.New("database unavailable")
+	job := embeddingdomain.Job{
+		ID: 28, DocumentID: 32, ModelName: "test-model", Dimensions: 2,
+		Status: embeddingdomain.JobStatusProcessing, AttemptCount: 1,
+	}
+	jobs := &fakeEmbeddingJobWorkerRepository{
+		claimFunc:   func(context.Context) (embeddingdomain.Job, error) { return job, nil },
+		succeedFunc: failOnEmbeddingSuccess(t),
+		requeueFunc: func(context.Context, int64, time.Time, string) error { return requeueError },
+		failFunc:    failOnEmbeddingFailure(t),
+	}
+	embedder := &fakeEmbedder{
+		embedFunc: func(context.Context, embeddingdomain.EmbedRequest) (embeddingdomain.EmbedResult, error) {
+			return embeddingdomain.EmbedResult{}, providerError
+		},
+	}
+	events := newRecordingJobEventObserver()
+	worker := newTestEmbeddingWorker(t, jobs, oneChunkLister(), embedder, 1, time.Now, events)
+
+	_, err := worker.RunOnce(context.Background())
+
+	if !errors.Is(err, providerError) || !errors.Is(err, requeueError) {
+		t.Fatalf("RunOnce() error = %v, want provider and requeue errors", err)
+	}
+	assertJobEventIdentity(
+		t,
+		events.events[1],
+		JobEventUnfinished,
+		embeddingdomain.JobStatusProcessing,
+		job,
+	)
 }
 
 func TestEmbeddingWorkerFailsPermanentAuthenticationError(t *testing.T) {
@@ -300,7 +443,8 @@ func TestEmbeddingWorkerFailsPermanentAuthenticationError(t *testing.T) {
 			return embeddingdomain.EmbedResult{}, embeddingdomain.ErrEmbeddingAuthentication
 		},
 	}
-	worker := newTestEmbeddingWorker(t, jobs, oneChunkLister(), embedder, 2, time.Now)
+	events := newRecordingJobEventObserver()
+	worker := newTestEmbeddingWorker(t, jobs, oneChunkLister(), embedder, 2, time.Now, events)
 
 	_, err := worker.RunOnce(context.Background())
 
@@ -308,6 +452,16 @@ func TestEmbeddingWorkerFailsPermanentAuthenticationError(t *testing.T) {
 		t.Fatalf("RunOnce() error = %v, want ErrEmbeddingAuthentication", err)
 	}
 	assertEmbeddingFinalizationCalls(t, jobs, 0, 0, 1)
+	assertJobEventIdentity(
+		t,
+		events.events[1],
+		JobEventFailed,
+		embeddingdomain.JobStatusFailed,
+		job,
+	)
+	if events.events[1].ErrorCategory != JobErrorCategoryProviderAuthentication {
+		t.Fatalf("error category = %q, want authentication", events.events[1].ErrorCategory)
+	}
 }
 
 func TestEmbeddingWorkerFailsPermanentQuotaError(t *testing.T) {
@@ -331,7 +485,8 @@ func TestEmbeddingWorkerFailsPermanentQuotaError(t *testing.T) {
 			return embeddingdomain.EmbedResult{}, embeddingdomain.ErrEmbeddingQuotaExceeded
 		},
 	}
-	worker := newTestEmbeddingWorker(t, jobs, oneChunkLister(), embedder, 2, time.Now)
+	events := newRecordingJobEventObserver()
+	worker := newTestEmbeddingWorker(t, jobs, oneChunkLister(), embedder, 2, time.Now, events)
 
 	_, err := worker.RunOnce(context.Background())
 
@@ -339,6 +494,9 @@ func TestEmbeddingWorkerFailsPermanentQuotaError(t *testing.T) {
 		t.Fatalf("RunOnce() error = %v, want ErrEmbeddingQuotaExceeded", err)
 	}
 	assertEmbeddingFinalizationCalls(t, jobs, 0, 0, 1)
+	if events.events[1].ErrorCategory != JobErrorCategoryProviderQuota {
+		t.Fatalf("error category = %q, want quota", events.events[1].ErrorCategory)
+	}
 }
 
 func TestEmbeddingWorkerDoesNotFinalizeShutdownCancellation(t *testing.T) {
@@ -360,7 +518,8 @@ func TestEmbeddingWorkerDoesNotFinalizeShutdownCancellation(t *testing.T) {
 			return embeddingdomain.EmbedResult{}, ctx.Err()
 		},
 	}
-	worker := newTestEmbeddingWorker(t, jobs, oneChunkLister(), embedder, 2, time.Now)
+	events := newRecordingJobEventObserver()
+	worker := newTestEmbeddingWorker(t, jobs, oneChunkLister(), embedder, 2, time.Now, events)
 
 	handled, err := worker.RunOnce(ctx)
 
@@ -371,6 +530,16 @@ func TestEmbeddingWorkerDoesNotFinalizeShutdownCancellation(t *testing.T) {
 		t.Fatalf("RunOnce() error = %v, want context.Canceled", err)
 	}
 	assertEmbeddingFinalizationCalls(t, jobs, 0, 0, 0)
+	assertJobEventIdentity(
+		t,
+		events.events[1],
+		JobEventInterrupted,
+		embeddingdomain.JobStatusProcessing,
+		job,
+	)
+	if events.events[1].ErrorCategory != JobErrorCategoryCanceled {
+		t.Fatalf("error category = %q, want canceled", events.events[1].ErrorCategory)
+	}
 }
 
 func newTestEmbeddingWorker(
@@ -380,8 +549,16 @@ func newTestEmbeddingWorker(
 	embedder embeddingdomain.Embedder,
 	batchSize int,
 	now func() time.Time,
+	observers ...JobEventObserver,
 ) *Worker {
 	t.Helper()
+	observer := JobEventObserver(newRecordingJobEventObserver())
+	if len(observers) > 1 {
+		t.Fatal("newTestEmbeddingWorker accepts at most one observer")
+	}
+	if len(observers) == 1 {
+		observer = observers[0]
+	}
 	policy, err := newRetryPolicy(
 		3,
 		30*time.Second,
@@ -395,6 +572,7 @@ func newTestEmbeddingWorker(
 		jobs,
 		chunks,
 		embedder,
+		observer,
 		batchSize,
 		time.Minute,
 		policy,
