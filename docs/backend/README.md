@@ -17,6 +17,7 @@
 - [多能力检索编排路线](architecture/search-orchestration-roadmap.md)
 - [概念词典与多语言检索设想](architecture/concept-retrieval-roadmap.md)
 - [文档文本块浏览接口](architecture/document-chunk-browsing.md)
+- [运行路径与配置契约](development/runtime-path-configuration.md)
 
 ## 质量评估入口
 
@@ -29,6 +30,9 @@
 当前后端进入 P5 个人版工程化，优先处理运行路径、配置、日志、部署、备份、回归和性能/成本记录。
 P5 不包含用户认证和多租户；未来 P6 的工作区、权限与数据隔离计划见
 [产品演进路线](../shared/architecture/product-evolution-roadmap.md)。
+
+P5.1 已建立统一 `APP_ROOT` 路径基准：本地开发可从项目根目录或 `backend` 目录启动，
+部署环境则必须显式提供绝对应用根目录。文件存储与 Python 源码的相对路径不再依赖偶然的当前工作目录。
 
 前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
 [HTTP API 总览](../shared/api/http-api-overview.md)。

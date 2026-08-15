@@ -1,14 +1,18 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestLoadPythonUsesDefaults(t *testing.T) {
+	appRoot := t.TempDir()
 	t.Setenv("PYTHON_EXECUTABLE", "")
 	t.Setenv("PYTHON_SOURCE_ROOT", "")
 	t.Setenv("PYTHON_PDF_MAX_FILE_SIZE_BYTES", "")
 	t.Setenv("PYTHON_PDF_MAX_PAGES", "")
 
-	pythonConfig, err := LoadPython()
+	pythonConfig, err := LoadPython(appRoot)
 	if err != nil {
 		t.Fatalf("LoadPython() error = %v, want nil", err)
 	}
@@ -20,11 +24,12 @@ func TestLoadPythonUsesDefaults(t *testing.T) {
 			defaultPythonExecutable,
 		)
 	}
-	if pythonConfig.SourceRoot != defaultPythonSourceRoot {
+	expectedSourceRoot := filepath.Join(appRoot, "ai", "src")
+	if pythonConfig.SourceRoot != expectedSourceRoot {
 		t.Fatalf(
 			"SourceRoot = %q, want %q",
 			pythonConfig.SourceRoot,
-			defaultPythonSourceRoot,
+			expectedSourceRoot,
 		)
 	}
 	if pythonConfig.PDFMaxFileSizeBytes != defaultPythonPDFMaxFileSizeBytes {
@@ -44,12 +49,13 @@ func TestLoadPythonUsesDefaults(t *testing.T) {
 }
 
 func TestLoadPythonUsesEnvironment(t *testing.T) {
+	appRoot := t.TempDir()
 	t.Setenv("PYTHON_EXECUTABLE", " E:/dev/python/python.exe ")
 	t.Setenv("PYTHON_SOURCE_ROOT", " ../custom-ai/src ")
 	t.Setenv("PYTHON_PDF_MAX_FILE_SIZE_BYTES", " 1048576 ")
 	t.Setenv("PYTHON_PDF_MAX_PAGES", " 25 ")
 
-	pythonConfig, err := LoadPython()
+	pythonConfig, err := LoadPython(appRoot)
 	if err != nil {
 		t.Fatalf("LoadPython() error = %v, want nil", err)
 	}
@@ -60,10 +66,12 @@ func TestLoadPythonUsesEnvironment(t *testing.T) {
 			pythonConfig.Executable,
 		)
 	}
-	if pythonConfig.SourceRoot != "../custom-ai/src" {
+	expectedSourceRoot := filepath.Clean(filepath.Join(appRoot, "../custom-ai/src"))
+	if pythonConfig.SourceRoot != expectedSourceRoot {
 		t.Fatalf(
-			"SourceRoot = %q, want trimmed environment value",
+			"SourceRoot = %q, want %q",
 			pythonConfig.SourceRoot,
+			expectedSourceRoot,
 		)
 	}
 	if pythonConfig.PDFMaxFileSizeBytes != 1048576 {
@@ -97,7 +105,7 @@ func TestLoadPythonRejectsInvalidPDFLimits(t *testing.T) {
 			t.Setenv("PYTHON_PDF_MAX_PAGES", "")
 			t.Setenv(test.env, test.value)
 
-			pythonConfig, err := LoadPython()
+			pythonConfig, err := LoadPython(t.TempDir())
 			if err == nil {
 				t.Fatalf("LoadPython() error = nil for %s=%q", test.env, test.value)
 			}
@@ -105,5 +113,27 @@ func TestLoadPythonRejectsInvalidPDFLimits(t *testing.T) {
 				t.Fatalf("LoadPython() config = %+v, want zero value", pythonConfig)
 			}
 		})
+	}
+}
+
+// TestLoadPythonPreservesAbsoluteSourceRoot 验证部署环境提供的绝对 Python
+// 源码路径不会再次相对于 APP_ROOT 拼接。
+func TestLoadPythonPreservesAbsoluteSourceRoot(t *testing.T) {
+	appRoot := t.TempDir()
+	absoluteSourceRoot := t.TempDir()
+	t.Setenv("PYTHON_SOURCE_ROOT", absoluteSourceRoot)
+	t.Setenv("PYTHON_PDF_MAX_FILE_SIZE_BYTES", "")
+	t.Setenv("PYTHON_PDF_MAX_PAGES", "")
+
+	pythonConfig, err := LoadPython(appRoot)
+	if err != nil {
+		t.Fatalf("LoadPython() error = %v, want nil", err)
+	}
+	if pythonConfig.SourceRoot != filepath.Clean(absoluteSourceRoot) {
+		t.Fatalf(
+			"SourceRoot = %q, want %q",
+			pythonConfig.SourceRoot,
+			filepath.Clean(absoluteSourceRoot),
+		)
 	}
 }

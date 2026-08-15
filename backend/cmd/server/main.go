@@ -64,7 +64,15 @@ func run(ctx context.Context) error {
 		)
 	}
 
-	storageConfig, err := config.LoadStorage()
+	runtimePathsConfig, err := config.LoadRuntimePaths()
+	if err != nil {
+		return fmt.Errorf(
+			"load runtime paths configuration: %w",
+			err,
+		)
+	}
+
+	storageConfig, err := config.LoadStorage(runtimePathsConfig.AppRoot)
 	if err != nil {
 		return fmt.Errorf(
 			"load storage configuration: %w",
@@ -77,7 +85,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("load worker configuration: %w", err)
 	}
 
-	pythonConfig, err := config.LoadPython()
+	pythonConfig, err := config.LoadPython(runtimePathsConfig.AppRoot)
 	if err != nil {
 		return fmt.Errorf("load Python processor configuration: %w", err)
 	}
