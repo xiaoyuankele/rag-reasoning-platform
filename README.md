@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P4（AI 增强）第一版已完成，进入 P5（工程化）。`GET /search` 关键词检索保持独立；远程 Embeddings Worker、独立 `embedding_jobs` 生命周期、pgvector、`POST /semantic-search` 和带来源引用的 `POST /answers` 已完成分层、生产组合与真实 DashScope 验收。8 篇中英文文献的 460 个 chunks 已完整生成向量；P4 收尾冻结的 15 条问答、跨语言、拒答和未就绪样本均已执行并人工核对。当前能力适合普通段落型文献问答，但复杂表格解释和“命中文档后选到最可回答 chunk”仍有已登记质量边界。混合检索、DOCX、OCR 和复杂学术版面质量继续作为后续增量能力。
+> 当前状态：P5（个人版工程化基线）已完成。P0～P4 的文档管理、异步解析、关键词检索、向量生产、语义检索和带来源问答均已形成可运行闭环；P5 已补齐稳定路径、结构化日志、容器部署、配套备份恢复、异常任务恢复及分级自动化回归。当前仍是单工作区个人版，不具备公开多人 SaaS 所需的认证、权限和租户隔离；混合检索、DOCX、OCR、复杂学术版面及表格公式质量继续作为后续增量能力。
 
 ## 项目目标
 
@@ -137,7 +137,7 @@ rag_reasoning_platform_individual/
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
 | P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
-| P5 | 进行中 | P5.1 运行路径、P5.2 可观测性及 P5.3 部署维护已完成；P5.4.1 默认回归和 P5.4.2 一次性数据库本地集成回归均已完成。下一步整理按需真实验收入口并完成 P5 收尾，不包含用户与租户系统 |
+| P5 | 已完成（个人版基线） | 稳定运行路径、可观测性、容器部署、配套备份恢复、任务恢复、默认回归、一次性数据库集成及发布候选分级验收均已完成；不包含用户与租户系统 |
 | P6 | 未开始 | 用户、工作区、成员权限和全链路数据隔离尚未设计或实现；当前服务不能作为公开多人 SaaS 直接部署 |
 
 前端当前处于 `F0` 联调收尾：工程分层、统一 API Client、健康检查、测试与构建已经完成，下一步先完成
@@ -289,6 +289,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 该命令会创建并删除一次性 PostgreSQL 数据库，真实验证 SQL、事务、Python 子进程、PDF、chunks 和 HTTP
 纵向链路，但仍不调用远程模型。安全边界和故障清理见
 [后端本地集成回归](docs/backend/development/local-integration-regression.md)。
+
+准备后端发布候选时，使用聚合门禁顺序执行默认回归和本地集成回归：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\scripts\quality\run-backend-release-acceptance.ps1
+```
+
+容器生命周期、真实复杂 PDF 和远程供应商验收不会被默认误触。分级入口、外部状态和费用边界见
+[后端发布验收与 P5 收尾](docs/backend/development/release-acceptance.md)。
 
 ## 配置与安全约定
 

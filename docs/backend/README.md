@@ -22,6 +22,7 @@
 - [日志与请求追踪规范](development/logging-observability.md)
 - [后端默认零远程费用回归](development/default-regression.md)
 - [后端本地集成回归](development/local-integration-regression.md)
+- [后端发布验收与 P5 收尾](development/release-acceptance.md)
 - [后端容器部署指南](deployment/container-deployment.md)
 - [数据配套备份与恢复指南](deployment/data-backup-and-restore.md)
 - [容器优雅关闭与异常恢复](deployment/container-lifecycle-and-recovery.md)
@@ -35,7 +36,7 @@
 截至 2026-08-14，P4 AI 增强第一版已经完成质量收尾：15 条冻结样本的 HTTP 行为全部符合预期，
 问答/拒答样本的语言和引用编号全部通过，复杂表格解释与最佳证据选择仍作为已知质量边界保留。
 
-当前后端进入 P5 个人版工程化，优先处理运行路径、配置、日志、部署、备份、回归和性能/成本记录。
+当前后端已经完成 P5 个人版工程化基线，包括运行路径、配置、日志、部署、备份、恢复和分级回归。
 P5 不包含用户认证和多租户；未来 P6 的工作区、权限与数据隔离计划见
 [产品演进路线](../shared/architecture/product-evolution-roadmap.md)。
 
@@ -62,6 +63,8 @@ P5.4.1 已提供默认零远程费用的一键后端回归：依次检查 Go 格
 Compose 配置，并用环境隔离保证误留的真实数据库或模型开关不会被默认套件启用。
 P5.4.2 已提供显式本地集成回归：每次创建一次性 `rag_integration_*` 数据库，分段验证 migrations、
 PostgreSQL Repository、Document Worker、Go/Python 子进程及 PDF 纵向链路，成功或失败后都验证数据库已删除。
+P5.4.3 已提供发布候选聚合门禁和 L0～L4 验收矩阵：默认顺序执行零费用回归和一次性数据库集成；
+容器生命周期必须显式启用，真实复杂 PDF 与远程供应商继续单独授权验收。至此 P5 个人版工程化基线完成。
 
 前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
 [HTTP API 总览](../shared/api/http-api-overview.md)。

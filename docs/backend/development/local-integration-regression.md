@@ -121,3 +121,6 @@ chatgpt/运行产物/回归/backend-local-integration-<UTC 时间>.json
 ```text
 chatgpt/运行产物/回归/backend-local-integration-20260815T092452Z.json
 ```
+
+准备发布候选时不需要手工分别记住两个命令，可以使用
+[后端发布验收与 P5 收尾](release-acceptance.md) 中的聚合入口顺序执行默认回归与本套件。

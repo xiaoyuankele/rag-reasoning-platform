@@ -89,6 +89,8 @@ chatgpt/运行产物/回归/backend-default-<UTC 时间>.json
 
 PostgreSQL 与 Go/Python 集成套件已经在 P5.4.2 落地，具体的一次性数据库隔离、命令和验收结果见
 [后端本地集成回归](local-integration-regression.md)。
+发布候选的聚合命令、容器验收以及真实 PDF/远程供应商边界见
+[后端发布验收与 P5 收尾](release-acceptance.md)。
 
 ## 7. 2026-08-15 首次验收
 
