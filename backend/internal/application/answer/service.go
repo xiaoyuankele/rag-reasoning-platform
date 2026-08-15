@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
@@ -79,6 +80,7 @@ type Output struct {
 type Service struct {
 	searcher        semanticSearcher
 	generator       generationdomain.Generator
+	events          GenerationEventObserver
 	modelName       string
 	maxOutputTokens int
 	temperature     float64
@@ -88,11 +90,12 @@ type Service struct {
 func NewService(
 	searcher semanticSearcher,
 	generator generationdomain.Generator,
+	events GenerationEventObserver,
 	modelName string,
 	maxOutputTokens int,
 	temperature float64,
 ) (*Service, error) {
-	if searcher == nil || generator == nil {
+	if searcher == nil || generator == nil || events == nil {
 		return nil, ErrAnswerDependencies
 	}
 
@@ -105,6 +108,7 @@ func NewService(
 	return &Service{
 		searcher:        searcher,
 		generator:       generator,
+		events:          events,
 		modelName:       modelName,
 		maxOutputTokens: maxOutputTokens,
 		temperature:     temperature,
@@ -153,6 +157,16 @@ func (s *Service) Answer(
 
 	sources := newSources(selectedHits)
 	if len(selectedHits) == 0 {
+		s.events.ObserveGenerationEvent(ctx, GenerationEvent{
+			Type:             GenerationEventSkipped,
+			ModelName:        s.modelName,
+			ResponseLanguage: responseLanguage,
+			DocumentID:       input.DocumentID,
+			RequestedTopK:    input.TopK,
+			EvidenceCount:    0,
+			SkipReason:       GenerationSkipReasonInsufficientEvidence,
+		})
+
 		return Output{
 			Query:            searchResult.Query,
 			Answer:           insufficientEvidenceAnswer(responseLanguage),
@@ -170,6 +184,19 @@ func (s *Service) Answer(
 		return Output{}, fmt.Errorf("build answer prompt: %w", err)
 	}
 
+	baseEvent := GenerationEvent{
+		ModelName:        s.modelName,
+		ResponseLanguage: responseLanguage,
+		DocumentID:       input.DocumentID,
+		RequestedTopK:    input.TopK,
+		EvidenceCount:    len(selectedHits),
+	}
+	s.events.ObserveGenerationEvent(ctx, withGenerationEventType(
+		baseEvent,
+		GenerationEventStarted,
+	))
+
+	providerStartedAt := time.Now()
 	generated, err := s.generator.Generate(
 		ctx,
 		generationdomain.GenerateRequest{
@@ -180,9 +207,23 @@ func (s *Service) Answer(
 			Temperature:       s.temperature,
 		},
 	)
+	providerDuration := time.Since(providerStartedAt)
 	if err != nil {
+		failedEvent := withGenerationEventType(baseEvent, GenerationEventFailed)
+		failedEvent.ProviderDuration = providerDuration
+		failedEvent.ErrorCategory = classifyGenerationError(err)
+		failedEvent.Err = err
+		s.events.ObserveGenerationEvent(ctx, failedEvent)
+
 		return Output{}, fmt.Errorf("generate evidence-based answer: %w", err)
 	}
+
+	succeededEvent := withGenerationEventType(baseEvent, GenerationEventSucceeded)
+	succeededEvent.ProviderDuration = providerDuration
+	succeededEvent.PromptTokens = generated.PromptTokens
+	succeededEvent.CompletionTokens = generated.CompletionTokens
+	succeededEvent.TotalTokens = generated.TotalTokens
+	s.events.ObserveGenerationEvent(ctx, succeededEvent)
 
 	return Output{
 		Query:            searchResult.Query,
@@ -193,6 +234,14 @@ func (s *Service) Answer(
 		CompletionTokens: generated.CompletionTokens,
 		TotalTokens:      generated.TotalTokens,
 	}, nil
+}
+
+func withGenerationEventType(
+	event GenerationEvent,
+	eventType GenerationEventType,
+) GenerationEvent {
+	event.Type = eventType
+	return event
 }
 
 func insufficientEvidenceAnswer(language ResponseLanguage) string {

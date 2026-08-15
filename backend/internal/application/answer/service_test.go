@@ -47,17 +47,19 @@ func TestNewServiceValidatesDependenciesAndConfiguration(t *testing.T) {
 		name            string
 		searcher        semanticSearcher
 		generator       generationdomain.Generator
+		events          GenerationEventObserver
 		modelName       string
 		maxOutputTokens int
 		temperature     float64
 		wantedError     error
 	}{
-		{name: "missing searcher", generator: generator, modelName: "model", maxOutputTokens: 100, wantedError: ErrAnswerDependencies},
-		{name: "missing generator", searcher: searcher, modelName: "model", maxOutputTokens: 100, wantedError: ErrAnswerDependencies},
-		{name: "blank model", searcher: searcher, generator: generator, modelName: " ", maxOutputTokens: 100, wantedError: ErrAnswerConfiguration},
-		{name: "invalid max output", searcher: searcher, generator: generator, modelName: "model", maxOutputTokens: 0, wantedError: ErrAnswerConfiguration},
-		{name: "negative temperature", searcher: searcher, generator: generator, modelName: "model", maxOutputTokens: 100, temperature: -0.1, wantedError: ErrAnswerConfiguration},
-		{name: "temperature above two", searcher: searcher, generator: generator, modelName: "model", maxOutputTokens: 100, temperature: 2.1, wantedError: ErrAnswerConfiguration},
+		{name: "missing searcher", generator: generator, events: newRecordingGenerationEventObserver(), modelName: "model", maxOutputTokens: 100, wantedError: ErrAnswerDependencies},
+		{name: "missing generator", searcher: searcher, events: newRecordingGenerationEventObserver(), modelName: "model", maxOutputTokens: 100, wantedError: ErrAnswerDependencies},
+		{name: "missing event observer", searcher: searcher, generator: generator, modelName: "model", maxOutputTokens: 100, wantedError: ErrAnswerDependencies},
+		{name: "blank model", searcher: searcher, generator: generator, events: newRecordingGenerationEventObserver(), modelName: " ", maxOutputTokens: 100, wantedError: ErrAnswerConfiguration},
+		{name: "invalid max output", searcher: searcher, generator: generator, events: newRecordingGenerationEventObserver(), modelName: "model", maxOutputTokens: 0, wantedError: ErrAnswerConfiguration},
+		{name: "negative temperature", searcher: searcher, generator: generator, events: newRecordingGenerationEventObserver(), modelName: "model", maxOutputTokens: 100, temperature: -0.1, wantedError: ErrAnswerConfiguration},
+		{name: "temperature above two", searcher: searcher, generator: generator, events: newRecordingGenerationEventObserver(), modelName: "model", maxOutputTokens: 100, temperature: 2.1, wantedError: ErrAnswerConfiguration},
 	}
 
 	for _, test := range tests {
@@ -65,6 +67,7 @@ func TestNewServiceValidatesDependenciesAndConfiguration(t *testing.T) {
 			service, err := NewService(
 				test.searcher,
 				test.generator,
+				test.events,
 				test.modelName,
 				test.maxOutputTokens,
 				test.temperature,
@@ -435,6 +438,7 @@ func newServiceForTest(
 	service, err := NewService(
 		searcher,
 		generator,
+		newRecordingGenerationEventObserver(),
 		"test-generation-model",
 		512,
 		0.1,
