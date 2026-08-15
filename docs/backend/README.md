@@ -20,6 +20,7 @@
 - [文档文本块浏览接口](architecture/document-chunk-browsing.md)
 - [运行路径与配置契约](development/runtime-path-configuration.md)
 - [日志与请求追踪规范](development/logging-observability.md)
+- [后端默认零远程费用回归](development/default-regression.md)
 - [后端容器部署指南](deployment/container-deployment.md)
 - [数据配套备份与恢复指南](deployment/data-backup-and-restore.md)
 - [容器优雅关闭与异常恢复](deployment/container-lifecycle-and-recovery.md)
@@ -56,6 +57,8 @@ P5.3.2 已建立 PostgreSQL + `storage/` 配套备份、SHA-256 manifest、默�
 一致性校验，并使用当前 46 篇文档、2729 chunks、460 vectors 和 185 MB 文件完成真实恢复演练。
 P5.3.3 已固定 `SIGTERM`、init 进程和 30 秒停止宽限期，并真实验证正常停止退出码为 0、强制中断退出码为 137；
 重启后文档解析任务安全进入 `failed`，Embedding 任务重新进入 `queued`，测试数据和后端容器均已清理。
+P5.4.1 已提供默认零远程费用的一键后端回归：依次检查 Go 格式、Go 测试、`go vet`、Python 39 项测试和
+Compose 配置，并用环境隔离保证误留的真实数据库或模型开关不会被默认套件启用。
 
 前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
 [HTTP API 总览](../shared/api/http-api-overview.md)。
