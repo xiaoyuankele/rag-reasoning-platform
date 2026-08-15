@@ -87,6 +87,9 @@ chatgpt/运行产物/回归/backend-default-<UTC 时间>.json
 
 前端拥有独立 F 阶段和回归入口；后端 P5.4 不修改或捆绑前端源码。
 
+PostgreSQL 与 Go/Python 集成套件已经在 P5.4.2 落地，具体的一次性数据库隔离、命令和验收结果见
+[后端本地集成回归](local-integration-regression.md)。
+
 ## 7. 2026-08-15 首次验收
 
 首次验收故意在外层进程设置数据库测试、Python 集成和三个远程能力开关为启用，并放入不可使用的 Key，

@@ -90,8 +90,12 @@ P5.3.3 已固定容器 `SIGTERM`、init 进程和 30 秒停止宽限期。真实
 
 P5.4.1 已建立 `run-backend-regression.ps1`：默认隔离数据库、Go/Python 进程集成和三个远程 AI 开关，依次
 运行只读 Go 格式检查、无缓存 Go 测试、`go vet`、Python 39 项测试和 Compose 解析。首次故意在外层设置
-危险开关后仍全部通过，总耗时 8663 ms，没有启动容器、访问 PostgreSQL 或调用远程模型。下一步把真实
-PostgreSQL 与 Go/Python 集成组合为显式本地套件，并继续保持远程模型验收独立授权。
+危险开关后仍全部通过，总耗时 8663 ms，没有启动容器、访问 PostgreSQL 或调用远程模型。
+
+P5.4.2 已建立显式本地集成套件：脚本创建一次性 `rag_integration_*` 数据库，顺序验证 migrations、真实
+Repository、Document Worker、Go/Python 子进程和 HTTP/PDF/chunks/PostgreSQL 纵向链路，最后强制删除并
+查询确认测试数据库不存在。成功路径五段全部通过；故意触发 Go/Python 失败后清理仍然通过。正式库五张核心表
+行数前后完全一致，远程调用为零。下一步整理真实 PDF、容器构建和远程模型等按需验收入口，完成 P5.4 收尾。
 
 ### P5.5 完成标准
 

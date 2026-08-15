@@ -137,7 +137,7 @@ rag_reasoning_platform_individual/
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
 | P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
-| P5 | 进行中 | P5.1 运行路径、P5.2 可观测性及 P5.3 部署维护已完成；P5.4.1 已建立默认零远程费用的一键后端回归。下一步固化显式 PostgreSQL 与 Go/Python 集成套件，不包含用户与租户系统 |
+| P5 | 进行中 | P5.1 运行路径、P5.2 可观测性及 P5.3 部署维护已完成；P5.4.1 默认回归和 P5.4.2 一次性数据库本地集成回归均已完成。下一步整理按需真实验收入口并完成 P5 收尾，不包含用户与租户系统 |
 | P6 | 未开始 | 用户、工作区、成员权限和全链路数据隔离尚未设计或实现；当前服务不能作为公开多人 SaaS 直接部署 |
 
 前端当前处于 `F0` 联调收尾：工程分层、统一 API Client、健康检查、测试与构建已经完成，下一步先完成
@@ -278,6 +278,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 该命令检查 Go 格式、Go 测试、`go vet`、Python 测试和 Compose 配置，主动禁用真实数据库集成与远程 AI，
 不会产生模型费用。覆盖范围、环境隔离、JSON 报告和分级验收边界见
 [后端默认零远程费用回归](docs/backend/development/default-regression.md)。
+
+修改 migrations、Repository、Worker 或 Go/Python 契约后，再显式执行本地集成回归：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\scripts\quality\run-backend-local-integration.ps1
+```
+
+该命令会创建并删除一次性 PostgreSQL 数据库，真实验证 SQL、事务、Python 子进程、PDF、chunks 和 HTTP
+纵向链路，但仍不调用远程模型。安全边界和故障清理见
+[后端本地集成回归](docs/backend/development/local-integration-regression.md)。
 
 ## 配置与安全约定
 
