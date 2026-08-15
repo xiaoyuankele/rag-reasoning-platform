@@ -1,8 +1,10 @@
 # 前端正式文档
 
-> 当前状态：F0 工程骨架已完成，并通过真实后端健康检查联调。Vue 3 + TypeScript + Vite、
+> 当前状态：F0 工程骨架与 F1 API 基础已完成，F3 关键词检索最小可用切片已经开放并通过真实联调。
+> Vue 3 + TypeScript + Vite、
 > Vue Router、Pinia、Axios、Vitest、Vue Test Utils、ESLint 和 Prettier 已安装并接入；
-> 下一步进入 F1 API 基础扩展；Element Plus 仍按需后置，不作为基础架构依赖。
+> 下一步补齐 F2 文档管理，再用文档选择器替代检索页中的临时文档 ID 输入；
+> Element Plus 仍按需后置，不作为基础架构依赖。
 > 当前前端面向单个本地用户和一个隐含个人工作区，不包含登录、成员管理或租户切换。
 
 前端开发必须先阅读：

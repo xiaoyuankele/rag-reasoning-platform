@@ -34,7 +34,7 @@ PostgreSQL / Python / 远程模型
 | HTTP Client | Axios 封装 | 已安装并接入，健康检查已使用 | 统一基础地址、超时、错误转换和请求配置 |
 | 组件库 | Element Plus 选择性使用 | 已确认原则，尚未安装 | 使用成熟交互组件但不接管整体视觉 |
 | 样式 | CSS Variables + Scoped CSS | 已接入设计令牌、基础样式与响应式应用外壳 | 保留 CSS 基础并支持统一设计令牌 |
-| 单元/组件测试 | Vitest + Vue Test Utils | 已安装并接入，4 个测试通过 | 与 Vite/Vue 集成，验证用户可观察行为 |
+| 单元/组件测试 | Vitest + Vue Test Utils | 已安装并接入，4 个测试文件、9 个测试通过 | 与 Vite/Vue 集成，验证用户可观察行为 |
 | 端到端测试 | Playwright | F5 候选，尚未安装 | 验证跨页面与真实 HTTP 主流程 |
 | 代码规范 | ESLint + Prettier | 已安装并接入，检查通过 | 保持团队式静态检查和格式一致性 |
 
@@ -88,6 +88,9 @@ app → pages → features → entities → shared
 | 可恢复 URL 状态 | Vue Router query/params | 搜索词、页码、文档 ID |
 
 单次搜索结果、临时上传进度和局部错误默认不进入全局 Store。
+
+关键词检索已经按此规则实现：`q`、`document_id` 和 `page` 保存在 Router query 中，
+单次请求的加载、结果、空状态和错误保存在 `features/search` composable 中，不进入 Pinia。
 
 ## 5. HTTP 与契约边界
 
