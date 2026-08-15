@@ -23,6 +23,7 @@ import (
 	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
 	"rag-reasoning-platform/backend/internal/infrastructure/pythonprocessor"
+	"rag-reasoning-platform/backend/internal/observability"
 	"rag-reasoning-platform/backend/migrations"
 )
 
@@ -257,6 +258,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		documentRepository,
 		processorDispatcher,
 		chunkRepository,
+		observability.NewProcessingJobLogger(logger),
 		workerConfig.ProcessingTimeout,
 	)
 	documentWorkerErrorReporter := func(err error) {
