@@ -115,6 +115,10 @@ docker compose stop postgres
 `docker compose down -v` 会连同 PostgreSQL 命名卷一起删除，除非已经确认不需要数据或完成可靠备份，
 否则不要执行。
 
+后端镜像显式使用 `SIGTERM`，Compose 使用 init 进程转发信号，并提供 30 秒停止宽限期。Go 会先停止 HTTP、
+再等待 Worker、最后关闭数据库连接池；异常退出遗留任务的恢复规则和可重复验收命令见
+[容器优雅关闭与异常恢复](container-lifecycle-and-recovery.md)。
+
 ## 7. 资源与权限约束
 
 - 后端容器限制为 768 MiB 内存和 1.5 CPU；PostgreSQL 限制为 256 MiB 和 1 CPU；
@@ -133,3 +137,5 @@ docker compose stop postgres
 - 宿主机真实请求 `GET /health` 返回 `200`；
 - 验收期间三个远程 AI 开关均为 `false`，没有调用模型 API；
 - 验收结束只移除后端测试容器，PostgreSQL 容器与数据卷未删除。
+- `SIGTERM` 正常停止耗时 443 ms、退出码为 `0`；`SIGKILL` 异常停止退出码为 `137`；
+- 异常重启后，文档任务由 `processing` 恢复为 `failed`，Embedding 任务由 `processing` 恢复为 `queued`。

@@ -210,8 +210,20 @@ Token、成功/失败/跳过状态以及平均、P50、P95 耗时。重试前已
 完整冻结条件、PowerShell 命令、字段口径和金额换算方法见
 [模型调用成本基线](../performance/model-call-cost-baseline.md)。真实付费批次必须单独获得授权。
 
+### 7.5 应用进程生命周期与启动恢复
+
+P5.3.3 增加三个进程级事件：`application_started`、`application_shutdown_started` 和
+`application_stopped`。它们由 `main.go` 记录，因为信号、HTTP Server、Worker goroutine 和数据库连接池都在
+组合根中组装；Application 不应感知 Docker 信号。
+
+异常重启恢复继续使用既有 `processing_jobs_recovered` 与 `embedding_jobs_requeued`。前者表示遗留文档解析
+任务已转为 `failed`，后者表示遗留向量任务已回到 `queued`，两个名字不能当成同一种恢复动作。
+
+完整信号顺序、恢复规则和真实退出码见
+[容器优雅关闭与异常恢复](../deployment/container-lifecycle-and-recovery.md)。
+
 ## 8. 后续计划
 
 1. 按实际联调需要把统一错误响应逐步迁移到其余 Handler；
 2. 在明确授权后执行第一批新口径真实成本基线；
-3. 继续部署、备份和恢复流程。
+3. 在 P5.4 固化默认零远程费用回归命令。

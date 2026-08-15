@@ -7,6 +7,14 @@ services:
     image: rag-reasoning-platform-backend:local
     container_name: rag_reasoning_backend
 
+    # tini 负责转发停止信号并回收可能遗留的 Python 子进程。
+    init: true
+    stop_signal: SIGTERM
+
+    # Go HTTP Shutdown 最多等待 10 秒，随后还要等待 Worker 和数据库清理。
+    # 30 秒宽限期结束后 Docker 才会升级为 SIGKILL。
+    stop_grace_period: 30s
+
     depends_on:
       postgres:
         condition: service_healthy

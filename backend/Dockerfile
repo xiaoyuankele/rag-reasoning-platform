@@ -48,6 +48,9 @@ USER appuser
 
 EXPOSE 8080
 
+# docker stop 默认也使用 SIGTERM；显式声明用于固定镜像生命周期契约。
+STOPSIGNAL SIGTERM
+
 # Python 已经是文档处理运行依赖，因此直接使用标准库探测现有 /health，
 # 不额外安装 curl 或 wget。
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \

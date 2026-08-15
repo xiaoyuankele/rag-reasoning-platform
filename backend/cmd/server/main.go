@@ -65,6 +65,13 @@ func main() {
 		)
 		os.Exit(1)
 	}
+
+	// run 返回前已经完成 HTTP、Worker 和数据库资源清理。
+	logger.Info(
+		"Application stopped",
+		"event", "application_stopped",
+		"outcome", "graceful",
+	)
 }
 
 // run 是应用生命周期的编排入口：按顺序完成配置加载、基础设施初始化、
@@ -481,6 +488,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 		httpServerErrors <- err
 	}()
+	logger.Info(
+		"Application started",
+		"event", "application_started",
+		"address", appConfig.ServerAddress(),
+	)
 
 	select {
 	case err := <-httpServerErrors:
@@ -491,6 +503,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return nil
 
 	case <-ctx.Done():
+		logger.Info(
+			"Application shutdown started",
+			"event", "application_shutdown_started",
+			"cause", ctx.Err(),
+		)
+
 		// 退出信号到达后，不再接收新连接，并给已有请求最多 10 秒完成。
 		shutdownContext, cancelShutdown := context.WithTimeout(
 			context.Background(),
