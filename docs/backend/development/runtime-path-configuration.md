@@ -53,6 +53,18 @@ PYTHON_SOURCE_ROOT=ai/src
 
 也可以为单项资源提供绝对路径；绝对路径不会再次拼接到 `APP_ROOT`。
 
+Compose 部署固定使用容器内路径：
+
+```dotenv
+APP_ROOT=/app
+STORAGE_ROOT=storage
+PYTHON_SOURCE_ROOT=ai/src
+PYTHON_EXECUTABLE=python3
+```
+
+因此上传目录解析为 `/app/storage`，Python 源码基准解析为 `/app/ai/src`。宿主机的 `./storage`
+绑定到 `/app/storage`，容器重建后上传文件仍然保留。
+
 ## 5. 验收标准
 
 - 路径配置单元测试通过；

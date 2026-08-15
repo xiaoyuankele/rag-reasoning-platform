@@ -7,7 +7,8 @@
 - `architecture/`：系统能力与阶段性架构方案；
 - `development/`：需要长期执行的开发规范；
 - `evaluation/`：检索、回答等能力的评估方法；
-- `performance/`：数据库和接口性能基线。
+- `performance/`：数据库和接口性能基线；
+- `deployment/`：构建、部署、健康检查和数据维护说明。
 
 ## 主要架构入口
 
@@ -19,6 +20,7 @@
 - [文档文本块浏览接口](architecture/document-chunk-browsing.md)
 - [运行路径与配置契约](development/runtime-path-configuration.md)
 - [日志与请求追踪规范](development/logging-observability.md)
+- [后端容器部署指南](deployment/container-deployment.md)
 - [Embedding 与 Generation 调用成本基线](performance/model-call-cost-baseline.md)
 
 ## 质量评估入口
@@ -46,6 +48,8 @@ P5.2.3 已为文档解析 Worker 增加 `started`、`succeeded`、`failed` 和 `
 通过请求 ID 关联访问日志，并记录模型、回答语言、证据数、远程耗时、Token 及供应商错误分类。P5.2.6 第一部分
 已提供默认零远程费用的 JSONL 汇总命令，统一计算两类模型调用的次数、Token、成功/失败和 P50/P95 耗时。
 P5.2.7 已增加 `LOG_LEVEL` 与 `LOG_FORMAT` 启动配置；默认保持 `info/json`，非法配置会在连接数据库前安全退出。
+P5.3.1 已增加 Go 多阶段构建和 Compose 后端服务。运行镜像固定包含 Go 服务、Python 3.11、`rag_ai`
+与 PDF 依赖，以非 root 用户运行，并通过 `/health` 验证；PostgreSQL 和上传文件继续使用独立持久化位置。
 
 前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
 [HTTP API 总览](../shared/api/http-api-overview.md)。

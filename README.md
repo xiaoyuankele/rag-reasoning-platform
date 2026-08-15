@@ -128,7 +128,7 @@ rag_reasoning_platform_individual/
 前端不复用后端的 P 阶段编号，而是沿着独立的 `F0～F5` 路线推进：从 Vue 工程骨架、统一 API Client，
 逐步完成文档管理、检索、AI 工作台和前端工程化。当前版本仍是没有登录和租户切换的个人工作区。
 
-### 当前里程碑进度（2026-08-14）
+### 当前里程碑进度（2026-08-15）
 
 | 阶段 | 状态 | 当前结论 |
 | --- | --- | --- |
@@ -137,7 +137,7 @@ rag_reasoning_platform_individual/
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
 | P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
-| P5 | 进行中 | P5.1 运行路径、P5.2.1 请求追踪、P5.2.2 错误诊断、P5.2.3 文档任务日志、P5.2.4 Embedding 日志、P5.2.5 Generation 日志、P5.2.6 成本汇总及 P5.2.7 日志配置已完成；下一步在明确授权后执行真实成本批次，并进入部署和备份，不包含用户与租户系统 |
+| P5 | 进行中 | P5.1 运行路径、P5.2 可观测性及 P5.3.1 后端容器化已完成；Go 服务、Python 文档运行时与 PostgreSQL 已通过 Compose 健康检查和真实 HTTP 验收。下一步建立数据库与文件的备份/恢复流程，不包含用户与租户系统 |
 | P6 | 未开始 | 用户、工作区、成员权限和全链路数据隔离尚未设计或实现；当前服务不能作为公开多人 SaaS 直接部署 |
 
 前端当前处于 `F0` 联调收尾：工程分层、统一 API Client、健康检查、测试与构建已经完成，下一步先完成
@@ -181,7 +181,7 @@ Python 类、函数和方法的中文 IDE 悬停说明要求见
 
 Go 后端已经可以运行，`GET /health` 健康检查接口已通过真实 HTTP 请求和 Go 自动化测试验证；文档管理、异步处理任务和关键词检索接口也已经接入同一服务入口。
 
-PostgreSQL 开发容器已通过 Docker Compose 启动，使用本机 `5433` 端口、256 MiB 内存上限和独立数据卷，并已通过健康检查与真实 SQL 验证。
+PostgreSQL 开发容器已通过 Docker Compose 启动，使用本机 `5433` 端口、256 MiB 内存上限和独立数据卷，并已通过健康检查与真实 SQL 验证。后端也已提供多阶段 Docker 镜像：最终镜像包含编译后的 Go 服务、Python 3.11 和 `rag_ai` 文档处理依赖，不包含 Go 编译器；Compose 会等待 PostgreSQL 健康后再启动后端。
 
 Go 后端已使用 pgx 连接池连接 PostgreSQL，启动时会在 5 秒超时内执行真实 Ping；连接失败时 HTTP 服务不会启动。
 
@@ -324,6 +324,9 @@ Docker Compose 会自动读取项目根目录的 `.env`。当前 Go 程序通过
 绝对路径形式的 `APP_ROOT`。详细规则见
 [运行路径与配置契约](docs/backend/development/runtime-path-configuration.md)。
 
+Go + Python 后端镜像的构建、Compose 启停、健康检查、数据持久化和安全停止方式见
+[后端容器部署指南](docs/backend/deployment/container-deployment.md)。
+
 在 PowerShell 中可以这样临时设置 Go 服务端口：
 
 ```powershell
@@ -341,6 +344,21 @@ docker compose stop postgres
 ```
 
 `docker compose stop postgres` 只停止容器，不会删除数据卷中的数据。
+
+从项目根目录启动完整后端容器：
+
+```powershell
+docker compose build backend
+docker compose up -d backend
+docker compose ps
+curl.exe -i http://127.0.0.1:8080/health
+docker compose stop backend
+```
+
+`docker compose up -d backend` 会按依赖关系同时启动 PostgreSQL。容器内后端始终监听 `8080`，
+本机映射端口由 `BACKEND_HOST_PORT` 控制。不要在日常停止时执行 `docker compose down -v`，因为
+`-v` 会删除 PostgreSQL 数据卷；完整配置、Linux 文件权限和恢复边界见
+[后端容器部署指南](docs/backend/deployment/container-deployment.md)。
 
 其他安全约定：
 

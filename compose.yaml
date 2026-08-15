@@ -1,4 +1,77 @@
 services:
+  backend:
+    # Go 服务与 Python 文档处理运行时打包在同一个镜像中。
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: rag-reasoning-platform-backend:local
+    container_name: rag_reasoning_backend
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      APP_PORT: 8080
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+
+      # 容器内必须使用 Compose 服务名和 PostgreSQL 容器端口，
+      # 不能使用宿主机开发配置 localhost:5433。
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-rag_platform}
+      DB_USER: ${DB_USER:-rag_user}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
+      DB_SSLMODE: ${DB_SSLMODE:-disable}
+
+      APP_ROOT: /app
+      STORAGE_ROOT: storage
+      STORAGE_MAX_FILE_SIZE_BYTES: ${STORAGE_MAX_FILE_SIZE_BYTES:-209715200}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-2s}
+      WORKER_PROCESSING_TIMEOUT: ${WORKER_PROCESSING_TIMEOUT:-5m}
+
+      PYTHON_EXECUTABLE: python3
+      PYTHON_SOURCE_ROOT: ai/src
+      PYTHON_PDF_MAX_FILE_SIZE_BYTES: ${PYTHON_PDF_MAX_FILE_SIZE_BYTES:-52428800}
+      PYTHON_PDF_MAX_PAGES: ${PYTHON_PDF_MAX_PAGES:-500}
+
+      # 远程能力继续默认关闭。即使镜像能够运行 AI 链路，也不会在未授权时产生费用。
+      EMBEDDING_WORKER_ENABLED: ${EMBEDDING_WORKER_ENABLED:-false}
+      SEMANTIC_SEARCH_ENABLED: ${SEMANTIC_SEARCH_ENABLED:-false}
+      ANSWER_ENABLED: ${ANSWER_ENABLED:-false}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-dashscope}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DASHSCOPE_EMBEDDING_ENDPOINT: ${DASHSCOPE_EMBEDDING_ENDPOINT:-https://dashscope.aliyuncs.com/compatible-mode/v1/embeddings}
+      DASHSCOPE_GENERATION_ENDPOINT: ${DASHSCOPE_GENERATION_ENDPOINT:-https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_ENDPOINT: ${OPENAI_EMBEDDING_ENDPOINT:-https://api.openai.com/v1/embeddings}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-}
+      EMBEDDING_HTTP_TIMEOUT: ${EMBEDDING_HTTP_TIMEOUT:-30s}
+      EMBEDDING_PROCESSING_TIMEOUT: ${EMBEDDING_PROCESSING_TIMEOUT:-5m}
+      EMBEDDING_POLL_INTERVAL: ${EMBEDDING_POLL_INTERVAL:-2s}
+      EMBEDDING_MAX_ATTEMPTS: ${EMBEDDING_MAX_ATTEMPTS:-5}
+      EMBEDDING_RETRY_BASE_DELAY: ${EMBEDDING_RETRY_BASE_DELAY:-5s}
+      EMBEDDING_RETRY_MAX_DELAY: ${EMBEDDING_RETRY_MAX_DELAY:-2m}
+      GENERATION_MODEL: ${GENERATION_MODEL:-qwen3.6-flash}
+      GENERATION_HTTP_TIMEOUT: ${GENERATION_HTTP_TIMEOUT:-60s}
+      GENERATION_MAX_OUTPUT_TOKENS: ${GENERATION_MAX_OUTPUT_TOKENS:-1024}
+      GENERATION_TEMPERATURE: ${GENERATION_TEMPERATURE:-0.1}
+      GENERATION_THINKING_ENABLED: ${GENERATION_THINKING_ENABLED:-false}
+
+    ports:
+      # 默认只暴露给当前电脑；如需局域网访问必须单独设计鉴权和网络边界。
+      - "127.0.0.1:${BACKEND_HOST_PORT:-8080}:8080"
+
+    volumes:
+      # 继续使用仓库中被 Git 忽略的 storage，容器重建不会删除上传文件。
+      - ./storage:/app/storage
+
+    mem_limit: 768m
+    cpus: 1.5
+
   postgres:
     # 保持 PostgreSQL 主版本 15，并固定 pgvector 扩展版本，避免 latest 漂移。
     # bookworm 镜像沿用 PostgreSQL 官方数据目录，可继续挂载现有 PG15 数据卷。
