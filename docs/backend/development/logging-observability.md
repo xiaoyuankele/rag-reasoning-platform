@@ -184,9 +184,19 @@ P5.2.5 在 Answer Application 定义 `GenerationEventObserver`，由 `internal/o
 Generation 日志严格禁止记录用户问题、System Instruction、User Prompt、证据正文、生成答案和 API Key。
 HTTP 访问日志负责整次请求的状态与总耗时，Generation 事件只负责远程生成阶段，二者不能混为同一个指标。
 
+### 7.4 可重复成本汇总
+
+P5.2.6 第一部分提供 `go run ./cmd/observability-report`。该命令只消费已有 JSONL 日志，不启动服务、
+不访问数据库，也不调用远程模型。它排除 started 事件，按终结事件汇总 Embedding/Generation 的调用次数、
+Token、成功/失败/跳过状态以及平均、P50、P95 耗时。重试前已经发生的 Embedding 调用继续计入成本，
+无证据 Generation `skipped` 不计远程调用。
+
+完整冻结条件、PowerShell 命令、字段口径和金额换算方法见
+[模型调用成本基线](../performance/model-call-cost-baseline.md)。真实付费批次必须单独获得授权。
+
 ## 8. 后续计划
 
 1. 按实际联调需要把统一错误响应逐步迁移到其余 Handler；
-2. 将 Embedding 与 Generation 指标整理成可重复执行的成本基线；
+2. 在明确授权后执行第一批新口径真实成本基线；
 3. 增加日志级别与输出格式配置；
 4. 继续部署、备份和恢复流程。

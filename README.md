@@ -137,7 +137,7 @@ rag_reasoning_platform_individual/
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
 | P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
-| P5 | 进行中 | P5.1 运行路径、P5.2.1 请求追踪、P5.2.2 错误诊断、P5.2.3 文档任务日志、P5.2.4 Embedding 生命周期/调用成本日志和 P5.2.5 Generation 调用日志已完成；后续继续配置、部署、备份和可重复性能/成本基线，不包含用户与租户系统 |
+| P5 | 进行中 | P5.1 运行路径、P5.2.1 请求追踪、P5.2.2 错误诊断、P5.2.3 文档任务日志、P5.2.4 Embedding 日志、P5.2.5 Generation 日志及 P5.2.6 成本基线汇总工具已完成；下一步在明确授权后执行真实成本批次，并继续日志配置、部署和备份，不包含用户与租户系统 |
 | P6 | 未开始 | 用户、工作区、成员权限和全链路数据隔离尚未设计或实现；当前服务不能作为公开多人 SaaS 直接部署 |
 
 前端当前处于 `F0` 联调收尾：工程分层、统一 API Client、健康检查、测试与构建已经完成，下一步先完成
@@ -154,6 +154,9 @@ PDF 文献处理的错误分类、页码来源、资源限制、解析库选择�
 
 P3 关键词搜索的数据规模、表/索引空间、`EXPLAIN ANALYZE` 证据和阶段结论见
 [关键词检索性能基线](docs/backend/performance/search-baseline-2026-08-10.md)。
+
+Embedding 与 Generation JSONL 日志的次数、Token、P50/P95 耗时汇总口径和零费用命令见
+[模型调用成本基线](docs/backend/performance/model-call-cost-baseline.md)。
 
 关键词检索与语义检索的中英文真实问题、排名、相关性评分和混合检索重新评估条件见
 [检索质量评估计划](docs/backend/evaluation/retrieval-quality-evaluation-plan.md)。

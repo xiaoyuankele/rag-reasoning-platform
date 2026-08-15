@@ -19,6 +19,7 @@
 - [文档文本块浏览接口](architecture/document-chunk-browsing.md)
 - [运行路径与配置契约](development/runtime-path-configuration.md)
 - [日志与请求追踪规范](development/logging-observability.md)
+- [Embedding 与 Generation 调用成本基线](performance/model-call-cost-baseline.md)
 
 ## 质量评估入口
 
@@ -42,7 +43,8 @@ P5.2.3 已为文档解析 Worker 增加 `started`、`succeeded`、`failed` 和 `
 能够通过任务 ID、文档 ID、尝试次数、状态和耗时排查异步任务。Embedding 任务事件和外部供应商错误分类
 已在 P5.2.4 接入：日志覆盖成功、重试、永久失败、停机中断和数据库收尾失败，并记录模型、维度、远程调用次数、
 远程耗时、Token、生成向量数及稳定错误分类。P5.2.5 已为在线 Generation 调用增加开始、成功、失败和无证据跳过事件，
-通过请求 ID 关联访问日志，并记录模型、回答语言、证据数、远程耗时、Token 及供应商错误分类。
+通过请求 ID 关联访问日志，并记录模型、回答语言、证据数、远程耗时、Token 及供应商错误分类。P5.2.6 第一部分
+已提供默认零远程费用的 JSONL 汇总命令，统一计算两类模型调用的次数、Token、成功/失败和 P50/P95 耗时。
 
 前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
 [HTTP API 总览](../shared/api/http-api-overview.md)。
