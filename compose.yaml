@@ -67,7 +67,8 @@ services:
 
     volumes:
       # 继续使用仓库中被 Git 忽略的 storage，容器重建不会删除上传文件。
-      - ./storage:/app/storage
+      # 恢复演练后可以通过 STORAGE_HOST_PATH 无覆盖地切换到已验证的新目录。
+      - ${STORAGE_HOST_PATH:-./storage}:/app/storage
 
     mem_limit: 768m
     cpus: 1.5

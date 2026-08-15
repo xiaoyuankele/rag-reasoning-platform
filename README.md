@@ -137,7 +137,7 @@ rag_reasoning_platform_individual/
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
 | P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
-| P5 | 进行中 | P5.1 运行路径、P5.2 可观测性及 P5.3.1 后端容器化已完成；Go 服务、Python 文档运行时与 PostgreSQL 已通过 Compose 健康检查和真实 HTTP 验收。下一步建立数据库与文件的备份/恢复流程，不包含用户与租户系统 |
+| P5 | 进行中 | P5.1 运行路径、P5.2 可观测性、P5.3.1 后端容器化及 P5.3.2 数据配套备份/恢复已完成；当前 46 篇文档、2729 chunks、460 vectors 和 185 MB 文件已通过真实隔离恢复。下一步验证容器优雅关闭与异常重启恢复，不包含用户与租户系统 |
 | P6 | 未开始 | 用户、工作区、成员权限和全链路数据隔离尚未设计或实现；当前服务不能作为公开多人 SaaS 直接部署 |
 
 前端当前处于 `F0` 联调收尾：工程分层、统一 API Client、健康检查、测试与构建已经完成，下一步先完成
@@ -285,6 +285,7 @@ Go 后端当前支持以下环境变量：
 | `DB_SSLMODE` | `disable` | 本地开发时的 PostgreSQL SSL 模式 |
 | `APP_ROOT` | 开发环境自动发现 | 应用运行时资源的共同根目录；显式配置时必须是已经存在的绝对目录 |
 | `STORAGE_ROOT` | `storage` | 本地文档存储根目录；相对路径固定以 `APP_ROOT` 为基准 |
+| `STORAGE_HOST_PATH` | `./storage` | Compose 挂载的宿主机文件目录；恢复验收后可无覆盖切换到新目录 |
 | `STORAGE_MAX_FILE_SIZE_BYTES` | `209715200` | 单个上传文件允许的最大字节数，即 200 MiB |
 | `PYTHON_EXECUTABLE` | `python` | Go 启动复杂文档处理子进程时使用的 Python 可执行程序 |
 | `PYTHON_SOURCE_ROOT` | `ai/src` | 包含 `rag_ai` 包的 Python 源码目录；相对路径固定以 `APP_ROOT` 为基准 |
@@ -326,6 +327,9 @@ Docker Compose 会自动读取项目根目录的 `.env`。当前 Go 程序通过
 
 Go + Python 后端镜像的构建、Compose 启停、健康检查、数据持久化和安全停止方式见
 [后端容器部署指南](docs/backend/deployment/container-deployment.md)。
+
+PostgreSQL 与 `storage/` 的配套备份、SHA-256 manifest、默认不覆盖恢复和无覆盖切换方法见
+[数据配套备份与恢复指南](docs/backend/deployment/data-backup-and-restore.md)。
 
 在 PowerShell 中可以这样临时设置 Go 服务端口：
 

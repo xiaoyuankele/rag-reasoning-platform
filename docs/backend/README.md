@@ -21,6 +21,7 @@
 - [运行路径与配置契约](development/runtime-path-configuration.md)
 - [日志与请求追踪规范](development/logging-observability.md)
 - [后端容器部署指南](deployment/container-deployment.md)
+- [数据配套备份与恢复指南](deployment/data-backup-and-restore.md)
 - [Embedding 与 Generation 调用成本基线](performance/model-call-cost-baseline.md)
 
 ## 质量评估入口
@@ -50,6 +51,8 @@ P5.2.3 已为文档解析 Worker 增加 `started`、`succeeded`、`failed` 和 `
 P5.2.7 已增加 `LOG_LEVEL` 与 `LOG_FORMAT` 启动配置；默认保持 `info/json`，非法配置会在连接数据库前安全退出。
 P5.3.1 已增加 Go 多阶段构建和 Compose 后端服务。运行镜像固定包含 Go 服务、Python 3.11、`rag_ai`
 与 PDF 依赖，以非 root 用户运行，并通过 `/health` 验证；PostgreSQL 和上传文件继续使用独立持久化位置。
+P5.3.2 已建立 PostgreSQL + `storage/` 配套备份、SHA-256 manifest、默认不覆盖的隔离恢复和行数/文件数
+一致性校验，并使用当前 46 篇文档、2729 chunks、460 vectors 和 185 MB 文件完成真实恢复演练。
 
 前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
 [HTTP API 总览](../shared/api/http-api-overview.md)。

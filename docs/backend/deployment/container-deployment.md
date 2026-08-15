@@ -42,6 +42,9 @@ ANSWER_ENABLED=false
 `DB_HOST=localhost` 和 `DB_PORT=5433` 是宿主机直接运行 Go 时使用的值。Compose 会在容器内覆盖为
 `postgres:5432`，因为容器不能通过自己的 `localhost` 访问另一个容器。
 
+正常运行保持 `STORAGE_HOST_PATH=./storage`。它只决定哪个宿主机目录绑定到容器 `/app/storage`；
+隔离恢复验证成功后，可以把它切换到新的恢复目录，而不覆盖旧文件。
+
 ## 3. 构建与启动
 
 所有命令都从项目根目录执行：
@@ -86,12 +89,13 @@ Remove-Item Env:BACKEND_HOST_PORT
 | 数据 | 持久化位置 | 重建后端容器后 |
 | --- | --- | --- |
 | 文档元数据、任务、chunks、vectors | Docker 命名卷 `rag_postgres_data` | 保留 |
-| 上传的原始文件 | 宿主机 `./storage` | 保留 |
+| 上传的原始文件 | `STORAGE_HOST_PATH` 指定的宿主机目录，默认 `./storage` | 保留 |
 | Go 程序、Python 与依赖 | 后端镜像 | 由镜像重新创建 |
 | 日志 | 当前输出到容器标准输出 | 需要 `docker compose logs` 查看；长期保存方案后续补充 |
 
-数据库记录和 `storage/` 文件共同构成完整业务数据。P5.3.2 会建立二者配套的备份、恢复与一致性验收，
-在此之前不要把“只备份数据库”误认为完整备份。
+数据库记录和 `storage/` 文件共同构成完整业务数据。P5.3.2 已建立二者配套的备份、恢复与一致性验收，
+不要把“只备份数据库”误认为完整备份。命令和安全切换步骤见
+[数据配套备份与恢复指南](data-backup-and-restore.md)。
 
 ## 6. 安全停止与危险命令
 

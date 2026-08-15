@@ -63,7 +63,9 @@ PYTHON_EXECUTABLE=python3
 ```
 
 因此上传目录解析为 `/app/storage`，Python 源码基准解析为 `/app/ai/src`。宿主机的 `./storage`
-绑定到 `/app/storage`，容器重建后上传文件仍然保留。
+默认绑定到 `/app/storage`，容器重建后上传文件仍然保留。`STORAGE_HOST_PATH` 只控制 Compose 的宿主机
+挂载来源，不会传入 Go 业务配置；恢复验收后可以把它切换到新的已验证 storage 目录，而容器内路径和
+Application/Domain 代码均不需要变化。
 
 ## 5. 验收标准
 
