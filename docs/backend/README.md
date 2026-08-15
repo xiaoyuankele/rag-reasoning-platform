@@ -18,6 +18,7 @@
 - [概念词典与多语言检索设想](architecture/concept-retrieval-roadmap.md)
 - [文档文本块浏览接口](architecture/document-chunk-browsing.md)
 - [运行路径与配置契约](development/runtime-path-configuration.md)
+- [日志与请求追踪规范](development/logging-observability.md)
 
 ## 质量评估入口
 
@@ -33,6 +34,9 @@ P5 不包含用户认证和多租户；未来 P6 的工作区、权限与数据�
 
 P5.1 已建立统一 `APP_ROOT` 路径基准：本地开发可从项目根目录或 `backend` 目录启动，
 部署环境则必须显式提供绝对应用根目录。文件存储与 Python 源码的相对路径不再依赖偶然的当前工作目录。
+
+P5.2.1 已建立 `X-Request-ID` 与 JSON HTTP 访问日志：请求编号同时进入响应头、Go `context.Context`
+和日志字段，便于前端反馈与后端排障关联。用户安全错误、内部诊断错误和外部供应商错误的完整分类仍在后续 P5.2 中推进。
 
 前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
 [HTTP API 总览](../shared/api/http-api-overview.md)。

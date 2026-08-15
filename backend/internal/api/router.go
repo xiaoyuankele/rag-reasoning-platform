@@ -2,15 +2,25 @@
 package api
 
 import (
-	"github.com/gin-gonic/gin"
+	"log/slog"
 	"net/http"
+
+	"github.com/gin-gonic/gin"
 )
 
-// NewRouter 创建并返回配置完成的Gin路由
+// NewRouter 创建并返回配置完成的 Gin 路由。
 // *gin.Engine 表示返回的是Gin路由对象的指针
-func NewRouter() *gin.Engine {
-	// Default 创建 Gin 路由，并自动启用请求日志和异常恢复中间件。
-	router := gin.Default()
+func NewRouter(logger *slog.Logger) *gin.Engine {
+	// New 只创建空路由。中间件由项目显式选择，避免继续使用 Gin 默认文本日志。
+	router := gin.New()
+
+	// 中间件按照注册顺序进入、反向退出：先建立 request_id，访问日志才能
+	// 在 Recovery 和 Handler 完成后记录最终状态码与同一个请求编号。
+	router.Use(
+		RequestIDMiddleware(),
+		AccessLogMiddleware(logger),
+		gin.Recovery(),
+	)
 
 	// GET 表示注册一个只接受 HTTP GET 请求的接口。
 	// "/health" 是接口路径。

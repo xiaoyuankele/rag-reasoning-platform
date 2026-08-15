@@ -50,6 +50,10 @@ P5 不新增复杂业务能力，目标是把当前可运行后端变成可重�
 - 记录任务 ID、文档 ID、处理阶段、耗时和最终状态；
 - 建立 Embedding、Generation 的延迟、Token、重试和失败分类基线。
 
+2026-08-15 已完成第一小步：所有 Gin 路由都通过 `X-Request-ID` 中间件和 JSON 访问日志中间件；
+请求 ID 会进入响应头与标准 `context.Context`，访问日志按 `INFO/WARN/ERROR` 区分最终 HTTP 状态。
+下一步继续建立安全响应、内部诊断和供应商错误之间的可追踪映射。
+
 ### P5.3 构建、部署与数据维护
 
 - 固化 Go、Python、Vue 与 PostgreSQL 的本地构建和启动流程；

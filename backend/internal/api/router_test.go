@@ -2,6 +2,8 @@ package api
 
 import (
 	"github.com/gin-gonic/gin"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,7 +17,8 @@ func TestHealthEndpoint(t *testing.T) {
 
 	//创建项目真实使用的Gin路由
 	//同属于api包直接调用
-	router := NewRouter()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	router := NewRouter(logger)
 
 	//httptest.NewRequest 在内存创建一个HTTP请求
 	//三个参数：请求方法、请求地址、请求体
@@ -32,6 +35,11 @@ func TestHealthEndpoint(t *testing.T) {
 	if response.Code != http.StatusOK {
 		//Fatalf 报告错误，并立即终止当前测试 %d整数占位符
 		t.Fatalf("expected status code %d,got %d", http.StatusOK, response.Code)
+	}
+
+	// 每个响应都应返回请求 ID，方便前端反馈问题时与后端日志关联。
+	if response.Header().Get(RequestIDHeader) == "" {
+		t.Fatal("expected non-blank X-Request-ID response header")
 	}
 
 	//反引号表示原生字符串，内容不需要转义双引号
