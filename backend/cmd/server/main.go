@@ -319,6 +319,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		answerService, err = answerapplication.NewService(
 			semanticSearchService,
 			generator,
+			observability.NewGenerationCallLogger(logger),
 			generationConfig.ModelName,
 			generationConfig.MaxOutputTokens,
 			generationConfig.Temperature,

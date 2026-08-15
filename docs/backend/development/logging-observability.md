@@ -163,10 +163,30 @@ Application 定义事件，`internal/observability` 使用 slog 实现，`main.g
 成本统计遵循“调用已经发生就必须记录”的原则：如果第一批向量成功而第二批失败，第一批产生的 Token、
 远程耗时和调用次数仍然保留在日志中；这些部分向量不会被持久化，只有 `succeeded` 才表示全部向量已经落库。
 
+### 7.3 Generation 在线调用与拒答
+
+P5.2.5 在 Answer Application 定义 `GenerationEventObserver`，由 `internal/observability` 的 slog 适配器实现。
+它与后台 Worker 的主要区别是：在线问答没有任务 ID，而是使用 HTTP context 中的 `request_id` 关联访问日志和生成日志。
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `answer_generation_skipped` | `INFO` | 没有检索证据，返回稳定拒答且没有调用远程模型 |
+| `answer_generation_started` | `INFO` | 已完成证据选择和 Prompt 构造，即将调用 Generator |
+| `answer_generation_succeeded` | `INFO` | 远程生成成功并取得答案与 Token 用量 |
+| `answer_generation_failed` | `ERROR` | 远程生成失败，原始错误只保留在后端日志 |
+
+所有事件记录 `model_name`、`response_language`、`requested_top_k` 和 `evidence_count`；指定文档问答额外记录
+`document_id`。成功事件记录 `provider_duration_ms`、`prompt_tokens`、`completion_tokens` 和 `total_tokens`；
+失败事件使用 `provider_authentication`、`provider_quota`、`provider_rate_limit`、
+`provider_request_rejected`、`provider_unavailable`、`provider_invalid_response`、`timeout`、`canceled`
+或 `internal` 分类。无证据事件记录 `skip_reason=insufficient_evidence`。
+
+Generation 日志严格禁止记录用户问题、System Instruction、User Prompt、证据正文、生成答案和 API Key。
+HTTP 访问日志负责整次请求的状态与总耗时，Generation 事件只负责远程生成阶段，二者不能混为同一个指标。
+
 ## 8. 后续计划
 
 1. 按实际联调需要把统一错误响应逐步迁移到其余 Handler；
-2. 为 Generation/问答调用建立延迟、Token 和供应商错误分类；
-3. 将 Embedding 与 Generation 指标整理成可重复执行的成本基线；
-4. 增加日志级别与输出格式配置；
-5. 继续部署、备份和恢复流程。
+2. 将 Embedding 与 Generation 指标整理成可重复执行的成本基线；
+3. 增加日志级别与输出格式配置；
+4. 继续部署、备份和恢复流程。

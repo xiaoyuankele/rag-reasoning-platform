@@ -41,7 +41,8 @@ P5.2.1 已建立 `X-Request-ID` 与 JSON HTTP 访问日志：请求编号同时�
 P5.2.3 已为文档解析 Worker 增加 `started`、`succeeded`、`failed` 和 `unfinished` 结构化生命周期事件，
 能够通过任务 ID、文档 ID、尝试次数、状态和耗时排查异步任务。Embedding 任务事件和外部供应商错误分类
 已在 P5.2.4 接入：日志覆盖成功、重试、永久失败、停机中断和数据库收尾失败，并记录模型、维度、远程调用次数、
-远程耗时、Token、生成向量数及稳定错误分类。Generation 调用指标仍在后续 P5.2 中推进。
+远程耗时、Token、生成向量数及稳定错误分类。P5.2.5 已为在线 Generation 调用增加开始、成功、失败和无证据跳过事件，
+通过请求 ID 关联访问日志，并记录模型、回答语言、证据数、远程耗时、Token 及供应商错误分类。
 
 前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
 [HTTP API 总览](../shared/api/http-api-overview.md)。
