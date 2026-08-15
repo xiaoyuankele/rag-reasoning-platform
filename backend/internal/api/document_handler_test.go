@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,11 +37,13 @@ func (f *fakeDocumentQueryService) GetByID(
 // newTestDocumentRouter 创建只用于 Handler 测试的 Gin 路由。
 func newTestDocumentRouter(
 	service documentQueryService,
+	logger *slog.Logger,
 ) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
-	handler := NewDocumentHandler(service)
+	router.Use(RequestIDMiddleware())
+	handler := NewDocumentHandler(service, logger)
 
 	// :id 是动态路径参数，例如 /documents/42 中的 42。
 	handler.RegisterRoutes(router)
@@ -79,7 +83,9 @@ func TestDocumentHandlerGetByIDRejectsInvalidID(t *testing.T) {
 				},
 			}
 
-			router := newTestDocumentRouter(service)
+			var logOutput bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+			router := newTestDocumentRouter(service, logger)
 			request := httptest.NewRequest(
 				http.MethodGet,
 				testCase.path,
@@ -97,7 +103,7 @@ func TestDocumentHandlerGetByIDRejectsInvalidID(t *testing.T) {
 				)
 			}
 
-			expectedBody := `{"error":"document ID must be a positive integer"}`
+			expectedBody := `{"error":"document ID must be a positive integer","code":"invalid_document_id"}`
 			if response.Body.String() != expectedBody {
 				t.Fatalf(
 					"expected body %s, got %s",
@@ -111,6 +117,9 @@ func TestDocumentHandlerGetByIDRejectsInvalidID(t *testing.T) {
 					"expected service not to be called, got %d calls",
 					service.getByIDCalls,
 				)
+			}
+			if logOutput.Len() != 0 {
+				t.Fatalf("invalid ID must not write internal error log: %s", logOutput.String())
 			}
 		})
 	}
@@ -137,7 +146,9 @@ func TestDocumentHandlerGetByIDReturnsNotFound(t *testing.T) {
 		},
 	}
 
-	router := newTestDocumentRouter(service)
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+	router := newTestDocumentRouter(service, logger)
 	request := httptest.NewRequest(
 		http.MethodGet,
 		"/documents/999",
@@ -155,7 +166,7 @@ func TestDocumentHandlerGetByIDReturnsNotFound(t *testing.T) {
 		)
 	}
 
-	expectedBody := `{"error":"document not found"}`
+	expectedBody := `{"error":"document not found","code":"document_not_found"}`
 	if response.Body.String() != expectedBody {
 		t.Fatalf(
 			"expected body %s, got %s",
@@ -169,6 +180,9 @@ func TestDocumentHandlerGetByIDReturnsNotFound(t *testing.T) {
 			"expected one service call, got %d",
 			service.getByIDCalls,
 		)
+	}
+	if logOutput.Len() != 0 {
+		t.Fatalf("not found must not write internal error log: %s", logOutput.String())
 	}
 }
 
@@ -186,12 +200,15 @@ func TestDocumentHandlerGetByIDReturnsInternalServerError(t *testing.T) {
 		},
 	}
 
-	router := newTestDocumentRouter(service)
+	var logOutput bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+	router := newTestDocumentRouter(service, logger)
 	request := httptest.NewRequest(
 		http.MethodGet,
 		"/documents/42",
 		nil,
 	)
+	request.Header.Set(RequestIDHeader, "document-query-error-42")
 	response := httptest.NewRecorder()
 
 	router.ServeHTTP(response, request)
@@ -204,7 +221,7 @@ func TestDocumentHandlerGetByIDReturnsInternalServerError(t *testing.T) {
 		)
 	}
 
-	expectedBody := `{"error":"internal server error"}`
+	expectedBody := `{"error":"internal server error","code":"internal_error"}`
 	if response.Body.String() != expectedBody {
 		t.Fatalf(
 			"expected body %s, got %s",
@@ -218,6 +235,19 @@ func TestDocumentHandlerGetByIDReturnsInternalServerError(t *testing.T) {
 			"expected one service call, got %d",
 			service.getByIDCalls,
 		)
+	}
+
+	// 前端只看到安全响应；原始数据库错误只进入带 request_id 的后端诊断日志。
+	var logEntry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logOutput.Bytes()), &logEntry); err != nil {
+		t.Fatalf("decode internal error log: %v; output = %q", err, logOutput.String())
+	}
+	assertLogField(t, logEntry, "event", "http_request_failed")
+	assertLogField(t, logEntry, "request_id", "document-query-error-42")
+	assertLogField(t, logEntry, "public_error_code", "internal_error")
+	assertLogField(t, logEntry, "diagnostic_code", "document_get_failed")
+	if !strings.Contains(logEntry["error"].(string), internalError.Error()) {
+		t.Fatalf("internal log error = %#v, want original error", logEntry["error"])
 	}
 }
 
@@ -262,7 +292,8 @@ func TestDocumentHandlerGetByIDReturnsDocument(t *testing.T) {
 		},
 	}
 
-	router := newTestDocumentRouter(service)
+	logger := slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil))
+	router := newTestDocumentRouter(service, logger)
 	request := httptest.NewRequest(
 		http.MethodGet,
 		"/documents/42",

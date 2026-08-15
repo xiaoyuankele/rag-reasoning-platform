@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -23,14 +24,21 @@ type processingJobQueryService interface {
 // ProcessingJobHandler 负责解析任务查询 HTTP 请求。
 type ProcessingJobHandler struct {
 	service processingJobQueryService
+	logger  *slog.Logger
 }
 
 // NewProcessingJobHandler 创建解析任务查询 Handler。
 func NewProcessingJobHandler(
 	service processingJobQueryService,
+	logger *slog.Logger,
 ) *ProcessingJobHandler {
+	if logger == nil {
+		panic("NewProcessingJobHandler requires a non-nil logger")
+	}
+
 	return &ProcessingJobHandler{
 		service: service,
+		logger:  logger,
 	}
 }
 
@@ -45,9 +53,12 @@ func (h *ProcessingJobHandler) RegisterRoutes(
 func (h *ProcessingJobHandler) GetByID(c *gin.Context) {
 	jobID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || jobID <= 0 {
-		c.JSON(http.StatusBadRequest, errorResponse{
-			Error: "processing job ID must be a positive integer",
-		})
+		writeErrorResponse(
+			c,
+			http.StatusBadRequest,
+			errorCodeInvalidProcessingJobID,
+			"processing job ID must be a positive integer",
+		)
 		return
 	}
 
@@ -56,23 +67,33 @@ func (h *ProcessingJobHandler) GetByID(c *gin.Context) {
 		jobID,
 	)
 	if errors.Is(err, applicationdocument.ErrInvalidProcessingJobID) {
-		c.JSON(http.StatusBadRequest, errorResponse{
-			Error: "processing job ID must be a positive integer",
-		})
+		writeErrorResponse(
+			c,
+			http.StatusBadRequest,
+			errorCodeInvalidProcessingJobID,
+			"processing job ID must be a positive integer",
+		)
 		return
 	}
 
 	if errors.Is(err, documentdomain.ErrProcessingJobNotFound) {
-		c.JSON(http.StatusNotFound, errorResponse{
-			Error: "processing job not found",
-		})
+		writeErrorResponse(
+			c,
+			http.StatusNotFound,
+			errorCodeProcessingJobNotFound,
+			"processing job not found",
+		)
 		return
 	}
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, errorResponse{
-			Error: "internal server error",
-		})
+		writeInternalErrorResponse(
+			c,
+			h.logger,
+			"processing_job_get_failed",
+			err,
+			slog.Int64("processing_job_id", jobID),
+		)
 		return
 	}
 

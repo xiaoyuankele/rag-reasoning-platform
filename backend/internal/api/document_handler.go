@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -30,12 +31,21 @@ type documentQueryService interface {
 // Handler 只处理 HTTP 参数和响应，不直接查询 PostgreSQL。
 type DocumentHandler struct {
 	service documentQueryService
+	logger  *slog.Logger
 }
 
 // NewDocumentHandler 创建文档 HTTP Handler。
-func NewDocumentHandler(service documentQueryService) *DocumentHandler {
+func NewDocumentHandler(
+	service documentQueryService,
+	logger *slog.Logger,
+) *DocumentHandler {
+	if logger == nil {
+		panic("NewDocumentHandler requires a non-nil logger")
+	}
+
 	return &DocumentHandler{
 		service: service,
+		logger:  logger,
 	}
 }
 
@@ -59,11 +69,6 @@ type documentResponse struct {
 	ErrorMessage *string               `json:"error_message"`
 	CreatedAt    time.Time             `json:"created_at"`
 	UpdatedAt    time.Time             `json:"updated_at"`
-}
-
-// errorResponse 定义接口失败时统一返回的 JSON。
-type errorResponse struct {
-	Error string `json:"error"`
 }
 
 // newDocumentResponse 把领域模型转换成 HTTP 响应模型。
@@ -93,9 +98,12 @@ func (h *DocumentHandler) GetByID(c *gin.Context) {
 	// 第二个参数 10 表示十进制，第三个参数 64 表示结果为 int64。
 	id, err := strconv.ParseInt(rawID, 10, 64)
 	if err != nil || id <= 0 {
-		c.JSON(http.StatusBadRequest, errorResponse{
-			Error: "document ID must be a positive integer",
-		})
+		writeErrorResponse(
+			c,
+			http.StatusBadRequest,
+			errorCodeInvalidDocumentID,
+			"document ID must be a positive integer",
+		)
 		return
 	}
 
@@ -105,24 +113,33 @@ func (h *DocumentHandler) GetByID(c *gin.Context) {
 		id,
 	)
 	if errors.Is(err, applicationdocument.ErrInvalidID) {
-		c.JSON(http.StatusBadRequest, errorResponse{
-			Error: "document ID must be a positive integer",
-		})
+		writeErrorResponse(
+			c,
+			http.StatusBadRequest,
+			errorCodeInvalidDocumentID,
+			"document ID must be a positive integer",
+		)
 		return
 	}
 
 	if errors.Is(err, documentdomain.ErrNotFound) {
-		c.JSON(http.StatusNotFound, errorResponse{
-			Error: "document not found",
-		})
+		writeErrorResponse(
+			c,
+			http.StatusNotFound,
+			errorCodeDocumentNotFound,
+			"document not found",
+		)
 		return
 	}
 
 	if err != nil {
-		// 未知内部错误不能直接返回给浏览器，避免泄露数据库等内部信息。
-		c.JSON(http.StatusInternalServerError, errorResponse{
-			Error: "internal server error",
-		})
+		writeInternalErrorResponse(
+			c,
+			h.logger,
+			"document_get_failed",
+			err,
+			slog.Int64("document_id", id),
+		)
 		return
 	}
 

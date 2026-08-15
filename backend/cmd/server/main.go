@@ -395,7 +395,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}()
 
 	// Handler 负责把 HTTP 请求转换成应用服务调用。
-	documentHandler := api.NewDocumentHandler(documentService)
+	documentHandler := api.NewDocumentHandler(documentService, logger)
 	documentUploadHandler := api.NewDocumentUploadHandler(documentUploadService, storageConfig.MaxFileSizeBytes)
 	documentListHandler := api.NewDocumentListHandler(documentListService)
 	documentChunkHandler := api.NewDocumentChunkHandler(
@@ -408,6 +408,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	)
 	processingJobHandler := api.NewProcessingJobHandler(
 		processingJobService,
+		logger,
 	)
 	documentEmbeddingHandler := api.NewDocumentEmbeddingHandler(
 		embeddingQueueService,
