@@ -91,11 +91,13 @@ func TestWorkerRunOnceReturnsIdleWhenQueueIsEmpty(t *testing.T) {
 		},
 	}
 	chunks := &fakeWorkerChunkReplacer{}
+	events := newRecordingProcessingJobEventObserver()
 	worker := NewWorker(
 		jobs,
 		documents,
 		processor,
 		chunks,
+		events,
 		testWorkerProcessingTimeout,
 	)
 
@@ -121,13 +123,17 @@ func TestWorkerRunOnceReturnsIdleWhenQueueIsEmpty(t *testing.T) {
 	if jobs.markSucceededCalls != 0 || jobs.markFailedCalls != 0 {
 		t.Fatal("empty queue must not finalize a processing job")
 	}
+	if len(events.events) != 0 {
+		t.Fatalf("empty queue events = %d, want 0", len(events.events))
+	}
 }
 
 func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 	expectedJob := documentdomain.ProcessingJob{
-		ID:         17,
-		DocumentID: 7,
-		Status:     documentdomain.ProcessingJobStatusProcessing,
+		ID:           17,
+		DocumentID:   7,
+		Status:       documentdomain.ProcessingJobStatusProcessing,
+		AttemptCount: 2,
 	}
 	expectedDocument := documentdomain.Document{
 		ID:          expectedJob.DocumentID,
@@ -224,11 +230,13 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 			return nil
 		},
 	}
+	events := newRecordingProcessingJobEventObserver()
 	worker := NewWorker(
 		jobs,
 		documents,
 		processor,
 		chunks,
+		events,
 		testWorkerProcessingTimeout,
 	)
 
@@ -260,6 +268,29 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 			"MarkProcessingJobFailed() calls = %d, want 0",
 			jobs.markFailedCalls,
 		)
+	}
+	if len(events.events) != 2 {
+		t.Fatalf("processing events = %d, want 2", len(events.events))
+	}
+	assertProcessingJobEventIdentity(
+		t,
+		events.events[0],
+		ProcessingJobEventStarted,
+		documentdomain.ProcessingJobStatusProcessing,
+		expectedJob,
+	)
+	assertProcessingJobEventIdentity(
+		t,
+		events.events[1],
+		ProcessingJobEventSucceeded,
+		documentdomain.ProcessingJobStatusSucceeded,
+		expectedJob,
+	)
+	if events.events[1].Err != nil {
+		t.Fatalf("succeeded event error = %v, want nil", events.events[1].Err)
+	}
+	if events.events[1].Duration < 0 {
+		t.Fatalf("succeeded event duration = %s, want non-negative", events.events[1].Duration)
 	}
 }
 
@@ -300,6 +331,7 @@ func TestWorkerRunOncePreservesDocumentLookupError(t *testing.T) {
 		documents,
 		processor,
 		chunks,
+		newRecordingProcessingJobEventObserver(),
 		testWorkerProcessingTimeout,
 	)
 
@@ -331,9 +363,10 @@ func TestWorkerRunOncePreservesDocumentLookupError(t *testing.T) {
 func TestWorkerRunOnceMarksFailedProcessing(t *testing.T) {
 	processingError := errors.New("python process exited with code 1")
 	expectedJob := documentdomain.ProcessingJob{
-		ID:         19,
-		DocumentID: 9,
-		Status:     documentdomain.ProcessingJobStatusProcessing,
+		ID:           19,
+		DocumentID:   9,
+		Status:       documentdomain.ProcessingJobStatusProcessing,
+		AttemptCount: 1,
 	}
 	expectedDocument := documentdomain.Document{
 		ID:          expectedJob.DocumentID,
@@ -385,11 +418,13 @@ func TestWorkerRunOnceMarksFailedProcessing(t *testing.T) {
 		},
 	}
 	chunks := &fakeWorkerChunkReplacer{}
+	events := newRecordingProcessingJobEventObserver()
 	worker := NewWorker(
 		jobs,
 		documents,
 		processor,
 		chunks,
+		events,
 		testWorkerProcessingTimeout,
 	)
 
@@ -418,6 +453,22 @@ func TestWorkerRunOnceMarksFailedProcessing(t *testing.T) {
 	}
 	if chunks.replaceCalls != 0 {
 		t.Fatal("processing failure must not store chunks")
+	}
+	if len(events.events) != 2 {
+		t.Fatalf("processing events = %d, want 2", len(events.events))
+	}
+	assertProcessingJobEventIdentity(
+		t,
+		events.events[1],
+		ProcessingJobEventFailed,
+		documentdomain.ProcessingJobStatusFailed,
+		expectedJob,
+	)
+	if !errors.Is(events.events[1].Err, processingError) {
+		t.Fatalf(
+			"failed event error = %v, want wrapped processing error",
+			events.events[1].Err,
+		)
 	}
 }
 
@@ -503,6 +554,7 @@ func TestWorkerRunOnceMarksTimedOutProcessingFailed(t *testing.T) {
 		documents,
 		processor,
 		chunks,
+		newRecordingProcessingJobEventObserver(),
 		20*time.Millisecond,
 	)
 
@@ -630,6 +682,7 @@ func TestWorkerRunOnceMarksFailedWhenChunkReplacementFails(t *testing.T) {
 		documents,
 		processor,
 		chunks,
+		newRecordingProcessingJobEventObserver(),
 		testWorkerProcessingTimeout,
 	)
 
@@ -734,6 +787,7 @@ func TestWorkerRunOncePreservesChunkAndFailureFinalizationErrors(
 		documents,
 		processor,
 		chunks,
+		newRecordingProcessingJobEventObserver(),
 		testWorkerProcessingTimeout,
 	)
 
@@ -810,6 +864,7 @@ func TestWorkerRunOncePreservesProcessingAndFailureFinalizationErrors(
 		documents,
 		processor,
 		&fakeWorkerChunkReplacer{},
+		newRecordingProcessingJobEventObserver(),
 		testWorkerProcessingTimeout,
 	)
 
@@ -841,9 +896,10 @@ func TestWorkerRunOncePreservesProcessingAndFailureFinalizationErrors(
 func TestWorkerRunOncePreservesFinalizationError(t *testing.T) {
 	finalizationError := errors.New("database unavailable")
 	expectedJob := documentdomain.ProcessingJob{
-		ID:         23,
-		DocumentID: 11,
-		Status:     documentdomain.ProcessingJobStatusProcessing,
+		ID:           23,
+		DocumentID:   11,
+		Status:       documentdomain.ProcessingJobStatusProcessing,
+		AttemptCount: 3,
 	}
 	jobs := &fakeProcessingJobClaimer{
 		claimNextFunc: func(
@@ -882,11 +938,13 @@ func TestWorkerRunOncePreservesFinalizationError(t *testing.T) {
 			}, nil
 		},
 	}
+	events := newRecordingProcessingJobEventObserver()
 	worker := NewWorker(
 		jobs,
 		documents,
 		processor,
 		&fakeWorkerChunkReplacer{},
+		events,
 		testWorkerProcessingTimeout,
 	)
 
@@ -900,5 +958,21 @@ func TestWorkerRunOncePreservesFinalizationError(t *testing.T) {
 	}
 	if !handled {
 		t.Fatal("RunOnce() handled = false, want true")
+	}
+	if len(events.events) != 2 {
+		t.Fatalf("processing events = %d, want 2", len(events.events))
+	}
+	assertProcessingJobEventIdentity(
+		t,
+		events.events[1],
+		ProcessingJobEventUnfinished,
+		documentdomain.ProcessingJobStatusProcessing,
+		expectedJob,
+	)
+	if !errors.Is(events.events[1].Err, finalizationError) {
+		t.Fatalf(
+			"unfinished event error = %v, want finalization error",
+			events.events[1].Err,
+		)
 	}
 }

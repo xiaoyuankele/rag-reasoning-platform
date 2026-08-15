@@ -46,6 +46,7 @@ type Worker struct {
 	documents         documentdomain.Finder
 	processor         DocumentProcessor
 	chunks            documentdomain.ChunkReplacer
+	events            ProcessingJobEventObserver
 	processingTimeout time.Duration
 }
 
@@ -55,13 +56,19 @@ func NewWorker(
 	documents documentdomain.Finder,
 	processor DocumentProcessor,
 	chunks documentdomain.ChunkReplacer,
+	events ProcessingJobEventObserver,
 	processingTimeout time.Duration,
 ) *Worker {
+	if events == nil {
+		panic("NewWorker requires a non-nil processing job event observer")
+	}
+
 	return &Worker{
 		jobs:              jobs,
 		documents:         documents,
 		processor:         processor,
 		chunks:            chunks,
+		events:            events,
 		processingTimeout: processingTimeout,
 	}
 }
@@ -114,6 +121,37 @@ func (w *Worker) RunOnce(
 	if !claimed {
 		return false, nil
 	}
+
+	// 从领取成功开始，任务已经进入 processing。观察器先记录 started，
+	// 然后 defer 保证每条已领取任务最终都有一条终结事件。
+	startedAt := time.Now()
+	finalStatus := documentdomain.ProcessingJobStatusProcessing
+	w.events.ObserveProcessingJobEvent(ctx, ProcessingJobEvent{
+		Type:         ProcessingJobEventStarted,
+		JobID:        job.ID,
+		DocumentID:   job.DocumentID,
+		AttemptCount: job.AttemptCount,
+		Status:       finalStatus,
+	})
+	defer func() {
+		eventType := ProcessingJobEventUnfinished
+		switch finalStatus {
+		case documentdomain.ProcessingJobStatusSucceeded:
+			eventType = ProcessingJobEventSucceeded
+		case documentdomain.ProcessingJobStatusFailed:
+			eventType = ProcessingJobEventFailed
+		}
+
+		w.events.ObserveProcessingJobEvent(ctx, ProcessingJobEvent{
+			Type:         eventType,
+			JobID:        job.ID,
+			DocumentID:   job.DocumentID,
+			AttemptCount: job.AttemptCount,
+			Status:       finalStatus,
+			Duration:     time.Since(startedAt),
+			Err:          err,
+		})
+	}()
 
 	// 从这里开始已经领取过任务，因此后续即使失败，
 	// handled 也必须返回 true。
@@ -168,6 +206,7 @@ func (w *Worker) RunOnce(
 			)
 		}
 
+		finalStatus = documentdomain.ProcessingJobStatusFailed
 		return true, wrappedProcessingErr
 	}
 	// 处理器成功后先保存文本块；只有结果成功入库，任务才能进入 succeeded。
@@ -196,6 +235,7 @@ func (w *Worker) RunOnce(
 			)
 		}
 
+		finalStatus = documentdomain.ProcessingJobStatusFailed
 		return true, wrappedReplaceErr
 	}
 
@@ -216,5 +256,6 @@ func (w *Worker) RunOnce(
 		)
 	}
 
+	finalStatus = documentdomain.ProcessingJobStatusSucceeded
 	return true, nil
 }

@@ -123,10 +123,28 @@ HTTP 访问日志不得记录：
 - 未知错误测试验证了前端响应不泄漏原始错误，同时后端日志保留 `request_id`、诊断码、业务 ID 和原始错误；
 - P5.2.2 第一版完成后，后端全量 `go test -count=1 ./...` 与 `go vet ./...` 再次通过。
 
+### 7.1 文档解析任务生命周期
+
+P5.2.3 在 Application 定义 `ProcessingJobEventObserver`，由 `internal/observability` 的 slog 适配器实现。
+Application 只报告任务事实，不依赖具体日志框架；`main.go` 负责把两者组装起来。
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `processing_job_started` | `INFO` | Worker 已领取任务，数据库状态为 `processing` |
+| `processing_job_succeeded` | `INFO` | chunks 和任务成功结果都已落库 |
+| `processing_job_failed` | `ERROR` | 处理失败，而且任务已经安全写入 `failed` |
+| `processing_job_unfinished` | `ERROR` | Worker 未能写入终态，任务可能仍停留在 `processing` |
+
+所有任务事件包含 `processing_job_id`、`document_id`、`attempt_count` 和 `status`；终结事件还包含
+`duration_ms`，失败事件在后端日志保留原始 `error`。日志不记录正文、存储路径、密钥或上传内容。
+
+当前中断恢复策略是服务启动后将遗留 `processing` 任务标记为失败，并不存在重新排队行为，
+因此这一版没有记录与实际业务不一致的 `requeued` 事件。
+
 ## 8. 后续计划
 
 1. 按实际联调需要把统一错误响应逐步迁移到其余 Handler；
-2. 为解析、Embedding 和问答记录任务 ID、文档 ID、阶段、耗时和结果；
+2. 把任务生命周期事件扩展到 Embedding Worker；
 3. 建立外部供应商错误到安全响应、重试策略和内部诊断码的映射；
 4. 增加日志级别与输出格式配置；
 5. 建立远程模型延迟、Token、重试和失败分类基线。

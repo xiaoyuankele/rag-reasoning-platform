@@ -143,6 +143,7 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			documentRepository,
 			processor,
 			chunkRepository,
+			newRecordingProcessingJobEventObserver(),
 			testWorkerProcessingTimeout,
 		)
 
@@ -225,6 +226,7 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			documentRepository,
 			processor,
 			chunkRepository,
+			newRecordingProcessingJobEventObserver(),
 			testWorkerProcessingTimeout,
 		)
 
