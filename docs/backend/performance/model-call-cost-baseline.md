@@ -45,9 +45,12 @@ go run ./cmd/observability-report
 
 在 `backend` 目录执行：
 
+> 执行前必须确认 `LOG_FORMAT=json`；Text 日志只适合人工阅读，不能用于成本汇总。
+
 ```powershell
 $batchDirectory = "..\chatgpt\后端\评估\模型成本\2026-08-15"
 New-Item -ItemType Directory -Force -Path $batchDirectory
+$env:LOG_FORMAT = "json"
 
 go run ./cmd/server 2>&1 |
     Tee-Object -FilePath "$batchDirectory\server.jsonl"

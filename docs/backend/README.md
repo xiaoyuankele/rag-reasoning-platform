@@ -45,6 +45,7 @@ P5.2.3 已为文档解析 Worker 增加 `started`、`succeeded`、`failed` 和 `
 远程耗时、Token、生成向量数及稳定错误分类。P5.2.5 已为在线 Generation 调用增加开始、成功、失败和无证据跳过事件，
 通过请求 ID 关联访问日志，并记录模型、回答语言、证据数、远程耗时、Token 及供应商错误分类。P5.2.6 第一部分
 已提供默认零远程费用的 JSONL 汇总命令，统一计算两类模型调用的次数、Token、成功/失败和 P50/P95 耗时。
+P5.2.7 已增加 `LOG_LEVEL` 与 `LOG_FORMAT` 启动配置；默认保持 `info/json`，非法配置会在连接数据库前安全退出。
 
 前端需要依赖的接口字段和 HTTP 行为，不在本目录单独定义，统一查看
 [HTTP API 总览](../shared/api/http-api-overview.md)。

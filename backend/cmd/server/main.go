@@ -38,9 +38,21 @@ const (
 
 // main 调用 run，并统一处理应用程序最终返回的错误。
 func main() {
-	// JSONHandler 让本地文件、容器平台和日志系统都能按字段检索日志。
+	// 日志配置必须在正式 Logger 创建前读取。配置本身无效时使用最小 JSON
+	// Logger 输出到 stderr，避免启动失败完全不可见。
+	loggingConfig, err := config.LoadLogging()
+	if err != nil {
+		bootstrapLogger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+		bootstrapLogger.Error(
+			"Application stopped",
+			"event", "application_stopped",
+			"error", fmt.Errorf("load logging configuration: %w", err),
+		)
+		os.Exit(1)
+	}
+
 	// Logger 在组合根创建后显式注入，不让业务层依赖全局日志变量。
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := newApplicationLogger(os.Stdout, loggingConfig)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
