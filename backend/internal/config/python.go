@@ -9,7 +9,7 @@ import (
 
 const (
 	defaultPythonExecutable          = "python"
-	defaultPythonSourceRoot          = "../ai/src"
+	defaultPythonSourceRoot          = "ai/src"
 	defaultPythonPDFMaxFileSizeBytes = 50 * 1024 * 1024
 	defaultPythonPDFMaxPages         = 500
 	maximumPythonPDFMaxFileSizeBytes = 1024 * 1024 * 1024
@@ -28,15 +28,23 @@ type PythonConfig struct {
 //
 // 这里只负责提供配置值；可执行文件是否存在、源码目录是否有效，
 // 由真正使用这些值的 PythonProcessor 在构造时检查。
-func LoadPython() (PythonConfig, error) {
+func LoadPython(appRoot string) (PythonConfig, error) {
 	executable := strings.TrimSpace(os.Getenv("PYTHON_EXECUTABLE"))
 	if executable == "" {
 		executable = defaultPythonExecutable
 	}
 
-	sourceRoot := strings.TrimSpace(os.Getenv("PYTHON_SOURCE_ROOT"))
-	if sourceRoot == "" {
+	sourceRoot, configured := os.LookupEnv("PYTHON_SOURCE_ROOT")
+	if !configured || sourceRoot == "" {
 		sourceRoot = defaultPythonSourceRoot
+	}
+	resolvedSourceRoot, err := resolveResourcePath(
+		appRoot,
+		sourceRoot,
+		"PYTHON_SOURCE_ROOT",
+	)
+	if err != nil {
+		return PythonConfig{}, err
 	}
 
 	maxFileSizeBytes, err := loadPositiveBoundedInt64(
@@ -65,7 +73,7 @@ func LoadPython() (PythonConfig, error) {
 
 	return PythonConfig{
 		Executable:          executable,
-		SourceRoot:          sourceRoot,
+		SourceRoot:          resolvedSourceRoot,
 		PDFMaxFileSizeBytes: maxFileSizeBytes,
 		PDFMaxPages:         maxPages,
 	}, nil

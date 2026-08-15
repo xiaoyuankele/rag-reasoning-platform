@@ -8,8 +8,8 @@ import (
 )
 
 const (
-	// 默认从 backend 目录运行服务，因此 ../storage 指向项目根目录的 storage。
-	defaultStorageRoot = "../storage"
+	// 默认存储目录相对于 APP_ROOT，不再相对于进程当前工作目录。
+	defaultStorageRoot = "storage"
 
 	// 默认单个上传文件最大为 200 MiB。
 	defaultStorageMaxFileSizeBytes int64 = 200 * 1024 * 1024
@@ -22,17 +22,19 @@ type StorageConfig struct {
 }
 
 // LoadStorage 从操作系统环境变量中读取并校验文件存储配置。
-func LoadStorage() (StorageConfig, error) {
-	rootDir := os.Getenv("STORAGE_ROOT")
-	if rootDir == "" {
+func LoadStorage(appRoot string) (StorageConfig, error) {
+	rootDir, configured := os.LookupEnv("STORAGE_ROOT")
+	if !configured || rootDir == "" {
 		rootDir = defaultStorageRoot
 	}
 
-	rootDir = strings.TrimSpace(rootDir)
-	if rootDir == "" {
-		return StorageConfig{}, fmt.Errorf(
-			"STORAGE_ROOT must not be blank",
-		)
+	resolvedRootDir, err := resolveResourcePath(
+		appRoot,
+		rootDir,
+		"STORAGE_ROOT",
+	)
+	if err != nil {
+		return StorageConfig{}, err
 	}
 
 	maxFileSizeValue := os.Getenv(
@@ -66,7 +68,7 @@ func LoadStorage() (StorageConfig, error) {
 	}
 
 	return StorageConfig{
-		RootDir:          rootDir,
+		RootDir:          resolvedRootDir,
 		MaxFileSizeBytes: maxFileSizeBytes,
 	}, nil
 }

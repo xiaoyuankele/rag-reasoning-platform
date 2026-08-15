@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -37,17 +37,26 @@ const (
 
 // main 调用 run，并统一处理应用程序最终返回的错误。
 func main() {
+	// JSONHandler 让本地文件、容器平台和日志系统都能按字段检索日志。
+	// Logger 在组合根创建后显式注入，不让业务层依赖全局日志变量。
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx); err != nil {
-		log.Fatalf("application stopped: %v", err)
+	if err := run(ctx, logger); err != nil {
+		logger.Error(
+			"Application stopped",
+			"event", "application_stopped",
+			"error", err,
+		)
+		os.Exit(1)
 	}
 }
 
 // run 是应用生命周期的编排入口：按顺序完成配置加载、基础设施初始化、
 // 启动恢复、后台 Worker 启动、HTTP 服务运行与优雅关闭。
-func run(ctx context.Context) error {
+func run(ctx context.Context, logger *slog.Logger) error {
 	appConfig, err := config.Load()
 	if err != nil {
 		return fmt.Errorf(
@@ -64,7 +73,15 @@ func run(ctx context.Context) error {
 		)
 	}
 
-	storageConfig, err := config.LoadStorage()
+	runtimePathsConfig, err := config.LoadRuntimePaths()
+	if err != nil {
+		return fmt.Errorf(
+			"load runtime paths configuration: %w",
+			err,
+		)
+	}
+
+	storageConfig, err := config.LoadStorage(runtimePathsConfig.AppRoot)
 	if err != nil {
 		return fmt.Errorf(
 			"load storage configuration: %w",
@@ -77,7 +94,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("load worker configuration: %w", err)
 	}
 
-	pythonConfig, err := config.LoadPython()
+	pythonConfig, err := config.LoadPython(runtimePathsConfig.AppRoot)
 	if err != nil {
 		return fmt.Errorf("load Python processor configuration: %w", err)
 	}
@@ -148,9 +165,10 @@ func run(ctx context.Context) error {
 	}
 
 	if recoveredJobCount > 0 {
-		log.Printf(
-			"recovered %d interrupted processing jobs",
-			recoveredJobCount,
+		logger.Info(
+			"Recovered interrupted processing jobs",
+			"event", "processing_jobs_recovered",
+			"job_count", recoveredJobCount,
 		)
 	}
 
@@ -171,9 +189,10 @@ func run(ctx context.Context) error {
 		)
 	}
 	if embeddingRecoveredJobCount > 0 {
-		log.Printf(
-			"requeued %d interrupted embedding jobs",
-			embeddingRecoveredJobCount,
+		logger.Info(
+			"Requeued interrupted embedding jobs",
+			"event", "embedding_jobs_requeued",
+			"job_count", embeddingRecoveredJobCount,
 		)
 	}
 
@@ -241,7 +260,11 @@ func run(ctx context.Context) error {
 		workerConfig.ProcessingTimeout,
 	)
 	documentWorkerErrorReporter := func(err error) {
-		log.Printf("document worker error: %v", err)
+		logger.Error(
+			"Document worker iteration failed",
+			"event", "document_worker_error",
+			"error", err,
+		)
 	}
 	documentWorkerLoop, err := documentapplication.NewWorkerLoop(
 		documentWorker,
@@ -332,7 +355,11 @@ func run(ctx context.Context) error {
 			embeddingWorker,
 			embeddingConfig.PollInterval,
 			func(err error) {
-				log.Printf("embedding worker error: %v", err)
+				logger.Error(
+					"Embedding worker iteration failed",
+					"event", "embedding_worker_error",
+					"error", err,
+				)
 			},
 		)
 		if err != nil {
@@ -368,7 +395,7 @@ func run(ctx context.Context) error {
 	}()
 
 	// Handler 负责把 HTTP 请求转换成应用服务调用。
-	documentHandler := api.NewDocumentHandler(documentService)
+	documentHandler := api.NewDocumentHandler(documentService, logger)
 	documentUploadHandler := api.NewDocumentUploadHandler(documentUploadService, storageConfig.MaxFileSizeBytes)
 	documentListHandler := api.NewDocumentListHandler(documentListService)
 	documentChunkHandler := api.NewDocumentChunkHandler(
@@ -381,6 +408,7 @@ func run(ctx context.Context) error {
 	)
 	processingJobHandler := api.NewProcessingJobHandler(
 		processingJobService,
+		logger,
 	)
 	documentEmbeddingHandler := api.NewDocumentEmbeddingHandler(
 		embeddingQueueService,
@@ -399,7 +427,7 @@ func run(ctx context.Context) error {
 		answerHandler = api.NewAnswerHandler(answerService)
 	}
 
-	router := api.NewRouter()
+	router := api.NewRouter(logger)
 	documentHandler.RegisterRoutes(router)
 	documentUploadHandler.RegisterRoutes(router)
 	documentListHandler.RegisterRoutes(router)

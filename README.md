@@ -137,7 +137,7 @@ rag_reasoning_platform_individual/
 | P2 | 已完成 | 异步任务、Worker、Markdown/TXT、异常恢复、Go/Python 适配器和普通数字 PDF 纵向链路均已通过自动化及真实中英文文献验收 |
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
 | P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
-| P5 | 进行中 | 面向个人版完成运行路径、配置、日志、部署、备份、可观测性和性能/成本基线，不包含用户与租户系统 |
+| P5 | 进行中 | P5.1 运行路径、P5.2.1 请求 ID/JSON 访问日志和 P5.2.2 第一版安全错误响应/内部诊断链路已完成；后续继续任务日志、配置、部署、备份和性能/成本基线，不包含用户与租户系统 |
 | P6 | 未开始 | 用户、工作区、成员权限和全链路数据隔离尚未设计或实现；当前服务不能作为公开多人 SaaS 直接部署 |
 
 前端当前处于 `F0` 联调收尾：工程分层、统一 API Client、健康检查、测试与构建已经完成，下一步先完成
@@ -276,10 +276,11 @@ Go 后端当前支持以下环境变量：
 | `DB_USER` | `rag_user` | 数据库用户 |
 | `DB_PASSWORD` | 无 | 本机私有密码，必须在 `.env` 中设置 |
 | `DB_SSLMODE` | `disable` | 本地开发时的 PostgreSQL SSL 模式 |
-| `STORAGE_ROOT` | `../storage` | 从 `backend` 目录运行时使用的本地文档存储根目录 |
+| `APP_ROOT` | 开发环境自动发现 | 应用运行时资源的共同根目录；显式配置时必须是已经存在的绝对目录 |
+| `STORAGE_ROOT` | `storage` | 本地文档存储根目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `STORAGE_MAX_FILE_SIZE_BYTES` | `209715200` | 单个上传文件允许的最大字节数，即 200 MiB |
 | `PYTHON_EXECUTABLE` | `python` | Go 启动复杂文档处理子进程时使用的 Python 可执行程序 |
-| `PYTHON_SOURCE_ROOT` | `../ai/src` | 包含 `rag_ai` 包的 Python 源码目录，以 `backend` 为当前工作目录 |
+| `PYTHON_SOURCE_ROOT` | `ai/src` | 包含 `rag_ai` 包的 Python 源码目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `PYTHON_PDF_MAX_FILE_SIZE_BYTES` | `52428800` | PDF 解析文件上限，即 50 MiB；独立于上传上限 |
 | `PYTHON_PDF_MAX_PAGES` | `500` | 单份 PDF 允许解析的最大页数 |
 | `EMBEDDING_WORKER_ENABLED` | `false` | 是否启动远程 Embedding Worker；默认关闭以避免意外费用 |
@@ -309,6 +310,12 @@ Go 后端当前支持以下环境变量：
 `.env.example` 是可以提交到 Git 的配置模板，不得包含密码或真实密钥。`.env` 用于保存本机配置和密钥，已被 Git 忽略。
 
 Docker Compose 会自动读取项目根目录的 `.env`。当前 Go 程序通过 `os.Getenv` 读取操作系统环境变量，不会自动加载 `.env` 文件。
+
+开发环境没有设置 `APP_ROOT` 时，后端会从当前工作目录向上查找同时包含
+`backend/go.mod` 与 `ai/src/rag_ai` 的项目根目录，因此从项目根目录或 `backend`
+目录启动都能得到相同的存储和 Python 路径。部署产物不一定带有源码目录标志，必须显式设置
+绝对路径形式的 `APP_ROOT`。详细规则见
+[运行路径与配置契约](docs/backend/development/runtime-path-configuration.md)。
 
 在 PowerShell 中可以这样临时设置 Go 服务端口：
 

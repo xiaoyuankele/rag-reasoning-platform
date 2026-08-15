@@ -1,12 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,10 +36,23 @@ func (f *fakeProcessingJobQueryService) GetByID(
 func newTestProcessingJobRouter(
 	service processingJobQueryService,
 ) *gin.Engine {
+	return newTestProcessingJobRouterWithLogger(
+		service,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+}
+
+// newTestProcessingJobRouterWithLogger 允许测试注入可观察的日志输出，
+// 用于验证 500 错误的内部诊断信息不会泄漏到 HTTP 响应中。
+func newTestProcessingJobRouterWithLogger(
+	service processingJobQueryService,
+	logger *slog.Logger,
+) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
-	handler := NewProcessingJobHandler(service)
+	router.Use(RequestIDMiddleware())
+	handler := NewProcessingJobHandler(service, logger)
 	handler.RegisterRoutes(router)
 
 	return router
@@ -65,11 +82,12 @@ func TestProcessingJobHandlerRejectsInvalidID(t *testing.T) {
 
 			router.ServeHTTP(response, request)
 
-			assertErrorResponse(
+			assertCodedErrorResponse(
 				t,
 				response,
 				http.StatusBadRequest,
 				"processing job ID must be a positive integer",
+				errorCodeInvalidProcessingJobID,
 			)
 			if service.getByIDCalls != 0 {
 				t.Fatalf(
@@ -83,28 +101,36 @@ func TestProcessingJobHandlerRejectsInvalidID(t *testing.T) {
 
 func TestProcessingJobHandlerMapsServiceErrors(t *testing.T) {
 	testCases := []struct {
-		name       string
-		serviceErr error
-		statusCode int
-		message    string
+		name            string
+		serviceErr      error
+		statusCode      int
+		message         string
+		errorCode       string
+		wantInternalLog bool
+		diagnosticCode  string
 	}{
 		{
 			name:       "invalid ID",
 			serviceErr: applicationdocument.ErrInvalidProcessingJobID,
 			statusCode: http.StatusBadRequest,
 			message:    "processing job ID must be a positive integer",
+			errorCode:  errorCodeInvalidProcessingJobID,
 		},
 		{
 			name:       "job not found",
 			serviceErr: documentdomain.ErrProcessingJobNotFound,
 			statusCode: http.StatusNotFound,
 			message:    "processing job not found",
+			errorCode:  errorCodeProcessingJobNotFound,
 		},
 		{
-			name:       "unknown internal error",
-			serviceErr: errors.New("database unavailable"),
-			statusCode: http.StatusInternalServerError,
-			message:    "internal server error",
+			name:            "unknown internal error",
+			serviceErr:      errors.New("database unavailable"),
+			statusCode:      http.StatusInternalServerError,
+			message:         "internal server error",
+			errorCode:       errorCodeInternal,
+			wantInternalLog: true,
+			diagnosticCode:  "processing_job_get_failed",
 		},
 	}
 
@@ -119,26 +145,65 @@ func TestProcessingJobHandlerMapsServiceErrors(t *testing.T) {
 						testCase.serviceErr
 				},
 			}
-			router := newTestProcessingJobRouter(service)
+			var logOutput bytes.Buffer
+			logger := slog.New(slog.NewJSONHandler(&logOutput, nil))
+			router := newTestProcessingJobRouterWithLogger(service, logger)
 			request := httptest.NewRequest(
 				http.MethodGet,
 				"/processing-jobs/17",
 				nil,
 			)
+			request.Header.Set(RequestIDHeader, "processing-job-error-17")
 			response := httptest.NewRecorder()
 
 			router.ServeHTTP(response, request)
 
-			assertErrorResponse(
+			assertCodedErrorResponse(
 				t,
 				response,
 				testCase.statusCode,
 				testCase.message,
+				testCase.errorCode,
 			)
 			if service.getByIDCalls != 1 {
 				t.Fatalf(
 					"GetByID() calls = %d, want 1",
 					service.getByIDCalls,
+				)
+			}
+
+			if !testCase.wantInternalLog {
+				if logOutput.Len() != 0 {
+					t.Fatalf(
+						"expected no internal error log, got %s",
+						logOutput.String(),
+					)
+				}
+				return
+			}
+
+			var logEntry map[string]any
+			if err := json.Unmarshal(
+				bytes.TrimSpace(logOutput.Bytes()),
+				&logEntry,
+			); err != nil {
+				t.Fatalf(
+					"decode internal error log: %v; output = %q",
+					err,
+					logOutput.String(),
+				)
+			}
+			assertLogField(t, logEntry, "event", "http_request_failed")
+			assertLogField(t, logEntry, "request_id", "processing-job-error-17")
+			assertLogField(t, logEntry, "public_error_code", errorCodeInternal)
+			assertLogField(t, logEntry, "diagnostic_code", testCase.diagnosticCode)
+			if !strings.Contains(
+				logEntry["error"].(string),
+				testCase.serviceErr.Error(),
+			) {
+				t.Fatalf(
+					"internal log error = %#v, want original error",
+					logEntry["error"],
 				)
 			}
 		})
@@ -217,6 +282,35 @@ func TestProcessingJobHandlerReturnsJob(t *testing.T) {
 		t.Fatalf(
 			"GetByID() calls = %d, want 1",
 			service.getByIDCalls,
+		)
+	}
+}
+
+// assertCodedErrorResponse 验证新错误契约同时包含人类可读消息和稳定错误码。
+func assertCodedErrorResponse(
+	t *testing.T,
+	response *httptest.ResponseRecorder,
+	expectedStatus int,
+	expectedMessage string,
+	expectedCode string,
+) {
+	t.Helper()
+
+	if response.Code != expectedStatus {
+		t.Fatalf(
+			"status = %d, want %d",
+			response.Code,
+			expectedStatus,
+		)
+	}
+
+	expectedBody := `{"error":"` + expectedMessage +
+		`","code":"` + expectedCode + `"}`
+	if response.Body.String() != expectedBody {
+		t.Fatalf(
+			"body = %s, want %s",
+			response.Body.String(),
+			expectedBody,
 		)
 	}
 }
