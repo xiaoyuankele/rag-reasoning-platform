@@ -174,7 +174,8 @@ P6 是跨前端、后端和数据库的独立阶段。它不把团队租户复�
 #### P6.2 文档归属与基础隔离
 
 > 当前进度：已建立 `domain/access.OwnerScope`、`Document.OwnerUserID`，并通过 `000011` 增加暂时可空的
-> `documents.owner_user_id`、用户外键和所有者列表索引；下一步让 Application 与 Repository 显式传递并强制执行 Scope。
+> `documents.owner_user_id`、用户外键和所有者列表索引；ScopedDocumentRepository 已在查询、列表和删除 SQL
+> 中强制执行 Scope 并通过双用户真实数据库测试，下一步接入 Application 与 HTTP。
 
 - 文档增加 `owner_user_id`；
 - 上传、列表、详情、删除、解析、chunks 和两类任务查询全部按 owner 限定；

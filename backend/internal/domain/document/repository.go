@@ -3,6 +3,8 @@ package document
 import (
 	"context"
 	"errors"
+
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 )
 
 // ErrNotFound 表示指定文档不存在。
@@ -64,4 +66,49 @@ type Repository interface {
 	Finder
 	Lister
 	Deleter
+}
+
+// ScopedCreator 定义必须在可信所有者范围内创建文档的仓储能力。
+type ScopedCreator interface {
+	Create(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		input CreateInput,
+	) (Document, error)
+}
+
+// ScopedFinder 定义只能在可信所有者范围内按 ID 查询文档的仓储能力。
+// 文档不存在和属于其他用户都必须返回 ErrNotFound。
+type ScopedFinder interface {
+	GetByID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		id int64,
+	) (Document, error)
+}
+
+// ScopedLister 定义只能列出可信所有者文档的仓储能力。
+type ScopedLister interface {
+	List(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		options ListOptions,
+	) (ListResult, error)
+}
+
+// ScopedDeleter 定义只能删除可信所有者文档的仓储能力。
+type ScopedDeleter interface {
+	Delete(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		id int64,
+	) error
+}
+
+// ScopedRepository 组合面向已认证个人用户的文档持久化能力。
+type ScopedRepository interface {
+	ScopedCreator
+	ScopedFinder
+	ScopedLister
+	ScopedDeleter
 }
