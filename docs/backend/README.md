@@ -17,6 +17,7 @@
 - [带来源问答路线](architecture/rag-answer-roadmap.md)
 - [多能力检索编排路线](architecture/search-orchestration-roadmap.md)
 - [概念词典与多语言检索设想](architecture/concept-retrieval-roadmap.md)
+- [P6 个人用户域后端交接](architecture/personal-user-backend-handoff.md)
 - [文档文本块浏览接口](architecture/document-chunk-browsing.md)
 - [运行路径与配置契约](development/runtime-path-configuration.md)
 - [日志与请求追踪规范](development/logging-observability.md)
@@ -37,8 +38,12 @@
 问答/拒答样本的语言和引用编号全部通过，复杂表格解释与最佳证据选择仍作为已知质量边界保留。
 
 当前后端已经完成 P5 个人版工程化基线，包括运行路径、配置、日志、部署、备份、恢复和分级回归。
-P5 不包含用户认证和多租户；未来 P6 的工作区、权限与数据隔离计划见
-[产品演进路线](../shared/architecture/product-evolution-roadmap.md)。
+P5 不包含用户认证。P6 已完成个人账户、Session、文档归属和全链路数据隔离的设计交接，B1 用户、Session、
+验证码挑战的数据模型和迁移已经实现；密码与验证码基础设施、认证接口和数据隔离仍待实现，因此当前服务仍不能
+开放给互不信任的多人；
+团队工作区和多租户留到 P7。范围见
+[P6 个人用户域与私有数据闭环](../shared/architecture/personal-user-domain.md)，后端实施顺序见
+[P6 个人用户域后端交接](architecture/personal-user-backend-handoff.md)。
 
 P5.1 已建立统一 `APP_ROOT` 路径基准：本地开发可从项目根目录或 `backend` 目录启动，
 部署环境则必须显式提供绝对应用根目录。文件存储与 Python 源码的相对路径不再依赖偶然的当前工作目录。

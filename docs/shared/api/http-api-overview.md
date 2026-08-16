@@ -1,6 +1,6 @@
 # HTTP API 总览
 
-> 更新时间：2026-08-15。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
+> 更新时间：2026-08-16。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
 > Handler 测试和后续 OpenAPI 文件为最终校验依据。
 
 ## 1. 当前访问边界
@@ -9,8 +9,9 @@
 服务端口的调用者都能操作同一组文档、任务、chunks、向量和问答能力。因此开发环境应只监听受信地址，
 不能把当前服务直接暴露为公开互联网多人服务。
 
-未来 P6 引入认证和工作区后，调用者身份必须来自后端验证的认证上下文，不能依赖前端传入 `user_id`；
-文档、任务、检索和问答的数据范围也必须由后端工作区权限约束。
+P6 个人用户域已经完成设计，B1 身份数据模型和迁移已经编码，但认证 HTTP 路由与用户隔离尚未实现。后续调用者
+身份必须来自后端验证的 Session，不能依赖前端传入 `user_id`；文档、任务、检索和问答的数据范围必须由后端
+`owner_user_id` 约束。团队工作区留到 P7。
 
 ## 2. 当前接口
 
@@ -30,14 +31,42 @@
 | `POST` | `/semantic-search` | JSON：`query`、可选 `document_id`、`top_k` | `200` | 语义检索 | 用户功能，受功能开关控制 |
 | `POST` | `/answers` | JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200` | 基于来源生成回答 | 用户功能，受功能开关控制 |
 
-## 3. 参数来源
+## 3. P6 计划认证接口（尚未实现）
+
+以下契约已经冻结用于前后端开发交接，但在对应 Handler 和测试合入前不能当作当前可调用接口：
+
+| 方法 | 路径 | 主要输入 | 成功状态 | Cookie 行为 |
+| --- | --- | --- | --- | --- |
+| `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 不创建 Session |
+| `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建 Session 并设置 `rag_session` |
+| `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 创建 Session 并设置 `rag_session` |
+| `POST` | `/auth/logout` | 当前 Session Cookie | `204` | 撤销 Session 并清除 Cookie |
+| `GET` | `/users/me` | 当前 Session Cookie | `200` | 不修改 Cookie |
+
+P6 路由保护边界：
+
+- `GET /health`、验证码发送、注册和登录无需 Session，但必须受 Origin 与限流保护；
+- `POST /auth/logout` 可选读取并撤销 Session，始终清除 Cookie、返回 `204`，但仍须通过同源 Origin 校验；
+- `GET /users/me` 和第 2 节全部业务接口受保护；
+- 业务请求 DTO 不增加客户端可填写的 `user_id`；
+- Session 缺失、过期或撤销统一返回 `401`、`authentication_required`；
+- 资源不存在或不属于当前用户统一返回 `404`，避免 ID 枚举；
+- 登录失败统一返回 `401`、`invalid_credentials`，不区分邮箱/手机号不存在、密码错误或账户不可登录；
+- Cookie 使用 `HttpOnly`、`SameSite=Lax`、`Path=/`，生产环境启用 `Secure`；
+- 改变状态的 Cookie 请求必须通过同源 `Origin` 校验。
+
+完整响应 DTO、错误码和主线图见
+[P6 个人用户域与私有数据闭环](../architecture/personal-user-domain.md)；后端实施细节见
+[P6 个人用户域后端交接](../../backend/architecture/personal-user-backend-handoff.md)。
+
+## 4. 参数来源
 
 - `:id` 是路径参数，由 Gin 的 `Context.Param` 读取；
 - `GET` 检索和分页字段是查询参数，由 `Context.Query` 或 `Context.GetQuery` 读取；
 - 上传文件来自 `multipart/form-data`；
 - 语义检索和回答请求来自 JSON 请求体，由 `Context.ShouldBindJSON` 绑定。
 
-## 4. 通用响应约定
+## 5. 通用响应约定
 
 - 所有经过后端路由的响应都包含 `X-Request-ID`；前端可以传入由字母、数字、点、下划线或连字符组成、
   最长 128 字符的同名请求头，也可以省略并由后端生成；
@@ -54,7 +83,7 @@
   `{"error":"document embeddings are not ready"}`。这两种情况都不会调用远程模型。
 - 只有确认向量完整后仍没有检索命中，才返回正常 `200` 空结果（问答接口返回安全降级答案）。
 
-## 5. 变更流程
+## 6. 变更流程
 
 当请求字段、响应 DTO、状态码或错误语义变化时：
 

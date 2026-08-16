@@ -16,7 +16,8 @@ docs/
 ## 阅读入口
 
 - 前后端共同接口：[HTTP API 总览](shared/api/http-api-overview.md)
-- 个人版、前端与多用户演进：[产品演进路线](shared/architecture/product-evolution-roadmap.md)
+- 个人用户主线与隔离契约：[P6 个人用户域与私有数据闭环](shared/architecture/personal-user-domain.md)
+- 工程化、个人用户与团队演进：[产品演进路线](shared/architecture/product-evolution-roadmap.md)
 - 后端与 AI 架构：[后端正式文档](backend/README.md)
 - 前端开发准备：[前端正式文档](frontend/README.md)
 

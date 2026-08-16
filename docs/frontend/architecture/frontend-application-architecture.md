@@ -1,6 +1,7 @@
 # 前端应用架构
 
-> 确认日期：2026-08-14。F0 工程骨架与真实健康检查联调已经完成，本文记录已经共同确认并实施的架构方向；
+> 确认日期：2026-08-14，P6 身份扩展确认日期：2026-08-16。F0 工程骨架与真实健康检查联调已经完成，
+> 本文记录已经共同确认的架构方向；
 > 未安装或未验证的能力会明确标记，不把计划描述成现状。
 
 ## 1. 产品与架构目标
@@ -51,11 +52,13 @@ web/src/
 ├─ pages/                     # 路由页面，只组合功能模块
 ├─ features/
 │  ├─ system-health/           # 健康检查、连接状态与重试
+│  ├─ auth/                    # P6 注册、登录、退出和登录态恢复（计划中）
 │  ├─ documents/              # 上传、列表、详情、处理、删除
 │  ├─ search/                 # 关键词和语义检索
 │  └─ answer/                 # 问答、回答语言、引用来源
 ├─ entities/
 │  ├─ document/               # 文档及展示模型
+│  ├─ user/                   # P6 当前用户公开模型（计划中）
 │  ├─ processing-job/         # 解析任务与状态
 │  └─ answer-source/          # 回答来源与页码
 └─ shared/
@@ -84,7 +87,7 @@ app → pages → features → entities → shared
 |---|---|---|
 | 单个组件 | 组件本地状态 | 弹窗开关、输入框、按钮 loading |
 | 单个功能流程 | feature composable/use case | 上传、任务轮询、单次搜索 |
-| 跨页面共享 | Pinia | 当前文档范围、后端能力状态、用户界面偏好 |
+| 跨页面共享 | Pinia | P6 当前认证用户、当前文档范围、后端能力状态、用户界面偏好 |
 | 可恢复 URL 状态 | Vue Router query/params | 搜索词、页码、文档 ID |
 
 单次搜索结果、临时上传进度和局部错误默认不进入全局 Store。
@@ -105,6 +108,10 @@ app → pages → features → entities → shared
 当前开发环境约定：浏览器请求以 `/api` 为基础路径，Vite 开发代理将其转发到默认
 `http://localhost:8080` 并移除 `/api` 前缀。生产环境仍需由部署层提供同源反向代理，
 或通过 `VITE_API_BASE_URL` 配置实际 API 地址。
+
+P6 使用服务端 Session Cookie。前端不读取 Cookie 内容、不保存密码或 Session Token，也不向业务 DTO
+附加 `user_id`。应用启动先调用 `/users/me` 恢复身份；公共登录页和受保护应用外壳根据三态认证状态
+`unknown/authenticated/anonymous` 决定渲染，统一 API 错误层依据稳定 401 code 处理会话失效。
 
 ## 6. 页面与视觉结构
 

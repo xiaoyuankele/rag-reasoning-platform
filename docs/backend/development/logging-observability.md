@@ -227,3 +227,26 @@ P5.3.3 增加三个进程级事件：`application_started`、`application_shutdo
 1. 按实际联调需要把统一错误响应逐步迁移到其余 Handler；
 2. 在明确授权后执行第一批新口径真实成本基线；
 3. 在 P5.4 固化默认零远程费用回归命令。
+
+### 8.1 P6 个人用户域日志交接（计划中）
+
+P6 身份接入后，访问日志中可以增加可空的数值 `user_id` 和 `session_id`。Access Log Middleware 位于
+Auth Middleware 外层时，应在请求返回阶段读取后者写入 Gin Context 的 Actor；未认证请求保持字段缺失，
+不能使用 `0` 冒充用户。
+
+认证事件只记录稳定事件、结果和原因分类：
+
+```text
+auth_registration_succeeded
+auth_registration_failed
+auth_login_succeeded
+auth_login_failed
+auth_logout_completed
+```
+
+成功事件可以记录数值 `user_id`、`session_id`；失败事件不能记录明文邮箱、密码、Cookie、原始 Session Token
+或密码哈希。若未来确实需要关联重复攻击，应单独评审不可逆标识和保留周期，不能直接把用户输入写进日志。
+
+文档、解析、Embedding 和 Generation 事件可以增加 `owner_user_id`，但不得记录用户邮箱或显示名。当前
+`request_id` 仍然只是追踪标识，不得被当作 Session、CSRF Token 或幂等凭证。详细身份边界见
+[P6 个人用户域后端交接](../architecture/personal-user-backend-handoff.md)。

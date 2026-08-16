@@ -1,7 +1,8 @@
 # RAG Reasoning Platform Web
 
 本目录是轻量文档知识中台的前端工程。F0 工程骨架与 F1 API 基础已经完成，
-`/search` 路由已开放基础关键词检索；文档管理、语义检索和问答仍按后续阶段推进。
+`/search` 路由已开放基础关键词检索；文档管理、语义检索和问答仍按后续阶段推进。P6 个人用户域的
+主线与后端接口已经完成文档交接，但注册、登录和用户隔离尚未进入当前前端代码。
 
 已安装并验证的基础技术：
 
@@ -52,6 +53,7 @@ src/
 - [前端应用架构](../docs/frontend/architecture/frontend-application-architecture.md)
 - [前端阶段路线](../docs/frontend/architecture/frontend-roadmap.md)
 - [HTTP API 总览](../docs/shared/api/http-api-overview.md)
-- [个人版到多用户产品演进路线](../docs/shared/architecture/product-evolution-roadmap.md)
+- [P6 个人用户域与私有数据闭环](../docs/shared/architecture/personal-user-domain.md)
+- [工程化、个人用户与团队演进路线](../docs/shared/architecture/product-evolution-roadmap.md)
 
 Git 忽略目录中的 `chatgpt/前端/` 保存本地进度、复盘与问题调查。
