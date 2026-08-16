@@ -6,36 +6,39 @@ import (
 	"testing"
 	"time"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
 
 type fakeDocumentFinder struct {
-	getByIDFunc  func(context.Context, int64) (documentdomain.Document, error)
+	getByIDFunc  func(context.Context, accessdomain.OwnerScope, int64) (documentdomain.Document, error)
 	getByIDCalls int
 }
 
 func (f *fakeDocumentFinder) GetByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	id int64,
 ) (documentdomain.Document, error) {
 	f.getByIDCalls++
-	return f.getByIDFunc(ctx, id)
+	return f.getByIDFunc(ctx, scope, id)
 }
 
 type fakeJobCreator struct {
-	createFunc  func(context.Context, int64, string, int) (embeddingdomain.Job, error)
+	createFunc  func(context.Context, accessdomain.OwnerScope, int64, string, int) (embeddingdomain.Job, error)
 	createCalls int
 }
 
 func (f *fakeJobCreator) CreateEmbeddingJob(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	documentID int64,
 	modelName string,
 	dimensions int,
 ) (embeddingdomain.Job, error) {
 	f.createCalls++
-	return f.createFunc(ctx, documentID, modelName, dimensions)
+	return f.createFunc(ctx, scope, documentID, modelName, dimensions)
 }
 
 func TestQueueServiceRejectsInvalidDocumentID(t *testing.T) {
@@ -43,7 +46,7 @@ func TestQueueServiceRejectsInvalidDocumentID(t *testing.T) {
 	jobs := failOnJobCreation(t)
 	service := NewQueueService(documents, jobs, "test-model", 8)
 
-	_, err := service.Queue(context.Background(), 0)
+	_, err := service.Queue(context.Background(), testEmbeddingOwnerScope(t), 0)
 
 	if !errors.Is(err, ErrInvalidDocumentID) {
 		t.Fatalf("Queue() error = %v, want ErrInvalidDocumentID", err)
@@ -55,6 +58,7 @@ func TestQueueServicePreservesDocumentNotFound(t *testing.T) {
 	documents := &fakeDocumentFinder{
 		getByIDFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{}, documentdomain.ErrNotFound
@@ -63,7 +67,7 @@ func TestQueueServicePreservesDocumentNotFound(t *testing.T) {
 	jobs := failOnJobCreation(t)
 	service := NewQueueService(documents, jobs, "test-model", 8)
 
-	_, err := service.Queue(context.Background(), 99)
+	_, err := service.Queue(context.Background(), testEmbeddingOwnerScope(t), 99)
 
 	if !errors.Is(err, documentdomain.ErrNotFound) {
 		t.Fatalf("Queue() error = %v, want ErrNotFound", err)
@@ -83,6 +87,7 @@ func TestQueueServiceRequiresReadyDocument(t *testing.T) {
 			documents := &fakeDocumentFinder{
 				getByIDFunc: func(
 					_ context.Context,
+					_ accessdomain.OwnerScope,
 					id int64,
 				) (documentdomain.Document, error) {
 					return documentdomain.Document{
@@ -94,7 +99,7 @@ func TestQueueServiceRequiresReadyDocument(t *testing.T) {
 			jobs := failOnJobCreation(t)
 			service := NewQueueService(documents, jobs, "test-model", 8)
 
-			_, err := service.Queue(context.Background(), 7)
+			_, err := service.Queue(context.Background(), testEmbeddingOwnerScope(t), 7)
 
 			if !errors.Is(err, ErrDocumentNotReady) {
 				t.Fatalf("Queue() error = %v, want ErrDocumentNotReady", err)
@@ -124,8 +129,12 @@ func TestQueueServiceCreatesConfiguredJob(t *testing.T) {
 	documents := &fakeDocumentFinder{
 		getByIDFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			id int64,
 		) (documentdomain.Document, error) {
+			if scope.OwnerUserID() != testEmbeddingOwnerUserID {
+				t.Fatalf("GetByID() scope owner = %d, want %d", scope.OwnerUserID(), testEmbeddingOwnerUserID)
+			}
 			return documentdomain.Document{
 				ID:     id,
 				Status: documentdomain.StatusReady,
@@ -135,10 +144,14 @@ func TestQueueServiceCreatesConfiguredJob(t *testing.T) {
 	jobs := &fakeJobCreator{
 		createFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			actualDocumentID int64,
 			actualModelName string,
 			actualDimensions int,
 		) (embeddingdomain.Job, error) {
+			if scope.OwnerUserID() != testEmbeddingOwnerUserID {
+				t.Fatalf("CreateEmbeddingJob() scope owner = %d, want %d", scope.OwnerUserID(), testEmbeddingOwnerUserID)
+			}
 			if actualDocumentID != documentID ||
 				actualModelName != modelName ||
 				actualDimensions != dimensions {
@@ -157,7 +170,7 @@ func TestQueueServiceCreatesConfiguredJob(t *testing.T) {
 	}
 	service := NewQueueService(documents, jobs, modelName, dimensions)
 
-	actualJob, err := service.Queue(context.Background(), documentID)
+	actualJob, err := service.Queue(context.Background(), testEmbeddingOwnerScope(t), documentID)
 
 	if err != nil {
 		t.Fatalf("Queue() error = %v, want nil", err)
@@ -172,6 +185,7 @@ func TestQueueServicePreservesActiveJobConflict(t *testing.T) {
 	documents := &fakeDocumentFinder{
 		getByIDFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			id int64,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{
@@ -183,6 +197,7 @@ func TestQueueServicePreservesActiveJobConflict(t *testing.T) {
 	jobs := &fakeJobCreator{
 		createFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 			string,
 			int,
@@ -192,7 +207,7 @@ func TestQueueServicePreservesActiveJobConflict(t *testing.T) {
 	}
 	service := NewQueueService(documents, jobs, "test-model", 8)
 
-	_, err := service.Queue(context.Background(), 7)
+	_, err := service.Queue(context.Background(), testEmbeddingOwnerScope(t), 7)
 
 	if !errors.Is(err, embeddingdomain.ErrActiveJobExists) {
 		t.Fatalf("Queue() error = %v, want ErrActiveJobExists", err)
@@ -205,6 +220,7 @@ func failOnDocumentLookup(t *testing.T) *fakeDocumentFinder {
 	return &fakeDocumentFinder{
 		getByIDFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (documentdomain.Document, error) {
 			t.Fatal("GetByID() must not be called")
@@ -218,6 +234,7 @@ func failOnJobCreation(t *testing.T) *fakeJobCreator {
 	return &fakeJobCreator{
 		createFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 			string,
 			int,

@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
@@ -18,6 +19,7 @@ import (
 type embeddingQueueService interface {
 	Queue(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		documentID int64,
 	) (embeddingdomain.Job, error)
 }
@@ -78,6 +80,12 @@ func newEmbeddingJobResponse(job embeddingdomain.Job) embeddingJobResponse {
 
 // Queue 处理 POST /documents/:id/embeddings。
 func (h *DocumentEmbeddingHandler) Queue(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	documentID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || documentID <= 0 {
 		c.JSON(http.StatusBadRequest, errorResponse{
@@ -86,7 +94,7 @@ func (h *DocumentEmbeddingHandler) Queue(c *gin.Context) {
 		return
 	}
 
-	job, err := h.service.Queue(c.Request.Context(), documentID)
+	job, err := h.service.Queue(c.Request.Context(), scope, documentID)
 	if errors.Is(err, embeddingapplication.ErrInvalidDocumentID) {
 		c.JSON(http.StatusBadRequest, errorResponse{
 			Error: "document ID must be a positive integer",

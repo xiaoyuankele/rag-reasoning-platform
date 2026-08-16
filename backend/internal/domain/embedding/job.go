@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 )
 
 var (
@@ -82,6 +84,28 @@ type JobCreator interface {
 // 还是未来的其他存储实现。
 type JobFinder interface {
 	GetEmbeddingJobByID(ctx context.Context, jobID int64) (Job, error)
+}
+
+// ScopedJobCreator 定义只能为当前所有者的文档创建向量任务的能力。
+// 文档不存在和属于其他用户都必须返回 document.ErrNotFound。
+type ScopedJobCreator interface {
+	CreateEmbeddingJob(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		documentID int64,
+		modelName string,
+		dimensions int,
+	) (Job, error)
+}
+
+// ScopedJobFinder 定义只能查询当前所有者文档所关联向量任务的能力。
+// 任务不存在和属于其他用户都必须返回 ErrJobNotFound。
+type ScopedJobFinder interface {
+	GetEmbeddingJobByID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		jobID int64,
+	) (Job, error)
 }
 
 // JobClaimer 定义 Worker 原子领取下一条到期任务所需的能力。

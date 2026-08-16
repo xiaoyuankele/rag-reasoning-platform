@@ -186,6 +186,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
 	scopedProcessingJobRepository := postgres.NewScopedProcessingJobRepository(databasePool)
 	embeddingJobRepository := postgres.NewEmbeddingJobRepository(databasePool)
+	scopedEmbeddingJobRepository := postgres.NewScopedEmbeddingJobRepository(databasePool)
 	chunkRepository := postgres.NewChunkRepository(databasePool)
 	scopedChunkRepository := postgres.NewScopedChunkRepository(databasePool)
 	verificationChallengeRepository :=
@@ -288,13 +289,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		scopedProcessingJobRepository,
 	)
 	embeddingQueueService := embeddingapplication.NewQueueService(
-		documentRepository,
-		embeddingJobRepository,
+		scopedDocumentRepository,
+		scopedEmbeddingJobRepository,
 		embeddingConfig.ModelName,
 		embeddingConfig.Dimensions,
 	)
 	embeddingJobQueryService := embeddingapplication.NewJobQueryService(
-		embeddingJobRepository,
+		scopedEmbeddingJobRepository,
 	)
 	documentWorker := documentapplication.NewWorker(
 		processingJobRepository,
@@ -585,8 +586,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	router := api.NewRouter(logger)
 	documentSearchHandler.RegisterRoutes(router)
-	documentEmbeddingHandler.RegisterRoutes(router)
-	embeddingJobHandler.RegisterRoutes(router)
 	if semanticSearchHandler != nil {
 		semanticSearchHandler.RegisterRoutes(router)
 	}
@@ -609,6 +608,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentChunkHandler.RegisterRoutes(protectedRoutes)
 	documentProcessingHandler.RegisterRoutes(protectedRoutes)
 	processingJobHandler.RegisterRoutes(protectedRoutes)
+	documentEmbeddingHandler.RegisterRoutes(protectedRoutes)
+	embeddingJobHandler.RegisterRoutes(protectedRoutes)
 
 	users := protectedRoutes.Group("/users")
 	currentUserHandler.RegisterRoutes(users)

@@ -6,28 +6,31 @@ import (
 	"testing"
 	"time"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
 
 // fakeEmbeddingJobFinder 是 JobFinder 的测试实现。
 // 测试通过函数字段安排返回结果，无需连接真实 PostgreSQL。
 type fakeEmbeddingJobFinder struct {
-	getByIDFunc  func(context.Context, int64) (embeddingdomain.Job, error)
+	getByIDFunc  func(context.Context, accessdomain.OwnerScope, int64) (embeddingdomain.Job, error)
 	getByIDCalls int
 }
 
 func (f *fakeEmbeddingJobFinder) GetEmbeddingJobByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	jobID int64,
 ) (embeddingdomain.Job, error) {
 	f.getByIDCalls++
-	return f.getByIDFunc(ctx, jobID)
+	return f.getByIDFunc(ctx, scope, jobID)
 }
 
 func TestJobQueryServiceRejectsInvalidID(t *testing.T) {
 	finder := &fakeEmbeddingJobFinder{
 		getByIDFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (embeddingdomain.Job, error) {
 			t.Fatal("GetEmbeddingJobByID() must not be called")
@@ -36,7 +39,7 @@ func TestJobQueryServiceRejectsInvalidID(t *testing.T) {
 	}
 	service := NewJobQueryService(finder)
 
-	_, err := service.GetByID(context.Background(), 0)
+	_, err := service.GetByID(context.Background(), testEmbeddingOwnerScope(t), 0)
 
 	if !errors.Is(err, ErrInvalidEmbeddingJobID) {
 		t.Fatalf(
@@ -67,8 +70,12 @@ func TestJobQueryServiceReturnsJob(t *testing.T) {
 	finder := &fakeEmbeddingJobFinder{
 		getByIDFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			jobID int64,
 		) (embeddingdomain.Job, error) {
+			if scope.OwnerUserID() != testEmbeddingOwnerUserID {
+				t.Fatalf("GetEmbeddingJobByID() scope owner = %d, want %d", scope.OwnerUserID(), testEmbeddingOwnerUserID)
+			}
 			if jobID != expectedJob.ID {
 				t.Fatalf(
 					"GetEmbeddingJobByID() jobID = %d, want %d",
@@ -83,6 +90,7 @@ func TestJobQueryServiceReturnsJob(t *testing.T) {
 
 	actualJob, err := service.GetByID(
 		context.Background(),
+		testEmbeddingOwnerScope(t),
 		expectedJob.ID,
 	)
 
@@ -108,6 +116,7 @@ func TestJobQueryServicePreservesNotFound(t *testing.T) {
 	finder := &fakeEmbeddingJobFinder{
 		getByIDFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (embeddingdomain.Job, error) {
 			return embeddingdomain.Job{}, embeddingdomain.ErrJobNotFound
@@ -115,7 +124,7 @@ func TestJobQueryServicePreservesNotFound(t *testing.T) {
 	}
 	service := NewJobQueryService(finder)
 
-	_, err := service.GetByID(context.Background(), 999)
+	_, err := service.GetByID(context.Background(), testEmbeddingOwnerScope(t), 999)
 
 	if !errors.Is(err, embeddingdomain.ErrJobNotFound) {
 		t.Fatalf(

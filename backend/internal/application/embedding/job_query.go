@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
 
@@ -13,12 +14,12 @@ var ErrInvalidEmbeddingJobID = errors.New("embedding job ID must be positive")
 
 // JobQueryService 编排按照 ID 查询向量任务的应用用例。
 type JobQueryService struct {
-	jobs embeddingdomain.JobFinder
+	jobs embeddingdomain.ScopedJobFinder
 }
 
 // NewJobQueryService 创建向量任务查询服务。
 func NewJobQueryService(
-	jobs embeddingdomain.JobFinder,
+	jobs embeddingdomain.ScopedJobFinder,
 ) *JobQueryService {
 	return &JobQueryService{jobs: jobs}
 }
@@ -26,13 +27,14 @@ func NewJobQueryService(
 // GetByID 校验业务参数，再通过领域端口查询向量任务。
 func (s *JobQueryService) GetByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	jobID int64,
 ) (embeddingdomain.Job, error) {
 	if jobID <= 0 {
 		return embeddingdomain.Job{}, ErrInvalidEmbeddingJobID
 	}
 
-	foundJob, err := s.jobs.GetEmbeddingJobByID(ctx, jobID)
+	foundJob, err := s.jobs.GetEmbeddingJobByID(ctx, scope, jobID)
 	if err != nil {
 		return embeddingdomain.Job{}, fmt.Errorf(
 			"get embedding job by ID: %w",

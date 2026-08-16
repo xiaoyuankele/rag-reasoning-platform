@@ -13,22 +13,24 @@ import (
 	"github.com/gin-gonic/gin"
 
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
 
 // fakeEmbeddingJobQueryService 模拟 Application 查询服务。
 // Handler 测试只验证 HTTP 边界，不连接真实数据库。
 type fakeEmbeddingJobQueryService struct {
-	getByIDFunc  func(context.Context, int64) (embeddingdomain.Job, error)
+	getByIDFunc  func(context.Context, accessdomain.OwnerScope, int64) (embeddingdomain.Job, error)
 	getByIDCalls int
 }
 
 func (f *fakeEmbeddingJobQueryService) GetByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	jobID int64,
 ) (embeddingdomain.Job, error) {
 	f.getByIDCalls++
-	return f.getByIDFunc(ctx, jobID)
+	return f.getByIDFunc(ctx, scope, jobID)
 }
 
 func newTestEmbeddingJobRouter(
@@ -37,6 +39,7 @@ func newTestEmbeddingJobRouter(
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
+	useTestAuthenticatedIdentity(router)
 	handler := NewEmbeddingJobHandler(service)
 	handler.RegisterRoutes(router)
 
@@ -55,6 +58,7 @@ func TestEmbeddingJobHandlerRejectsInvalidID(t *testing.T) {
 			service := &fakeEmbeddingJobQueryService{
 				getByIDFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					int64,
 				) (embeddingdomain.Job, error) {
 					t.Fatal("GetByID() must not be called for invalid ID")
@@ -115,6 +119,7 @@ func TestEmbeddingJobHandlerMapsServiceErrors(t *testing.T) {
 			service := &fakeEmbeddingJobQueryService{
 				getByIDFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					int64,
 				) (embeddingdomain.Job, error) {
 					return embeddingdomain.Job{}, testCase.serviceErr
@@ -171,8 +176,12 @@ func TestEmbeddingJobHandlerReturnsJob(t *testing.T) {
 	service := &fakeEmbeddingJobQueryService{
 		getByIDFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			jobID int64,
 		) (embeddingdomain.Job, error) {
+			if scope.OwnerUserID() != testAPIOwnerUserID {
+				t.Fatalf("GetByID() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+			}
 			if jobID != expectedJob.ID {
 				t.Fatalf(
 					"GetByID() jobID = %d, want %d",

@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
 
@@ -17,6 +18,7 @@ import (
 type embeddingJobQueryService interface {
 	GetByID(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		jobID int64,
 	) (embeddingdomain.Job, error)
 }
@@ -40,6 +42,12 @@ func (h *EmbeddingJobHandler) RegisterRoutes(router gin.IRoutes) {
 
 // GetByID 处理 GET /embedding-jobs/:id。
 func (h *EmbeddingJobHandler) GetByID(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	// :id 是路径参数，因此使用 Param；Query 用于 ?id=23 这种查询参数。
 	jobID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || jobID <= 0 {
@@ -51,6 +59,7 @@ func (h *EmbeddingJobHandler) GetByID(c *gin.Context) {
 
 	foundJob, err := h.service.GetByID(
 		c.Request.Context(),
+		scope,
 		jobID,
 	)
 	if errors.Is(err, embeddingapplication.ErrInvalidEmbeddingJobID) {
