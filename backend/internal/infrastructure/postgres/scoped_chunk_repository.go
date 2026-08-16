@@ -19,6 +19,7 @@ type ScopedChunkRepository struct {
 }
 
 var _ documentdomain.ScopedChunkPageLister = (*ScopedChunkRepository)(nil)
+var _ documentdomain.ScopedChunkSearcher = (*ScopedChunkRepository)(nil)
 
 // NewScopedChunkRepository 创建带文档所有者边界的文本块读取仓储。
 func NewScopedChunkRepository(pool *pgxpool.Pool) *ScopedChunkRepository {
@@ -118,4 +119,114 @@ func (r *ScopedChunkRepository) ListPageByDocumentID(
 	}
 
 	return documentdomain.ChunkPageResult{Chunks: chunks, Total: total}, nil
+}
+
+// Search 在当前 OwnerScope 的 ready 文档中执行关键词检索。
+// count 和 data 两条 SQL 使用完全相同的 owner、状态、关键词和文档过滤条件，
+// 避免分页总数与实际结果来自不同的数据边界。
+func (r *ScopedChunkRepository) Search(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	options documentdomain.SearchOptions,
+) (documentdomain.SearchResult, error) {
+	if !scope.IsValid() {
+		return documentdomain.SearchResult{}, accessdomain.ErrInvalidOwnerScope
+	}
+
+	queryPattern := literalSubstringPattern(options.Query)
+
+	const countQuery = `
+		SELECT COUNT(*)
+		FROM text_chunks AS chunk
+		JOIN documents AS source_document
+		  ON source_document.id = chunk.document_id
+		WHERE source_document.owner_user_id = $1
+		  AND source_document.status = $2
+		  AND chunk.content ILIKE $3 ESCAPE E'\\'
+		  AND ($4::BIGINT IS NULL OR chunk.document_id = $4)
+	`
+
+	var total int64
+	if err := r.pool.QueryRow(
+		ctx,
+		countQuery,
+		scope.OwnerUserID(),
+		documentdomain.StatusReady,
+		queryPattern,
+		options.DocumentID,
+	).Scan(&total); err != nil {
+		return documentdomain.SearchResult{}, fmt.Errorf(
+			"count scoped matching document chunks: %w",
+			err,
+		)
+	}
+
+	hits := make([]documentdomain.SearchHit, 0)
+	if total == 0 {
+		return documentdomain.SearchResult{Hits: hits, Total: 0}, nil
+	}
+
+	const searchQuery = `
+		SELECT
+			chunk.id,
+			chunk.document_id,
+			chunk.chunk_index,
+			source_document.title,
+			source_document.original_name,
+			source_document.mime_type,
+			chunk.content,
+			chunk.page_start,
+			chunk.page_end
+		FROM text_chunks AS chunk
+		JOIN documents AS source_document
+		  ON source_document.id = chunk.document_id
+		WHERE source_document.owner_user_id = $1
+		  AND source_document.status = $2
+		  AND chunk.content ILIKE $3 ESCAPE E'\\'
+		  AND ($4::BIGINT IS NULL OR chunk.document_id = $4)
+		ORDER BY
+			source_document.created_at DESC,
+			source_document.id DESC,
+			chunk.chunk_index ASC,
+			chunk.id ASC
+		LIMIT $5
+		OFFSET $6
+	`
+
+	rows, err := r.pool.Query(
+		ctx,
+		searchQuery,
+		scope.OwnerUserID(),
+		documentdomain.StatusReady,
+		queryPattern,
+		options.DocumentID,
+		options.Limit,
+		options.Offset,
+	)
+	if err != nil {
+		return documentdomain.SearchResult{}, fmt.Errorf(
+			"query scoped matching document chunks: %w",
+			err,
+		)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		hit, err := scanSearchHit(rows)
+		if err != nil {
+			return documentdomain.SearchResult{}, fmt.Errorf(
+				"scan scoped matching document chunk: %w",
+				err,
+			)
+		}
+		hits = append(hits, hit)
+	}
+	if err := rows.Err(); err != nil {
+		return documentdomain.SearchResult{}, fmt.Errorf(
+			"iterate scoped matching document chunks: %w",
+			err,
+		)
+	}
+
+	return documentdomain.SearchResult{Hits: hits, Total: total}, nil
 }

@@ -1,6 +1,10 @@
 package document
 
-import "context"
+import (
+	"context"
+
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
+)
 
 // SearchOptions 表示文本块仓储执行关键词检索时需要的参数。
 //
@@ -43,6 +47,18 @@ type SearchResult struct {
 type ChunkSearcher interface {
 	Search(
 		ctx context.Context,
+		options SearchOptions,
+	) (SearchResult, error)
+}
+
+// ScopedChunkSearcher 定义只能在当前所有者文档范围内执行关键词检索的能力。
+//
+// “跨全部文档”在这个接口中只表示跨当前 OwnerScope 的全部 ready 文档；
+// Repository 必须在 SQL 候选集合中限制 owner，不能先全局查询再在内存中过滤。
+type ScopedChunkSearcher interface {
+	Search(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		options SearchOptions,
 	) (SearchResult, error)
 }

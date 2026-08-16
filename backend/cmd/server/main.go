@@ -279,7 +279,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		scopedDocumentRepository,
 		scopedChunkRepository,
 	)
-	documentSearchService := documentapplication.NewSearchService(chunkRepository)
+	documentSearchService := documentapplication.NewSearchService(scopedChunkRepository)
 	documentDeleteService := documentapplication.NewDeleteService(scopedDocumentRepository, localFileStorage)
 	documentProcessingService := documentapplication.NewQueueProcessingService(
 		scopedDocumentRepository,
@@ -585,7 +585,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	)
 
 	router := api.NewRouter(logger)
-	documentSearchHandler.RegisterRoutes(router)
 	if semanticSearchHandler != nil {
 		semanticSearchHandler.RegisterRoutes(router)
 	}
@@ -610,6 +609,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	processingJobHandler.RegisterRoutes(protectedRoutes)
 	documentEmbeddingHandler.RegisterRoutes(protectedRoutes)
 	embeddingJobHandler.RegisterRoutes(protectedRoutes)
+	documentSearchHandler.RegisterRoutes(protectedRoutes)
 
 	users := protectedRoutes.Group("/users")
 	currentUserHandler.RegisterRoutes(users)

@@ -153,6 +153,122 @@ func TestScopedChunkRepositoryEnforcesOwnerBoundary(t *testing.T) {
 	}
 }
 
+// TestScopedChunkRepositorySearchEnforcesOwnerBoundary 验证相同关键词存在于
+// 两个用户的文档时，count、结果和可选 document_id 都不会跨越 OwnerScope。
+func TestScopedChunkRepositorySearchEnforcesOwnerBoundary(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+
+	ownerAID := insertScopedRepositoryUser(t, ctx, pool, "search-owner-a@example.com")
+	ownerBID := insertScopedRepositoryUser(t, ctx, pool, "search-owner-b@example.com")
+	ownerA, _ := accessdomain.NewOwnerScope(ownerAID)
+	ownerB, _ := accessdomain.NewOwnerScope(ownerBID)
+	documents := postgresrepository.NewScopedDocumentRepository(pool)
+	systemChunks := postgresrepository.NewChunkRepository(pool)
+	scopedChunks := postgresrepository.NewScopedChunkRepository(pool)
+
+	ownerADocument, err := documents.Create(
+		ctx,
+		ownerA,
+		scopedDocumentInput("owner-a-search.md", "scoped-tests/search-owner-a.md", "e"),
+	)
+	if err != nil {
+		t.Fatalf("create owner A search document: %v", err)
+	}
+	ownerBDocument, err := documents.Create(
+		ctx,
+		ownerB,
+		scopedDocumentInput("owner-b-search.md", "scoped-tests/search-owner-b.md", "f"),
+	)
+	if err != nil {
+		t.Fatalf("create owner B search document: %v", err)
+	}
+
+	for _, documentID := range []int64{ownerADocument.ID, ownerBDocument.ID} {
+		if _, err := pool.Exec(
+			ctx,
+			"UPDATE documents SET status = 'ready' WHERE id = $1",
+			documentID,
+		); err != nil {
+			t.Fatalf("mark search document %d ready: %v", documentID, err)
+		}
+	}
+	if err := systemChunks.ReplaceForDocument(
+		ctx,
+		ownerADocument.ID,
+		[]documentdomain.ChunkInput{
+			{Index: 0, Content: "shared-keyword owner A first evidence"},
+			{Index: 1, Content: "shared-keyword owner A second evidence"},
+		},
+	); err != nil {
+		t.Fatalf("replace owner A search chunks: %v", err)
+	}
+	if err := systemChunks.ReplaceForDocument(
+		ctx,
+		ownerBDocument.ID,
+		[]documentdomain.ChunkInput{
+			{Index: 0, Content: "shared-keyword owner B private evidence"},
+		},
+	); err != nil {
+		t.Fatalf("replace owner B search chunks: %v", err)
+	}
+
+	ownerAResult, err := scopedChunks.Search(
+		ctx,
+		ownerA,
+		documentdomain.SearchOptions{Query: "shared-keyword", Limit: 10},
+	)
+	if err != nil {
+		t.Fatalf("Search(owner A) error = %v", err)
+	}
+	if ownerAResult.Total != 2 || len(ownerAResult.Hits) != 2 {
+		t.Fatalf("Search(owner A) = %+v, want two owner A hits", ownerAResult)
+	}
+	for _, hit := range ownerAResult.Hits {
+		if hit.DocumentID != ownerADocument.ID {
+			t.Fatalf("Search(owner A) leaked hit = %+v", hit)
+		}
+	}
+
+	ownerBResult, err := scopedChunks.Search(
+		ctx,
+		ownerB,
+		documentdomain.SearchOptions{Query: "shared-keyword", Limit: 10},
+	)
+	if err != nil {
+		t.Fatalf("Search(owner B) error = %v", err)
+	}
+	if ownerBResult.Total != 1 || len(ownerBResult.Hits) != 1 ||
+		ownerBResult.Hits[0].DocumentID != ownerBDocument.ID {
+		t.Fatalf("Search(owner B) = %+v, want one owner B hit", ownerBResult)
+	}
+
+	foreignDocumentID := ownerADocument.ID
+	foreignFilterResult, err := scopedChunks.Search(
+		ctx,
+		ownerB,
+		documentdomain.SearchOptions{
+			Query:      "shared-keyword",
+			DocumentID: &foreignDocumentID,
+			Limit:      10,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Search(owner B, owner A document) error = %v", err)
+	}
+	if foreignFilterResult.Total != 0 || len(foreignFilterResult.Hits) != 0 {
+		t.Fatalf(
+			"Search(owner B, owner A document) = %+v, want empty result",
+			foreignFilterResult,
+		)
+	}
+}
+
 // TestScopedProcessingAndChunkRepositoriesRejectInvalidScope 验证无效 Scope
 // 在访问数据库前就会被拒绝。
 func TestScopedProcessingAndChunkRepositoriesRejectInvalidScope(t *testing.T) {
@@ -174,5 +290,12 @@ func TestScopedProcessingAndChunkRepositoriesRejectInvalidScope(t *testing.T) {
 		documentdomain.ChunkPageOptions{Limit: 20},
 	); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
 		t.Fatalf("ListPageByDocumentID(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
+	}
+	if _, err := chunks.Search(
+		ctx,
+		invalidScope,
+		documentdomain.SearchOptions{Query: "private", Limit: 20},
+	); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
+		t.Fatalf("Search(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
 	}
 }

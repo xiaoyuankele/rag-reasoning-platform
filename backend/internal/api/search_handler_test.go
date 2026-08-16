@@ -13,22 +13,24 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 // fakeDocumentSearchService 是搜索 Handler 测试使用的应用服务替身。
 // 测试可以通过 searchFunc 检查 Handler 传入的参数，并控制返回结果。
 type fakeDocumentSearchService struct {
-	searchFunc  func(context.Context, applicationdocument.SearchInput) (applicationdocument.SearchOutput, error)
+	searchFunc  func(context.Context, accessdomain.OwnerScope, applicationdocument.SearchInput) (applicationdocument.SearchOutput, error)
 	searchCalls int
 }
 
 func (f *fakeDocumentSearchService) Search(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input applicationdocument.SearchInput,
 ) (applicationdocument.SearchOutput, error) {
 	f.searchCalls++
-	return f.searchFunc(ctx, input)
+	return f.searchFunc(ctx, scope, input)
 }
 
 // newTestDocumentSearchRouter 创建只注册搜索接口的 Gin 测试路由。
@@ -37,10 +39,45 @@ func newTestDocumentSearchRouter(service documentSearchService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
+	useTestAuthenticatedIdentity(router)
 	handler := NewDocumentSearchHandler(service)
 	handler.RegisterRoutes(router)
 
 	return router
+}
+
+// TestDocumentSearchHandlerRequiresAuthenticatedIdentity 验证搜索入口没有
+// 可信身份时直接返回 401，且不会把请求继续交给 Application。
+func TestDocumentSearchHandlerRequiresAuthenticatedIdentity(t *testing.T) {
+	service := &fakeDocumentSearchService{
+		searchFunc: func(
+			context.Context,
+			accessdomain.OwnerScope,
+			applicationdocument.SearchInput,
+		) (applicationdocument.SearchOutput, error) {
+			t.Fatal("Search must not be called without authenticated identity")
+			return applicationdocument.SearchOutput{}, nil
+		},
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	NewDocumentSearchHandler(service).RegisterRoutes(router)
+	request := httptest.NewRequest(http.MethodGet, "/search?q=bridge", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf(
+			"status=%d want=%d body=%s",
+			response.Code,
+			http.StatusUnauthorized,
+			response.Body.String(),
+		)
+	}
+	if service.searchCalls != 0 {
+		t.Fatalf("Search calls=%d want=0", service.searchCalls)
+	}
 }
 
 // TestDocumentSearchHandlerReturnsResults 验证完整的成功路径：
@@ -64,8 +101,16 @@ func TestDocumentSearchHandlerReturnsResults(t *testing.T) {
 	service := &fakeDocumentSearchService{
 		searchFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			input applicationdocument.SearchInput,
 		) (applicationdocument.SearchOutput, error) {
+			if scope.OwnerUserID() != testAPIOwnerUserID {
+				t.Fatalf(
+					"Search() scope owner = %d, want %d",
+					scope.OwnerUserID(),
+					testAPIOwnerUserID,
+				)
+			}
 			expectedInput := applicationdocument.SearchInput{
 				Query:    "bridge",
 				Page:     2,
@@ -152,6 +197,7 @@ func TestDocumentSearchHandlerPassesDocumentIDFilter(t *testing.T) {
 	service := &fakeDocumentSearchService{
 		searchFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			input applicationdocument.SearchInput,
 		) (applicationdocument.SearchOutput, error) {
 			if input.DocumentID == nil || *input.DocumentID != 20 {
@@ -206,6 +252,7 @@ func TestDocumentSearchHandlerRejectsInvalidDocumentIDFilter(t *testing.T) {
 			service := &fakeDocumentSearchService{
 				searchFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					applicationdocument.SearchInput,
 				) (applicationdocument.SearchOutput, error) {
 					t.Fatal("Search must not be called for invalid document ID")
@@ -242,6 +289,7 @@ func TestDocumentSearchHandlerUsesDefaultPagination(t *testing.T) {
 	service := &fakeDocumentSearchService{
 		searchFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			input applicationdocument.SearchInput,
 		) (applicationdocument.SearchOutput, error) {
 			expectedInput := applicationdocument.SearchInput{
@@ -359,6 +407,7 @@ func TestDocumentSearchHandlerRejectsInvalidPagination(t *testing.T) {
 			service := &fakeDocumentSearchService{
 				searchFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					applicationdocument.SearchInput,
 				) (applicationdocument.SearchOutput, error) {
 					t.Fatal("Search must not be called for invalid HTTP pagination")
@@ -458,6 +507,7 @@ func TestDocumentSearchHandlerMapsApplicationErrors(t *testing.T) {
 			service := &fakeDocumentSearchService{
 				searchFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					applicationdocument.SearchInput,
 				) (applicationdocument.SearchOutput, error) {
 					// %w 模拟错误从 Application 向外包装后再到达 Handler。

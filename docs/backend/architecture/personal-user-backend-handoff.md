@@ -1,6 +1,6 @@
 # P6 个人用户域后端交接
 
-> 状态：实施中；B1～B4 与 B5.1 已完成。文档、解析任务、chunks 和向量任务创建/查询已接入 OwnerScope、认证中间件与所有者 SQL，并通过双用户真实 HTTP/PostgreSQL 越权测试；B5 下一步隔离关键词检索。交接日期：2026-08-16。
+> 状态：实施中；B1～B4 与 B5.1～B5.2 已完成。文档、解析任务、chunks、向量任务创建/查询和关键词检索已接入 OwnerScope、认证中间件与所有者 SQL，并通过双用户真实 HTTP/PostgreSQL 越权测试；B5 下一步隔离语义检索和问答。交接日期：2026-08-16。
 > 产品边界、主线图和跨端验收标准以
 > [P6 个人用户域与私有数据闭环](../../shared/architecture/personal-user-domain.md) 为准；本文只冻结 Go、PostgreSQL、Worker 和测试的实施边界。
 
@@ -257,7 +257,9 @@ RequestID
 - 已完成：查询向量任务 JOIN `documents` 并按 owner 过滤，不存在和越权统一返回 404；
 - 已完成：向量 HTTP 路由已迁入认证组，Worker 继续使用系统级仓储领取任务；
 - 已完成：双用户真实 HTTP/PostgreSQL 测试覆盖未登录、越权创建、越权查询和所有者正常操作；
-- 关键词检索的 count 与 data 两条 SQL 都加 owner 条件；
+- 已完成：关键词检索的 count 与 data 两条 SQL 都加入 owner 条件；
+- 已完成：跨文档搜索只覆盖当前 OwnerScope，越权 `document_id` 返回正常空集合；
+- 已完成：关键词搜索路由迁入认证组，双用户相同关键词真实 HTTP 测试未发生结果泄露；
 - `HasCompleteSemanticEmbeddings` 和 `SearchSimilar` 都加 owner 条件；
 - Answer Service 只接收已经带 OwnerScope 的 Semantic Search；
 - 全库搜索的“全库”只表示当前用户的全部文档；
@@ -308,7 +310,7 @@ flowchart LR
 
 1. A 上传文档，B 按 document ID 获取、删除、解析和查看 chunks 均得到 404（已自动化验证）；
 2. B 按 A 的 processing job ID 或 embedding job ID 查询得到 404（均已自动化验证）；
-3. A/B 使用相同关键词，B 的结果中不出现 A 的 chunk；
+3. A/B 使用相同关键词，B 的结果中不出现 A 的 chunk（已自动化验证）；
 4. B 的语义检索和回答来源中不出现 A 的文档；
 5. 缺少、伪造、过期、撤销 Session 都返回 401；
 6. 请求体即使额外提交 `user_id` 也不能改变资源归属；

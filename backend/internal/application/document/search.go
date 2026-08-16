@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -54,12 +55,12 @@ type SearchOutput struct {
 // 它负责业务输入校验和分页换算，但不处理 HTTP，也不知道仓储最终使用
 // PostgreSQL 字面匹配、全文索引还是其他搜索引擎。
 type SearchService struct {
-	searcher documentdomain.ChunkSearcher
+	searcher documentdomain.ScopedChunkSearcher
 }
 
 // NewSearchService 创建关键词检索应用服务。
 func NewSearchService(
-	searcher documentdomain.ChunkSearcher,
+	searcher documentdomain.ScopedChunkSearcher,
 ) *SearchService {
 	return &SearchService{
 		searcher: searcher,
@@ -69,6 +70,7 @@ func NewSearchService(
 // Search 校验并规范化查询词，将页码换算为 limit/offset，再调用仓储。
 func (s *SearchService) Search(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input SearchInput,
 ) (SearchOutput, error) {
 	query := strings.TrimSpace(input.Query)
@@ -96,6 +98,7 @@ func (s *SearchService) Search(
 	offset := (input.Page - 1) * input.PageSize
 	result, err := s.searcher.Search(
 		ctx,
+		scope,
 		documentdomain.SearchOptions{
 			Query:      query,
 			DocumentID: input.DocumentID,

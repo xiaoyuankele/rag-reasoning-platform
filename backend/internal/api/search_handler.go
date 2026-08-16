@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -16,6 +17,7 @@ import (
 type documentSearchService interface {
 	Search(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		input applicationdocument.SearchInput,
 	) (applicationdocument.SearchOutput, error)
 }
@@ -61,6 +63,12 @@ type documentSearchResponse struct {
 
 // Search 读取 HTTP 查询参数，调用应用服务，并把结果转换成 HTTP 响应。
 func (h *DocumentSearchHandler) Search(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	// Handler 负责读取 HTTP 参数；查询词的业务合法性由 Application 层校验。
 	rawQuery := c.Query("q")
 
@@ -104,6 +112,7 @@ func (h *DocumentSearchHandler) Search(c *gin.Context) {
 
 	result, err := h.service.Search(
 		c.Request.Context(),
+		scope,
 		applicationdocument.SearchInput{
 			Query:      rawQuery,
 			DocumentID: documentID,

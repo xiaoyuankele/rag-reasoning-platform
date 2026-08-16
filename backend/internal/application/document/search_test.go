@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -14,6 +15,7 @@ import (
 type fakeChunkSearcher struct {
 	searchFunc func(
 		context.Context,
+		accessdomain.OwnerScope,
 		documentdomain.SearchOptions,
 	) (documentdomain.SearchResult, error)
 	calls int
@@ -21,10 +23,11 @@ type fakeChunkSearcher struct {
 
 func (f *fakeChunkSearcher) Search(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	options documentdomain.SearchOptions,
 ) (documentdomain.SearchResult, error) {
 	f.calls++
-	return f.searchFunc(ctx, options)
+	return f.searchFunc(ctx, scope, options)
 }
 
 func TestSearchServiceRejectsInvalidInput(t *testing.T) {
@@ -97,6 +100,7 @@ func TestSearchServiceRejectsInvalidInput(t *testing.T) {
 			searcher := &fakeChunkSearcher{
 				searchFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					documentdomain.SearchOptions,
 				) (documentdomain.SearchResult, error) {
 					t.Fatal("searcher must not be called for invalid input")
@@ -105,7 +109,11 @@ func TestSearchServiceRejectsInvalidInput(t *testing.T) {
 			}
 			service := NewSearchService(searcher)
 
-			_, err := service.Search(context.Background(), test.input)
+			_, err := service.Search(
+				context.Background(),
+				testOwnerScope(t),
+				test.input,
+			)
 			if !errors.Is(err, test.wantedErr) {
 				t.Fatalf(
 					"Search() error = %v, want %v",
@@ -138,8 +146,16 @@ func TestSearchServiceNormalizesQueryAndCalculatesPagination(t *testing.T) {
 	searcher := &fakeChunkSearcher{
 		searchFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			options documentdomain.SearchOptions,
 		) (documentdomain.SearchResult, error) {
+			if scope.OwnerUserID() != testOwnerUserID {
+				t.Fatalf(
+					"Search() scope owner = %d, want %d",
+					scope.OwnerUserID(),
+					testOwnerUserID,
+				)
+			}
 			expectedOptions := documentdomain.SearchOptions{
 				Query:      "磁悬浮",
 				DocumentID: &documentID,
@@ -164,6 +180,7 @@ func TestSearchServiceNormalizesQueryAndCalculatesPagination(t *testing.T) {
 
 	output, err := service.Search(
 		context.Background(),
+		testOwnerScope(t),
 		SearchInput{
 			Query:      "  磁悬浮  ",
 			DocumentID: &documentID,
@@ -204,6 +221,7 @@ func TestSearchServiceReturnsEmptySlice(t *testing.T) {
 	searcher := &fakeChunkSearcher{
 		searchFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			documentdomain.SearchOptions,
 		) (documentdomain.SearchResult, error) {
 			return documentdomain.SearchResult{}, nil
@@ -213,6 +231,7 @@ func TestSearchServiceReturnsEmptySlice(t *testing.T) {
 
 	output, err := service.Search(
 		context.Background(),
+		testOwnerScope(t),
 		SearchInput{Query: "not-found", Page: 1, PageSize: 20},
 	)
 	if err != nil {
@@ -238,6 +257,7 @@ func TestSearchServicePreservesRepositoryError(t *testing.T) {
 	searcher := &fakeChunkSearcher{
 		searchFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			documentdomain.SearchOptions,
 		) (documentdomain.SearchResult, error) {
 			return documentdomain.SearchResult{}, repositoryError
@@ -247,6 +267,7 @@ func TestSearchServicePreservesRepositoryError(t *testing.T) {
 
 	_, err := service.Search(
 		context.Background(),
+		testOwnerScope(t),
 		SearchInput{Query: "maglev", Page: 1, PageSize: 20},
 	)
 	if !errors.Is(err, repositoryError) {
