@@ -5,25 +5,23 @@
 
 ## 1. 当前访问边界
 
-当前 API 是个人版、单工作区接口，已经提供验证码申请、注册、登录、Session 鉴权、当前用户和退出，
-但还没有完成业务资源归属、成员权限或多租户隔离。除 `/users/me` 外，现有业务路由尚未接入身份保护；所有能访问
-服务端口的调用者仍能操作同一组文档、任务、chunks、向量和问答能力。因此开发环境应只监听受信地址，
+当前 API 是个人版、单工作区接口。验证码、注册、登录、Session、当前用户和退出已经实现；`POST /documents`、
+`GET /documents`、`GET /documents/:id`、`DELETE /documents/:id` 也已接入 Session 保护和 `owner_user_id`
+SQL 隔离。解析、chunks、任务、向量、检索和问答路由仍未完成所有者隔离，因此开发环境仍应只监听受信地址，
 不能把当前服务直接暴露为公开互联网多人服务。
 
-P6 个人用户域已经完成设计，B1/B2 身份与密码验证码基础以及 B3 全部认证路由已经实现；用户隔离尚未实现。后续调用者
-身份必须来自后端验证的 Session，不能依赖前端传入 `user_id`；文档、任务、检索和问答的数据范围必须由后端
-`owner_user_id` 约束。团队工作区留到 P7。
+身份只来自后端验证的 Session，不能依赖前端传入 `user_id`。团队工作区和成员权限属于 P7。
 
 ## 2. 当前接口
 
 | 方法 | 路径 | 主要输入 | 成功状态 | 用途 | 前端定位 |
 |---|---|---|---|---|---|
 | `GET` | `/health` | 无 | `200` | 检查后端是否存活 | 系统状态/开发验收 |
-| `POST` | `/documents` | `multipart/form-data` 的 `file` | `201` | 上传文档 | 用户功能 |
-| `GET` | `/documents` | `page`、`page_size` | `200` | 分页获取文档列表 | 用户功能 |
-| `GET` | `/documents/:id` | 路径参数 `id` | `200` | 获取文档详情 | 用户功能 |
+| `POST` | `/documents` | Session Cookie；`multipart/form-data` 的 `file` | `201` | 上传并绑定当前用户 | 用户功能；已隔离 |
+| `GET` | `/documents` | Session Cookie；`page`、`page_size` | `200` | 分页获取当前用户文档 | 用户功能；已隔离 |
+| `GET` | `/documents/:id` | Session Cookie；路径参数 `id` | `200` | 获取当前用户文档详情 | 用户功能；已隔离 |
 | `GET` | `/documents/:id/chunks` | 路径参数 `id`，可选 `page`、`page_size` | `200` | 按原文顺序分页查看 ready 文档的文本块 | 用户功能/解析质量检查 |
-| `DELETE` | `/documents/:id` | 路径参数 `id` | `204` | 删除文档及其关联数据 | 用户功能，需二次确认 |
+| `DELETE` | `/documents/:id` | Session Cookie；路径参数 `id` | `204` | 删除当前用户文档及其关联数据 | 用户功能；已隔离，需二次确认 |
 | `POST` | `/documents/:id/process` | 路径参数 `id` | `202` | 创建异步解析任务 | 用户功能 |
 | `GET` | `/processing-jobs/:id` | 路径参数 `id` | `200` | 查询解析任务状态 | 用户功能/轮询 |
 | `GET` | `/search` | `q`、可选 `document_id`、`page`、`page_size` | `200` | 关键词检索文本块 | 用户功能 |
@@ -51,14 +49,14 @@ P6 个人用户域已经完成设计，B1/B2 身份与密码验证码基础以�
 
 当前验证码接口已经实现联系方式 60 秒冷却、远端 IP 限流和进程全局预算。注册接口会原子创建用户与
 PostgreSQL Session，并设置 HttpOnly Cookie；登录接口会核对 Argon2id 并创建独立 Session。默认 Fake Sender 不访问远程渠道。
-`/users/me` 已通过 Session 中间件消费该 Cookie，退出后旧 Cookie 统一失效。面向浏览器的统一 Origin/CORS
-边界和全部业务路由保护将在 B4/B5 数据隔离改造中一并完成，避免形成只认证、不隔离的假安全。
+`/users/me` 已通过 Session 中间件消费该 Cookie，退出后旧 Cookie 统一失效。四个核心文档接口也已完成
+OwnerScope 隔离；统一 Origin/CORS 边界和其余业务路由保护将在后续 B4/B5 完成。
 
 P6 路由保护边界：
 
 - `GET /health`、验证码发送、注册和登录无需 Session，但必须受 Origin 与限流保护；
 - `POST /auth/logout` 可选读取并撤销 Session，始终清除 Cookie、返回 `204`，但仍须通过同源 Origin 校验；
-- `GET /users/me` 已受保护；第 2 节业务接口必须在 B4/B5 仓储隔离完成后统一受保护；
+- `GET /users/me` 和四个核心文档接口已受保护；其余第 2 节业务接口必须在 B4/B5 仓储隔离完成后迁入受保护组；
 - 业务请求 DTO 不增加客户端可填写的 `user_id`；
 - Session 缺失、过期或撤销统一返回 `401`、`authentication_required`；
 - 资源不存在或不属于当前用户统一返回 `404`，避免 ID 枚举；

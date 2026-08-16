@@ -1,6 +1,6 @@
 # P6 个人用户域后端交接
 
-> 状态：实施中；B1、B2 以及 B3 验证码申请、注册、登录、Session 鉴权、当前用户和退出闭环已完成；B4 已建立 `domain/access.OwnerScope`、`Document.OwnerUserID`、Release A 迁移和强制所有者 SQL 的 ScopedDocumentRepository，下一步接入 Application 与 HTTP。交接日期：2026-08-16。
+> 状态：实施中；B1～B3 已完成。B4 已建立 OwnerScope、文档所有者字段、Release A 迁移和 ScopedDocumentRepository，并已把上传、列表、详情、删除四个核心文档接口接入 Application、认证中间件与所有者 SQL；下一步隔离解析、chunks 和任务接口。交接日期：2026-08-16。
 > 产品边界、主线图和跨端验收标准以
 > [P6 个人用户域与私有数据闭环](../../shared/architecture/personal-user-domain.md) 为准；本文只冻结 Go、PostgreSQL、Worker 和测试的实施边界。
 
@@ -235,11 +235,12 @@ RequestID
 
 ### 文档
 
-- `document.CreateInput` 增加 `OwnerUserID`；
-- Upload Handler 从 Actor 取得用户 ID，不解析客户端 `user_id`；
-- Get/List/Delete Repository 全部增加 OwnerScope；
-- 不属于当前用户与不存在统一映射为 `document_not_found`；
-- 删除文件前必须先在同一作用域内取得文档记录。
+- 已完成：Upload Handler 从 Actor 构造 OwnerScope，不解析客户端 `user_id`；
+- 已完成：上传、列表、详情和删除 Application 显式接收 OwnerScope；
+- 已完成：Scoped Repository 的 Create/Get/List/Delete 均在 SQL 阶段写入或过滤 `owner_user_id`；
+- 已完成：不属于当前用户与不存在统一映射为 `document_not_found`；
+- 已完成：删除文件前必须先在同一作用域内取得文档记录；
+- 已完成：双用户真实 HTTP/PostgreSQL 测试覆盖 `401`、列表隔离、详情/删除越权 `404` 和所有者删除 `204`。
 
 ### 解析与 chunks
 
@@ -301,7 +302,7 @@ flowchart LR
 
 除正常验证码、注册、登录、退出和过期外，至少建立两个用户 A/B：
 
-1. A 上传文档，B 按 document ID 获取、删除、解析、查看 chunks 均得到 404；
+1. A 上传文档，B 按 document ID 获取和删除均得到 404（已自动化验证）；解析与 chunks 待下一批验证；
 2. B 按 A 的 processing job ID 和 embedding job ID 查询均得到 404；
 3. A/B 使用相同关键词，B 的结果中不出现 A 的 chunk；
 4. B 的语义检索和回答来源中不出现 A 的文档；

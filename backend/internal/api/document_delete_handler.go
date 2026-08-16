@@ -9,12 +9,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 // documentDeleteService 定义删除 Handler 需要的最小应用能力。
 type documentDeleteService interface {
-	Delete(ctx context.Context, id int64) error
+	Delete(ctx context.Context, scope accessdomain.OwnerScope, id int64) error
 }
 
 // DocumentDeleteHandler 负责把 HTTP 删除请求转换成应用服务调用。
@@ -38,6 +39,12 @@ func (h *DocumentDeleteHandler) RegisterRoutes(router gin.IRoutes) {
 
 // Delete 处理 DELETE /documents/:id。
 func (h *DocumentDeleteHandler) Delete(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	rawID := c.Param("id")
 	id, err := strconv.ParseInt(rawID, 10, 64)
 	if err != nil || id <= 0 {
@@ -47,7 +54,7 @@ func (h *DocumentDeleteHandler) Delete(c *gin.Context) {
 		return
 	}
 
-	err = h.service.Delete(c.Request.Context(), id)
+	err = h.service.Delete(c.Request.Context(), scope, id)
 	if errors.Is(err, applicationdocument.ErrInvalidID) {
 		c.JSON(http.StatusBadRequest, errorResponse{
 			Error: "document ID must be a positive integer",

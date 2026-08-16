@@ -7,23 +7,25 @@ import (
 	"strings"
 	"testing"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 // fakeUploadRepository 是上传用例测试使用的内存假仓储。
 // 它不会访问 PostgreSQL，只记录应用服务传给 Create 的数据。
 type fakeUploadRepository struct {
-	createFunc  func(context.Context, documentdomain.CreateInput) (documentdomain.Document, error)
+	createFunc  func(context.Context, accessdomain.OwnerScope, documentdomain.CreateInput) (documentdomain.Document, error)
 	createCalls int
 }
 
 func (f *fakeUploadRepository) Create(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input documentdomain.CreateInput,
 ) (documentdomain.Document, error) {
 	f.createCalls++
 
-	return f.createFunc(ctx, input)
+	return f.createFunc(ctx, scope, input)
 }
 
 // fakeFileStorage 是 FileStorage 的测试实现。
@@ -116,8 +118,12 @@ func TestUploadServiceSavesFileAndCreatesDocument(t *testing.T) {
 	repository := &fakeUploadRepository{
 		createFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			input documentdomain.CreateInput,
 		) (documentdomain.Document, error) {
+			if scope.OwnerUserID() != testOwnerUserID {
+				t.Fatalf("repository scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
+			}
 			expectedInput := documentdomain.CreateInput{
 				OriginalName: originalName,
 				MIMEType:     storedFile.MIMEType,
@@ -142,6 +148,7 @@ func TestUploadServiceSavesFileAndCreatesDocument(t *testing.T) {
 
 	createdDocument, err := service.Upload(
 		context.Background(),
+		testOwnerScope(t),
 		UploadInput{
 			OriginalName: originalName,
 			Content:      strings.NewReader(fileContent),
@@ -213,6 +220,7 @@ func TestUploadServiceDeletesStoredFileWhenRepositoryFails(t *testing.T) {
 	repository := &fakeUploadRepository{
 		createFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			documentdomain.CreateInput,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{}, repositoryError
@@ -223,6 +231,7 @@ func TestUploadServiceDeletesStoredFileWhenRepositoryFails(t *testing.T) {
 
 	_, err := service.Upload(
 		context.Background(),
+		testOwnerScope(t),
 		UploadInput{
 			OriginalName: "orphan.pdf",
 			Content:      strings.NewReader("%PDF-1.7"),
@@ -275,6 +284,7 @@ func TestUploadServiceStopsWhenFileSaveFails(t *testing.T) {
 	repository := &fakeUploadRepository{
 		createFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			documentdomain.CreateInput,
 		) (documentdomain.Document, error) {
 			t.Fatal("repository Create must not be called when Save fails")
@@ -287,6 +297,7 @@ func TestUploadServiceStopsWhenFileSaveFails(t *testing.T) {
 
 	_, err := service.Upload(
 		context.Background(),
+		testOwnerScope(t),
 		UploadInput{
 			OriginalName: "example.pdf",
 			Content:      strings.NewReader("%PDF-1.7"),
@@ -344,6 +355,7 @@ func TestUploadServicePreservesRepositoryAndDeleteErrors(t *testing.T) {
 	repository := &fakeUploadRepository{
 		createFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			documentdomain.CreateInput,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{}, repositoryError
@@ -354,6 +366,7 @@ func TestUploadServicePreservesRepositoryAndDeleteErrors(t *testing.T) {
 
 	_, err := service.Upload(
 		context.Background(),
+		testOwnerScope(t),
 		UploadInput{
 			OriginalName: "orphan.pdf",
 			Content:      strings.NewReader("%PDF-1.7"),
@@ -420,6 +433,7 @@ func TestUploadServiceRejectsInvalidInput(t *testing.T) {
 			repository := &fakeUploadRepository{
 				createFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					documentdomain.CreateInput,
 				) (documentdomain.Document, error) {
 					t.Fatal("repository Create must not be called for invalid input")
@@ -430,7 +444,7 @@ func TestUploadServiceRejectsInvalidInput(t *testing.T) {
 
 			service := NewUploadService(repository, storage)
 
-			_, err := service.Upload(context.Background(), test.input)
+			_, err := service.Upload(context.Background(), testOwnerScope(t), test.input)
 			if !errors.Is(err, test.expectedErr) {
 				t.Fatalf(
 					"expected error %v, got %v",

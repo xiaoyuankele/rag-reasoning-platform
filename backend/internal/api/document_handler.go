@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -21,6 +22,7 @@ import (
 type documentQueryService interface {
 	GetByID(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		id int64,
 	) (documentdomain.Document, error)
 }
@@ -91,6 +93,12 @@ func newDocumentResponse(
 
 // GetByID 处理 GET /documents/:id 请求。
 func (h *DocumentHandler) GetByID(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	// Param 读取路由中的 :id，但得到的是字符串。
 	rawID := c.Param("id")
 
@@ -110,6 +118,7 @@ func (h *DocumentHandler) GetByID(c *gin.Context) {
 	// Request.Context 会在客户端取消请求或连接断开时收到取消信号。
 	foundDocument, err := h.service.GetByID(
 		c.Request.Context(),
+		scope,
 		id,
 	)
 	if errors.Is(err, applicationdocument.ErrInvalidID) {

@@ -182,6 +182,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// Repository 负责 PostgreSQL 数据访问。
 	documentRepository := postgres.NewDocumentRepository(databasePool)
+	scopedDocumentRepository := postgres.NewScopedDocumentRepository(databasePool)
 	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
 	embeddingJobRepository := postgres.NewEmbeddingJobRepository(databasePool)
 	chunkRepository := postgres.NewChunkRepository(databasePool)
@@ -268,15 +269,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	// Service 负责文档查询用例和业务参数校验。
-	documentService := documentapplication.NewService(documentRepository)
-	documentUploadService := documentapplication.NewUploadService(documentRepository, localFileStorage)
-	documentListService := documentapplication.NewListService(documentRepository)
+	documentService := documentapplication.NewService(scopedDocumentRepository)
+	documentUploadService := documentapplication.NewUploadService(scopedDocumentRepository, localFileStorage)
+	documentListService := documentapplication.NewListService(scopedDocumentRepository)
 	documentChunkListService := documentapplication.NewChunkListService(
 		documentRepository,
 		chunkRepository,
 	)
 	documentSearchService := documentapplication.NewSearchService(chunkRepository)
-	documentDeleteService := documentapplication.NewDeleteService(documentRepository, localFileStorage)
+	documentDeleteService := documentapplication.NewDeleteService(scopedDocumentRepository, localFileStorage)
 	documentProcessingService := documentapplication.NewQueueProcessingService(
 		documentRepository,
 		processingJobRepository,
@@ -581,12 +582,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	)
 
 	router := api.NewRouter(logger)
-	documentHandler.RegisterRoutes(router)
-	documentUploadHandler.RegisterRoutes(router)
-	documentListHandler.RegisterRoutes(router)
 	documentChunkHandler.RegisterRoutes(router)
 	documentSearchHandler.RegisterRoutes(router)
-	documentDeleteHandler.RegisterRoutes(router)
 	documentProcessingHandler.RegisterRoutes(router)
 	processingJobHandler.RegisterRoutes(router)
 	documentEmbeddingHandler.RegisterRoutes(router)
@@ -601,11 +598,17 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	authRegisterHandler.RegisterRoutes(router)
 	authLoginHandler.RegisterRoutes(router)
 	authLogoutHandler.RegisterRoutes(router)
-	// /users/me 是第一条真正依赖登录态的受保护路由。
-	// 文档业务路由将在 user_id 归属字段和仓储过滤同时完成后统一接入，
-	// 避免只加 Middleware 却仍能跨用户读取数据的“假隔离”。
-	users := router.Group("/users")
-	users.Use(authMiddleware.Require)
+
+	// 只有已经在 Application 与 SQL 两层强制 OwnerScope 的接口，
+	// 才允许进入受保护路由组。其余业务接口将在后续隔离批次逐步迁入。
+	protectedRoutes := router.Group("")
+	protectedRoutes.Use(authMiddleware.Require)
+	documentHandler.RegisterRoutes(protectedRoutes)
+	documentUploadHandler.RegisterRoutes(protectedRoutes)
+	documentListHandler.RegisterRoutes(protectedRoutes)
+	documentDeleteHandler.RegisterRoutes(protectedRoutes)
+
+	users := protectedRoutes.Group("/users")
 	currentUserHandler.RegisterRoutes(users)
 
 	// Gin Engine 实现了 http.Handler，所以可以交给标准库 http.Server。

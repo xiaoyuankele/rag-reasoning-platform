@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -21,6 +22,7 @@ const multipartOverheadAllowanceBytes int64 = 1024 * 1024
 type documentUploadService interface {
 	Upload(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		input applicationdocument.UploadInput,
 	) (documentdomain.Document, error)
 }
@@ -49,6 +51,12 @@ func (h *DocumentUploadHandler) RegisterRoutes(router gin.IRoutes) {
 
 // Upload 处理 POST /documents multipart 上传请求。
 func (h *DocumentUploadHandler) Upload(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	maxRequestBodyBytes := h.maxFileSizeBytes + multipartOverheadAllowanceBytes
 
 	// MaxBytesReader 限制整个 HTTP 请求体，
@@ -105,6 +113,7 @@ func (h *DocumentUploadHandler) Upload(c *gin.Context) {
 
 		createdDocument, err := h.service.Upload(
 			c.Request.Context(),
+			scope,
 			applicationdocument.UploadInput{
 				OriginalName: originalName,
 				Content:      part,

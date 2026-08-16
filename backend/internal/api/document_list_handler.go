@@ -10,12 +10,14 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 )
 
 // documentListService 定义列表 Handler 使用的最小应用能力。
 type documentListService interface {
 	List(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		input applicationdocument.ListInput,
 	) (applicationdocument.ListOutput, error)
 }
@@ -55,6 +57,12 @@ type documentListResponse struct {
 
 // List 处理 GET /documents 请求。
 func (h *DocumentListHandler) List(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	page, err := parsePositiveQueryInt(
 		c,
 		"page",
@@ -81,6 +89,7 @@ func (h *DocumentListHandler) List(c *gin.Context) {
 
 	result, err := h.service.List(
 		c.Request.Context(),
+		scope,
 		applicationdocument.ListInput{
 			Page:     page,
 			PageSize: pageSize,

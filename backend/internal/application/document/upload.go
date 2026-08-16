@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -74,7 +75,7 @@ var (
 
 // UploadService 编排文件保存和文档元数据入库流程。
 type UploadService struct {
-	repository documentdomain.Creator
+	repository documentdomain.ScopedCreator
 	storage    FileStorage
 }
 
@@ -82,7 +83,7 @@ type UploadService struct {
 //
 // repository 负责数据库元数据，storage 负责文件内容，
 // 两个依赖都通过构造函数传入。
-func NewUploadService(repository documentdomain.Creator, storage FileStorage) *UploadService {
+func NewUploadService(repository documentdomain.ScopedCreator, storage FileStorage) *UploadService {
 	return &UploadService{
 		repository: repository,
 		storage:    storage,
@@ -90,7 +91,11 @@ func NewUploadService(repository documentdomain.Creator, storage FileStorage) *U
 }
 
 // Upload 保存文件，并创建对应的文档数据库记录。
-func (s *UploadService) Upload(ctx context.Context, input UploadInput) (documentdomain.Document, error) {
+func (s *UploadService) Upload(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	input UploadInput,
+) (documentdomain.Document, error) {
 	originalName := strings.TrimSpace(input.OriginalName)
 	if originalName == "" {
 		return documentdomain.Document{}, ErrOriginalNameRequired
@@ -109,7 +114,7 @@ func (s *UploadService) Upload(ctx context.Context, input UploadInput) (document
 		)
 	}
 
-	createdDocument, err := s.repository.Create(ctx, documentdomain.CreateInput{
+	createdDocument, err := s.repository.Create(ctx, scope, documentdomain.CreateInput{
 		OriginalName: originalName,
 		StoragePath:  storedFile.StoragePath,
 		MIMEType:     storedFile.MIMEType,

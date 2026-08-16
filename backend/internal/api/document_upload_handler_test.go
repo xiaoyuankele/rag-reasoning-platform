@@ -15,22 +15,24 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 // fakeDocumentUploadService 是上传 Handler 测试使用的假应用服务。
 type fakeDocumentUploadService struct {
-	uploadFunc  func(context.Context, applicationdocument.UploadInput) (documentdomain.Document, error)
+	uploadFunc  func(context.Context, accessdomain.OwnerScope, applicationdocument.UploadInput) (documentdomain.Document, error)
 	uploadCalls int
 }
 
 func (f *fakeDocumentUploadService) Upload(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input applicationdocument.UploadInput,
 ) (documentdomain.Document, error) {
 	f.uploadCalls++
 
-	return f.uploadFunc(ctx, input)
+	return f.uploadFunc(ctx, scope, input)
 }
 
 // newTestDocumentUploadRouter 创建只注册上传接口的测试路由。
@@ -40,6 +42,7 @@ func newTestDocumentUploadRouter(
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
+	useTestAuthenticatedIdentity(router)
 	handler := NewDocumentUploadHandler(service, 1024)
 	handler.RegisterRoutes(router)
 
@@ -52,6 +55,7 @@ func TestDocumentUploadHandlerRejectsMissingFile(t *testing.T) {
 	service := &fakeDocumentUploadService{
 		uploadFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			applicationdocument.UploadInput,
 		) (documentdomain.Document, error) {
 			t.Fatal("Upload must not be called when file field is missing")
@@ -122,8 +126,12 @@ func TestDocumentUploadHandlerReturnsCreatedDocument(t *testing.T) {
 	service := &fakeDocumentUploadService{
 		uploadFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			input applicationdocument.UploadInput,
 		) (documentdomain.Document, error) {
+			if scope.OwnerUserID() != testAPIOwnerUserID {
+				t.Fatalf("Upload() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+			}
 			if input.OriginalName != originalName {
 				t.Fatalf(
 					"expected name %q, got %q",
@@ -269,6 +277,7 @@ func TestDocumentUploadHandlerMapsApplicationErrors(t *testing.T) {
 			service := &fakeDocumentUploadService{
 				uploadFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					applicationdocument.UploadInput,
 				) (documentdomain.Document, error) {
 					return documentdomain.Document{}, fmt.Errorf(
@@ -339,6 +348,7 @@ func TestDocumentUploadHandlerRejectsOversizedRequestBody(t *testing.T) {
 	service := &fakeDocumentUploadService{
 		uploadFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			input applicationdocument.UploadInput,
 		) (documentdomain.Document, error) {
 			// 必须持续读取 input.Content，MaxBytesReader 才会在越过上限时
@@ -388,6 +398,7 @@ func TestDocumentUploadHandlerRejectsOversizedRequestBody(t *testing.T) {
 
 	response := httptest.NewRecorder()
 	router := gin.New()
+	useTestAuthenticatedIdentity(router)
 	handler := NewDocumentUploadHandler(service, maxFileSizeBytes)
 	handler.RegisterRoutes(router)
 	router.ServeHTTP(response, request)

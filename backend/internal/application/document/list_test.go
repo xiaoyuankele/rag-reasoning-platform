@@ -5,22 +5,24 @@ import (
 	"errors"
 	"testing"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 // fakeDocumentLister 是列表应用服务测试使用的仓储替身。
 // 它只实现 Lister，体现调用者只依赖自己需要的最小接口。
 type fakeDocumentLister struct {
-	listFunc  func(context.Context, documentdomain.ListOptions) (documentdomain.ListResult, error)
+	listFunc  func(context.Context, accessdomain.OwnerScope, documentdomain.ListOptions) (documentdomain.ListResult, error)
 	listCalls int
 }
 
 func (f *fakeDocumentLister) List(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	options documentdomain.ListOptions,
 ) (documentdomain.ListResult, error) {
 	f.listCalls++
-	return f.listFunc(ctx, options)
+	return f.listFunc(ctx, scope, options)
 }
 
 // TestListServiceRejectsInvalidPagination 验证非法分页参数会在应用层被拒绝，
@@ -58,6 +60,7 @@ func TestListServiceRejectsInvalidPagination(t *testing.T) {
 			repository := &fakeDocumentLister{
 				listFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					documentdomain.ListOptions,
 				) (documentdomain.ListResult, error) {
 					t.Fatal("List must not be called for invalid pagination")
@@ -66,7 +69,7 @@ func TestListServiceRejectsInvalidPagination(t *testing.T) {
 			}
 
 			service := NewListService(repository)
-			_, err := service.List(context.Background(), test.input)
+			_, err := service.List(context.Background(), testOwnerScope(t), test.input)
 			if !errors.Is(err, test.expectedError) {
 				t.Fatalf("expected %v, got %v", test.expectedError, err)
 			}
@@ -89,8 +92,12 @@ func TestListServiceReturnsPaginatedDocuments(t *testing.T) {
 	repository := &fakeDocumentLister{
 		listFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			options documentdomain.ListOptions,
 		) (documentdomain.ListResult, error) {
+			if scope.OwnerUserID() != testOwnerUserID {
+				t.Fatalf("repository scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
+			}
 			expectedOptions := documentdomain.ListOptions{
 				Limit:  20,
 				Offset: 40,
@@ -109,6 +116,7 @@ func TestListServiceReturnsPaginatedDocuments(t *testing.T) {
 	service := NewListService(repository)
 	result, err := service.List(
 		context.Background(),
+		testOwnerScope(t),
 		ListInput{Page: 3, PageSize: 20},
 	)
 	if err != nil {
@@ -151,6 +159,7 @@ func TestListServicePreservesRepositoryError(t *testing.T) {
 	repository := &fakeDocumentLister{
 		listFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			documentdomain.ListOptions,
 		) (documentdomain.ListResult, error) {
 			return documentdomain.ListResult{}, repositoryError
@@ -160,6 +169,7 @@ func TestListServicePreservesRepositoryError(t *testing.T) {
 	service := NewListService(repository)
 	_, err := service.List(
 		context.Background(),
+		testOwnerScope(t),
 		ListInput{Page: 1, PageSize: 20},
 	)
 	if !errors.Is(err, repositoryError) {

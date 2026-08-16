@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -46,11 +47,11 @@ type ListOutput struct {
 //
 // 它只依赖 Lister，不需要创建文档或按 ID 查询的能力。
 type ListService struct {
-	repository documentdomain.Lister
+	repository documentdomain.ScopedLister
 }
 
 // NewListService 创建文档列表应用服务。
-func NewListService(repository documentdomain.Lister) *ListService {
+func NewListService(repository documentdomain.ScopedLister) *ListService {
 	return &ListService{
 		repository: repository,
 	}
@@ -60,6 +61,7 @@ func NewListService(repository documentdomain.Lister) *ListService {
 // 调用仓储并计算总页数。
 func (s *ListService) List(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input ListInput,
 ) (ListOutput, error) {
 	if input.Page <= 0 {
@@ -75,6 +77,7 @@ func (s *ListService) List(
 
 	result, err := s.repository.List(
 		ctx,
+		scope,
 		documentdomain.ListOptions{
 			Limit:  input.PageSize,
 			Offset: offset,

@@ -14,22 +14,24 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 // fakeDocumentListService 是列表 Handler 测试使用的应用服务替身。
 // 它只实现 List，避免 HTTP 测试依赖真实 PostgreSQL。
 type fakeDocumentListService struct {
-	listFunc  func(context.Context, applicationdocument.ListInput) (applicationdocument.ListOutput, error)
+	listFunc  func(context.Context, accessdomain.OwnerScope, applicationdocument.ListInput) (applicationdocument.ListOutput, error)
 	listCalls int
 }
 
 func (f *fakeDocumentListService) List(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input applicationdocument.ListInput,
 ) (applicationdocument.ListOutput, error) {
 	f.listCalls++
-	return f.listFunc(ctx, input)
+	return f.listFunc(ctx, scope, input)
 }
 
 // newTestDocumentListRouter 创建只注册列表接口的测试路由。
@@ -37,6 +39,7 @@ func newTestDocumentListRouter(service documentListService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
+	useTestAuthenticatedIdentity(router)
 	handler := NewDocumentListHandler(service)
 	handler.RegisterRoutes(router)
 
@@ -49,8 +52,12 @@ func TestDocumentListHandlerUsesDefaultPagination(t *testing.T) {
 	service := &fakeDocumentListService{
 		listFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			input applicationdocument.ListInput,
 		) (applicationdocument.ListOutput, error) {
+			if scope.OwnerUserID() != testAPIOwnerUserID {
+				t.Fatalf("List() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+			}
 			expectedInput := applicationdocument.ListInput{
 				Page:     applicationdocument.DefaultPage,
 				PageSize: applicationdocument.DefaultPageSize,
@@ -120,6 +127,7 @@ func TestDocumentListHandlerUsesCustomPagination(t *testing.T) {
 	service := &fakeDocumentListService{
 		listFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			input applicationdocument.ListInput,
 		) (applicationdocument.ListOutput, error) {
 			expectedInput := applicationdocument.ListInput{
@@ -228,6 +236,7 @@ func TestDocumentListHandlerRejectsInvalidQuery(t *testing.T) {
 			service := &fakeDocumentListService{
 				listFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					applicationdocument.ListInput,
 				) (applicationdocument.ListOutput, error) {
 					t.Fatal("List must not be called for invalid query parameters")
@@ -296,6 +305,7 @@ func TestDocumentListHandlerMapsApplicationErrors(t *testing.T) {
 			service := &fakeDocumentListService{
 				listFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					applicationdocument.ListInput,
 				) (applicationdocument.ListOutput, error) {
 					return applicationdocument.ListOutput{}, fmt.Errorf(

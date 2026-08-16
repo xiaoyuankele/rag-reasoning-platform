@@ -5,23 +5,25 @@ import (
 	"errors"
 	"testing"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 // fakeRepository 是只用于应用服务测试的仓储实现。
 type fakeRepository struct {
-	getByIDFunc  func(context.Context, int64) (documentdomain.Document, error)
+	getByIDFunc  func(context.Context, accessdomain.OwnerScope, int64) (documentdomain.Document, error)
 	getByIDCalls int
 }
 
 // GetByID 记录调用次数，并执行测试场景提供的函数。
 func (f *fakeRepository) GetByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	id int64,
 ) (documentdomain.Document, error) {
 	f.getByIDCalls++
 
-	return f.getByIDFunc(ctx, id)
+	return f.getByIDFunc(ctx, scope, id)
 }
 
 // TestServiceGetByIDRejectsInvalidID 验证非法 ID 不会访问仓储。
@@ -29,7 +31,7 @@ func TestServiceGetByIDRejectsInvalidID(t *testing.T) {
 	repository := &fakeRepository{}
 	service := NewService(repository)
 
-	_, err := service.GetByID(context.Background(), 0)
+	_, err := service.GetByID(context.Background(), testOwnerScope(t), 0)
 
 	if !errors.Is(err, ErrInvalidID) {
 		t.Fatalf("expected ErrInvalidID, got %v", err)
@@ -54,8 +56,12 @@ func TestServiceGetByIDReturnsDocument(t *testing.T) {
 	repository := &fakeRepository{
 		getByIDFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			id int64,
 		) (documentdomain.Document, error) {
+			if scope.OwnerUserID() != testOwnerUserID {
+				t.Fatalf("repository scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
+			}
 			if id != expectedDocument.ID {
 				t.Fatalf(
 					"expected repository ID %d, got %d",
@@ -72,6 +78,7 @@ func TestServiceGetByIDReturnsDocument(t *testing.T) {
 
 	foundDocument, err := service.GetByID(
 		context.Background(),
+		testOwnerScope(t),
 		expectedDocument.ID,
 	)
 	if err != nil {
@@ -95,6 +102,7 @@ func TestServiceGetByIDPreservesNotFound(t *testing.T) {
 	repository := &fakeRepository{
 		getByIDFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{}, documentdomain.ErrNotFound
@@ -103,7 +111,7 @@ func TestServiceGetByIDPreservesNotFound(t *testing.T) {
 
 	service := NewService(repository)
 
-	_, err := service.GetByID(context.Background(), 999)
+	_, err := service.GetByID(context.Background(), testOwnerScope(t), 999)
 
 	if !errors.Is(err, documentdomain.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)

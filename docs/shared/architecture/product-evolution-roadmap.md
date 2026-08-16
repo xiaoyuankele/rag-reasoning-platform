@@ -163,7 +163,7 @@ P6 是跨前端、后端和数据库的独立阶段。它不把团队租户复�
 
 > 当前进度：B1 用户、Session、验证码挑战的数据模型与迁移已完成；B2 密码规则、Argon2id、验证码生成与
 > HMAC、Fake Sender、请求验证码用例及并发安全仓储已完成。B3 已交付验证码申请、注册、登录、
-> Session 鉴权中间件、当前用户与幂等退出，下一步进入 B4 文档归属与基础隔离。
+> Session 鉴权中间件、当前用户与幂等退出。B4 已完成核心文档接口的第一条所有者隔离纵向链路。
 
 - 建立 `users`、`user_sessions`、`verification_challenges`、密码哈希和随机 Session Token；
 - 以统一验证码挑战支持已验证邮箱或手机号注册；默认 Fake Sender 零费用，真实短信按需后置；
@@ -173,9 +173,9 @@ P6 是跨前端、后端和数据库的独立阶段。它不把团队租户复�
 
 #### P6.2 文档归属与基础隔离
 
-> 当前进度：已建立 `domain/access.OwnerScope`、`Document.OwnerUserID`，并通过 `000011` 增加暂时可空的
-> `documents.owner_user_id`、用户外键和所有者列表索引；ScopedDocumentRepository 已在查询、列表和删除 SQL
-> 中强制执行 Scope 并通过双用户真实数据库测试，下一步接入 Application 与 HTTP。
+> 当前进度：已建立 `domain/access.OwnerScope`、`Document.OwnerUserID` 与 Release A 迁移；上传、列表、详情、
+> 删除已在 Handler、Application 和 ScopedDocumentRepository 全链路显式传递 Scope，并通过双用户真实
+> HTTP/PostgreSQL 隔离测试。下一步处理解析、chunks 与任务查询。
 
 - 文档增加 `owner_user_id`；
 - 上传、列表、详情、删除、解析、chunks 和两类任务查询全部按 owner 限定；

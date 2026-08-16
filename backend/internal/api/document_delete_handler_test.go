@@ -9,21 +9,23 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 type fakeDocumentDeleteService struct {
-	deleteFunc  func(context.Context, int64) error
+	deleteFunc  func(context.Context, accessdomain.OwnerScope, int64) error
 	deleteCalls int
 }
 
 func (f *fakeDocumentDeleteService) Delete(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	id int64,
 ) error {
 	f.deleteCalls++
 
-	return f.deleteFunc(ctx, id)
+	return f.deleteFunc(ctx, scope, id)
 }
 
 func newTestDocumentDeleteRouter(
@@ -32,6 +34,7 @@ func newTestDocumentDeleteRouter(
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
+	useTestAuthenticatedIdentity(router)
 	handler := NewDocumentDeleteHandler(service)
 	handler.RegisterRoutes(router)
 
@@ -60,7 +63,7 @@ func TestDocumentDeleteHandlerRejectsInvalidID(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			service := &fakeDocumentDeleteService{
-				deleteFunc: func(context.Context, int64) error {
+				deleteFunc: func(context.Context, accessdomain.OwnerScope, int64) error {
 					t.Fatal("Delete() must not be called for an invalid path ID")
 					return nil
 				},
@@ -104,7 +107,10 @@ func TestDocumentDeleteHandlerRejectsInvalidID(t *testing.T) {
 
 func TestDocumentDeleteHandlerReturnsNotFound(t *testing.T) {
 	service := &fakeDocumentDeleteService{
-		deleteFunc: func(_ context.Context, id int64) error {
+		deleteFunc: func(_ context.Context, scope accessdomain.OwnerScope, id int64) error {
+			if scope.OwnerUserID() != testAPIOwnerUserID {
+				t.Fatalf("Delete() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+			}
 			if id != 999 {
 				t.Fatalf("Delete() id = %d, want 999", id)
 			}
@@ -149,7 +155,7 @@ func TestDocumentDeleteHandlerReturnsNotFound(t *testing.T) {
 
 func TestDocumentDeleteHandlerReturnsInternalServerError(t *testing.T) {
 	service := &fakeDocumentDeleteService{
-		deleteFunc: func(context.Context, int64) error {
+		deleteFunc: func(context.Context, accessdomain.OwnerScope, int64) error {
 			return errors.New("file system unavailable")
 		},
 	}
@@ -192,7 +198,7 @@ func TestDocumentDeleteHandlerReturnsNoContent(t *testing.T) {
 	const expectedID int64 = 42
 
 	service := &fakeDocumentDeleteService{
-		deleteFunc: func(_ context.Context, id int64) error {
+		deleteFunc: func(_ context.Context, _ accessdomain.OwnerScope, id int64) error {
 			if id != expectedID {
 				t.Fatalf(
 					"Delete() id = %d, want %d",

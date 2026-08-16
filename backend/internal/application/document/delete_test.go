@@ -6,32 +6,35 @@ import (
 	"slices"
 	"testing"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 type fakeDeleteRepository struct {
-	getByIDFunc  func(context.Context, int64) (documentdomain.Document, error)
-	deleteFunc   func(context.Context, int64) error
+	getByIDFunc  func(context.Context, accessdomain.OwnerScope, int64) (documentdomain.Document, error)
+	deleteFunc   func(context.Context, accessdomain.OwnerScope, int64) error
 	getByIDCalls int
 	deleteCalls  int
 }
 
 func (f *fakeDeleteRepository) GetByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	id int64,
 ) (documentdomain.Document, error) {
 	f.getByIDCalls++
 
-	return f.getByIDFunc(ctx, id)
+	return f.getByIDFunc(ctx, scope, id)
 }
 
 func (f *fakeDeleteRepository) Delete(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	id int64,
 ) error {
 	f.deleteCalls++
 
-	return f.deleteFunc(ctx, id)
+	return f.deleteFunc(ctx, scope, id)
 }
 
 type fakeDeleteFileStorage struct {
@@ -53,7 +56,7 @@ func TestDeleteServiceRejectsInvalidID(t *testing.T) {
 	storage := newFailOnCallDeleteStorage(t)
 	service := NewDeleteService(repository, storage)
 
-	err := service.Delete(context.Background(), 0)
+	err := service.Delete(context.Background(), testOwnerScope(t), 0)
 
 	if !errors.Is(err, ErrInvalidID) {
 		t.Fatalf("Delete() error = %v, want ErrInvalidID", err)
@@ -66,11 +69,12 @@ func TestDeleteServicePreservesNotFound(t *testing.T) {
 	repository := &fakeDeleteRepository{
 		getByIDFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			_ int64,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{}, documentdomain.ErrNotFound
 		},
-		deleteFunc: func(context.Context, int64) error {
+		deleteFunc: func(context.Context, accessdomain.OwnerScope, int64) error {
 			t.Fatal("repository Delete() must not be called after GetByID failure")
 			return nil
 		},
@@ -78,7 +82,7 @@ func TestDeleteServicePreservesNotFound(t *testing.T) {
 	storage := newFailOnCallDeleteStorage(t)
 	service := NewDeleteService(repository, storage)
 
-	err := service.Delete(context.Background(), 99)
+	err := service.Delete(context.Background(), testOwnerScope(t), 99)
 
 	if !errors.Is(err, documentdomain.ErrNotFound) {
 		t.Fatalf("Delete() error = %v, want ErrNotFound", err)
@@ -92,6 +96,7 @@ func TestDeleteServiceStopsWhenFileDeletionFails(t *testing.T) {
 	repository := &fakeDeleteRepository{
 		getByIDFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			id int64,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{
@@ -99,7 +104,7 @@ func TestDeleteServiceStopsWhenFileDeletionFails(t *testing.T) {
 				StoragePath: "documents/file-delete-error.pdf",
 			}, nil
 		},
-		deleteFunc: func(context.Context, int64) error {
+		deleteFunc: func(context.Context, accessdomain.OwnerScope, int64) error {
 			t.Fatal("repository Delete() must not be called after file deletion failure")
 			return nil
 		},
@@ -111,7 +116,7 @@ func TestDeleteServiceStopsWhenFileDeletionFails(t *testing.T) {
 	}
 	service := NewDeleteService(repository, storage)
 
-	err := service.Delete(context.Background(), 7)
+	err := service.Delete(context.Background(), testOwnerScope(t), 7)
 
 	if !errors.Is(err, fileError) {
 		t.Fatalf("Delete() error = %v, want wrapped file error", err)
@@ -125,6 +130,7 @@ func TestDeleteServicePreservesRepositoryDeleteError(t *testing.T) {
 	repository := &fakeDeleteRepository{
 		getByIDFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			id int64,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{
@@ -132,7 +138,7 @@ func TestDeleteServicePreservesRepositoryDeleteError(t *testing.T) {
 				StoragePath: "documents/database-delete-error.pdf",
 			}, nil
 		},
-		deleteFunc: func(context.Context, int64) error {
+		deleteFunc: func(context.Context, accessdomain.OwnerScope, int64) error {
 			return databaseError
 		},
 	}
@@ -143,7 +149,7 @@ func TestDeleteServicePreservesRepositoryDeleteError(t *testing.T) {
 	}
 	service := NewDeleteService(repository, storage)
 
-	err := service.Delete(context.Background(), 8)
+	err := service.Delete(context.Background(), testOwnerScope(t), 8)
 
 	if !errors.Is(err, databaseError) {
 		t.Fatalf("Delete() error = %v, want wrapped database error", err)
@@ -165,17 +171,24 @@ func TestDeleteServiceDeletesFileBeforeDatabaseRecord(t *testing.T) {
 	repository := &fakeDeleteRepository{
 		getByIDFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			id int64,
 		) (documentdomain.Document, error) {
 			callOrder = append(callOrder, "get")
+			if scope.OwnerUserID() != testOwnerUserID {
+				t.Fatalf("GetByID() scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
+			}
 			if id != expectedID {
 				t.Fatalf("GetByID() id = %d, want %d", id, expectedID)
 			}
 
 			return expectedDocument, nil
 		},
-		deleteFunc: func(_ context.Context, id int64) error {
+		deleteFunc: func(_ context.Context, scope accessdomain.OwnerScope, id int64) error {
 			callOrder = append(callOrder, "database-delete")
+			if scope.OwnerUserID() != testOwnerUserID {
+				t.Fatalf("Delete() scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
+			}
 			if id != expectedID {
 				t.Fatalf("Delete() id = %d, want %d", id, expectedID)
 			}
@@ -202,7 +215,7 @@ func TestDeleteServiceDeletesFileBeforeDatabaseRecord(t *testing.T) {
 	}
 	service := NewDeleteService(repository, storage)
 
-	err := service.Delete(context.Background(), expectedID)
+	err := service.Delete(context.Background(), testOwnerScope(t), expectedID)
 
 	if err != nil {
 		t.Fatalf("Delete() error = %v, want nil", err)
@@ -232,12 +245,13 @@ func newFailOnCallDeleteRepository(t *testing.T) *fakeDeleteRepository {
 	return &fakeDeleteRepository{
 		getByIDFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (documentdomain.Document, error) {
 			t.Fatal("GetByID() must not be called")
 			return documentdomain.Document{}, nil
 		},
-		deleteFunc: func(context.Context, int64) error {
+		deleteFunc: func(context.Context, accessdomain.OwnerScope, int64) error {
 			t.Fatal("repository Delete() must not be called")
 			return nil
 		},

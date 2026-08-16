@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,24 +15,26 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 // fakeDocumentQueryService 是测试专用的假服务。
 // 它让测试可以控制 GetByID 返回什么，不需要连接数据库。
 type fakeDocumentQueryService struct {
-	getByIDFunc  func(context.Context, int64) (documentdomain.Document, error)
+	getByIDFunc  func(context.Context, accessdomain.OwnerScope, int64) (documentdomain.Document, error)
 	getByIDCalls int
 }
 
 // GetByID 记录调用次数，并执行测试提供的函数。
 func (f *fakeDocumentQueryService) GetByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	id int64,
 ) (documentdomain.Document, error) {
 	f.getByIDCalls++
 
-	return f.getByIDFunc(ctx, id)
+	return f.getByIDFunc(ctx, scope, id)
 }
 
 // newTestDocumentRouter 创建只用于 Handler 测试的 Gin 路由。
@@ -43,6 +46,7 @@ func newTestDocumentRouter(
 
 	router := gin.New()
 	router.Use(RequestIDMiddleware())
+	useTestAuthenticatedIdentity(router)
 	handler := NewDocumentHandler(service, logger)
 
 	// 空前缀 RouterGroup 模拟 B4 后续挂载 AuthMiddleware 的受保护路由组。
@@ -51,6 +55,32 @@ func newTestDocumentRouter(
 	handler.RegisterRoutes(protectedRoutes)
 
 	return router
+}
+
+func TestDocumentHandlerRequiresAuthenticatedIdentity(t *testing.T) {
+	service := &fakeDocumentQueryService{
+		getByIDFunc: func(
+			context.Context,
+			accessdomain.OwnerScope,
+			int64,
+		) (documentdomain.Document, error) {
+			t.Fatal("GetByID() must not be called without an authenticated identity")
+			return documentdomain.Document{}, nil
+		},
+	}
+	router := gin.New()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	NewDocumentHandler(service, logger).RegisterRoutes(router)
+	request := httptest.NewRequest(http.MethodGet, "/documents/42", nil)
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d want=401 body=%s", response.Code, response.Body.String())
+	}
+	if service.getByIDCalls != 0 {
+		t.Fatalf("GetByID() calls=%d want=0", service.getByIDCalls)
+	}
 }
 
 // TestDocumentHandlerGetByIDRejectsInvalidID 验证非法 ID 返回 400，
@@ -79,6 +109,7 @@ func TestDocumentHandlerGetByIDRejectsInvalidID(t *testing.T) {
 			service := &fakeDocumentQueryService{
 				getByIDFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					int64,
 				) (documentdomain.Document, error) {
 					return documentdomain.Document{}, nil
@@ -134,8 +165,12 @@ func TestDocumentHandlerGetByIDReturnsNotFound(t *testing.T) {
 	service := &fakeDocumentQueryService{
 		getByIDFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			id int64,
 		) (documentdomain.Document, error) {
+			if scope.OwnerUserID() != testAPIOwnerUserID {
+				t.Fatalf("GetByID() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+			}
 			if id != expectedID {
 				t.Fatalf(
 					"expected service ID %d, got %d",
@@ -196,6 +231,7 @@ func TestDocumentHandlerGetByIDReturnsInternalServerError(t *testing.T) {
 	service := &fakeDocumentQueryService{
 		getByIDFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			_ int64,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{}, internalError
@@ -280,6 +316,7 @@ func TestDocumentHandlerGetByIDReturnsDocument(t *testing.T) {
 	service := &fakeDocumentQueryService{
 		getByIDFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			id int64,
 		) (documentdomain.Document, error) {
 			if id != expectedDocument.ID {
