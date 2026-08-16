@@ -189,6 +189,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		postgres.NewVerificationChallengeRepository(databasePool)
 	authRegistrationRepository :=
 		postgres.NewAuthRegistrationRepository(databasePool)
+	authSessionRepository := postgres.NewAuthSessionRepository(databasePool)
 
 	// Worker 启动前，先恢复上一次异常退出遗留的 processing 任务。
 	// main 只负责决定调用时机；恢复规则位于 Application，SQL 位于 Repository。
@@ -423,6 +424,16 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("create auth register service: %w", err)
 	}
+	authLoginService, err := authapplication.NewLoginService(
+		authSessionRepository,
+		passwordHasher,
+		sessioninfrastructure.NewTokenGenerator(),
+		time.Now,
+		authConfig.SessionTTL,
+	)
+	if err != nil {
+		return fmt.Errorf("create auth login service: %w", err)
+	}
 	authRequestLimiter, err := ratelimit.NewSlidingWindowLimiter(
 		authConfig.RateLimitWindow,
 		authConfig.PerClientLimit,
@@ -544,6 +555,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		logger,
 		authConfig.CookieSecure,
 	)
+	authLoginHandler := api.NewAuthLoginHandler(
+		authLoginService,
+		authRequestLimiter,
+		logger,
+		authConfig.CookieSecure,
+	)
 
 	router := api.NewRouter(logger)
 	documentHandler.RegisterRoutes(router)
@@ -564,6 +581,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	verificationHandler.RegisterRoutes(router)
 	authRegisterHandler.RegisterRoutes(router)
+	authLoginHandler.RegisterRoutes(router)
 
 	// Gin Engine 实现了 http.Handler，所以可以交给标准库 http.Server。
 	// 不再使用 router.Run，是因为我们需要持有 Server，才能在收到退出信号时

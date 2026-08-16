@@ -210,15 +210,21 @@ func (r *fakeRegistrationRepository) CreateRegistration(
 
 // fakePasswordHasher 避免单元测试消耗真实 Argon2id 成本。
 type fakePasswordHasher struct {
-	hash string
-	err  error
+	hash        string
+	err         error
+	verify      func(password string, encodedHash string) (bool, error)
+	verifyCalls int
 }
 
 func (h *fakePasswordHasher) Hash(_ string) (string, error) {
 	return h.hash, h.err
 }
 
-func (h *fakePasswordHasher) Verify(_, _ string) (bool, error) {
+func (h *fakePasswordHasher) Verify(password, encodedHash string) (bool, error) {
+	h.verifyCalls++
+	if h.verify != nil {
+		return h.verify(password, encodedHash)
+	}
 	return false, nil
 }
 

@@ -13,8 +13,6 @@ import (
 	userdomain "rag-reasoning-platform/backend/internal/domain/user"
 )
 
-const sessionCookieName = "rag_session"
-
 // authRegisterService 是 Handler 对注册 Application 的最小需求。
 type authRegisterService interface {
 	Register(
@@ -72,11 +70,6 @@ type authRegisterRequest struct {
 	Password         string `json:"password"`
 }
 
-type authRegisterResponse struct {
-	User             publicUserResponse `json:"user"`
-	SessionExpiresAt time.Time          `json:"session_expires_at"`
-}
-
 // Register 处理 POST /auth/register。
 func (h *AuthRegisterHandler) Register(c *gin.Context) {
 	now := time.Now().UTC()
@@ -120,24 +113,13 @@ func (h *AuthRegisterHandler) Register(c *gin.Context) {
 
 	// 只有数据库事务成功提交后才设置 Cookie；浏览器永远接触不到 token_hash，
 	// JSON 响应也永远不包含原始 Token。
-	http.SetCookie(
-		c.Writer,
-		&http.Cookie{
-			Name:     sessionCookieName,
-			Value:    result.SessionToken,
-			Path:     "/",
-			Expires:  result.SessionExpiresAt.UTC(),
-			HttpOnly: true,
-			Secure:   h.cookieSecure,
-			SameSite: http.SameSiteLaxMode,
-		},
-	)
-	c.JSON(
+	writeAuthSessionResponse(
+		c,
 		http.StatusCreated,
-		authRegisterResponse{
-			User:             newPublicUserResponse(result.User),
-			SessionExpiresAt: result.SessionExpiresAt.UTC(),
-		},
+		result.User,
+		result.SessionToken,
+		result.SessionExpiresAt,
+		h.cookieSecure,
 	)
 }
 

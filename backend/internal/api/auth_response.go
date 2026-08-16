@@ -1,10 +1,15 @@
 package api
 
 import (
+	"net/http"
 	"time"
+
+	"github.com/gin-gonic/gin"
 
 	userdomain "rag-reasoning-platform/backend/internal/domain/user"
 )
+
+const sessionCookieName = "rag_session"
 
 // publicUserResponse 是注册、登录和当前用户接口共用的公开 User DTO。
 // 它不包含 password_hash 等仅限后端使用的字段。
@@ -27,4 +32,40 @@ func newPublicUserResponse(user userdomain.User) publicUserResponse {
 		Status:      user.Status,
 		CreatedAt:   user.CreatedAt.UTC(),
 	}
+}
+
+// authSessionResponse 是注册和登录成功时共用的响应形状。
+type authSessionResponse struct {
+	User             publicUserResponse `json:"user"`
+	SessionExpiresAt time.Time          `json:"session_expires_at"`
+}
+
+// writeAuthSessionResponse 在事务成功后设置 Cookie 并返回公开用户信息。
+func writeAuthSessionResponse(
+	c *gin.Context,
+	statusCode int,
+	user userdomain.User,
+	rawToken string,
+	expiresAt time.Time,
+	cookieSecure bool,
+) {
+	http.SetCookie(
+		c.Writer,
+		&http.Cookie{
+			Name:     sessionCookieName,
+			Value:    rawToken,
+			Path:     "/",
+			Expires:  expiresAt.UTC(),
+			HttpOnly: true,
+			Secure:   cookieSecure,
+			SameSite: http.SameSiteLaxMode,
+		},
+	)
+	c.JSON(
+		statusCode,
+		authSessionResponse{
+			User:             newPublicUserResponse(user),
+			SessionExpiresAt: expiresAt.UTC(),
+		},
+	)
 }

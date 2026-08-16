@@ -5,11 +5,11 @@
 
 ## 1. 当前访问边界
 
-当前 API 是个人版、单工作区接口，已经提供验证码申请和注册并能创建 PostgreSQL Session，但还没有登录、Session 鉴权中间件、成员权限或多租户隔离。所有能访问
+当前 API 是个人版、单工作区接口，已经提供验证码申请、注册和登录并能创建 PostgreSQL Session，但还没有 Session 鉴权中间件、成员权限或多租户隔离。所有能访问
 服务端口的调用者都能操作同一组文档、任务、chunks、向量和问答能力。因此开发环境应只监听受信地址，
 不能把当前服务直接暴露为公开互联网多人服务。
 
-P6 个人用户域已经完成设计，B1/B2 身份与密码验证码基础已经编码，`POST /auth/verification-codes` 和 `POST /auth/register` 已实现；其余认证路由与用户隔离尚未实现。后续调用者
+P6 个人用户域已经完成设计，B1/B2 身份与密码验证码基础已经编码，验证码申请、注册和登录接口已实现；其余认证路由与用户隔离尚未实现。后续调用者
 身份必须来自后端验证的 Session，不能依赖前端传入 `user_id`；文档、任务、检索和问答的数据范围必须由后端
 `owner_user_id` 约束。团队工作区留到 P7。
 
@@ -32,6 +32,7 @@ P6 个人用户域已经完成设计，B1/B2 身份与密码验证码基础已�
 | `POST` | `/answers` | JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200` | 基于来源生成回答 | 用户功能，受功能开关控制 |
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册验证码挑战 | 认证功能；当前默认使用零费用 Fake Sender |
 | `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建用户和 Session | 认证功能；设置 `rag_session` Cookie |
+| `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 核对凭据并创建新 Session | 认证功能；设置 `rag_session` Cookie |
 
 ## 3. P6 认证接口状态
 
@@ -41,12 +42,12 @@ P6 个人用户域已经完成设计，B1/B2 身份与密码验证码基础已�
 | --- | --- | --- | --- | --- | --- |
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 不创建 Session | 已实现 |
 | `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建 Session 并设置 `rag_session` | 已实现 |
-| `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 创建 Session 并设置 `rag_session` | 未实现 |
+| `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 创建 Session 并设置 `rag_session` | 已实现 |
 | `POST` | `/auth/logout` | 当前 Session Cookie | `204` | 撤销 Session 并清除 Cookie | 未实现 |
 | `GET` | `/users/me` | 当前 Session Cookie | `200` | 不修改 Cookie | 未实现 |
 
 当前验证码接口已经实现联系方式 60 秒冷却、远端 IP 限流和进程全局预算。注册接口会原子创建用户与
-PostgreSQL Session，并设置 HttpOnly Cookie；默认 Fake Sender 不访问远程渠道。当前还没有任何受保护路由
+PostgreSQL Session，并设置 HttpOnly Cookie；登录接口会核对 Argon2id 并创建独立 Session。默认 Fake Sender 不访问远程渠道。当前还没有任何受保护路由
 消费该 Cookie；面向浏览器的统一 Origin/CORS 边界将在登录和 Session 中间件接入时完成。
 
 P6 路由保护边界：

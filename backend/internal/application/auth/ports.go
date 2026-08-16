@@ -76,3 +76,31 @@ type RegistrationRepository interface {
 		record RegistrationRecord,
 	) (RegistrationResult, error)
 }
+
+// LoginAccount 把公开 User 与仅用于认证核对的密码哈希组合起来。
+// PasswordHash 不属于公开领域对象，也不得越过 Application 进入 Handler。
+type LoginAccount struct {
+	User         userdomain.User
+	PasswordHash string
+}
+
+// SessionRecord 是 Application 请求持久化的一次新登录状态。
+type SessionRecord struct {
+	UserID    int64
+	TokenHash string
+	ExpiresAt time.Time
+	CreatedAt time.Time
+}
+
+// LoginRepository 是登录用例查找凭据和创建 Session 所需的最小能力。
+type LoginRepository interface {
+	FindLoginAccount(
+		ctx context.Context,
+		normalizedIdentifier string,
+	) (LoginAccount, error)
+
+	CreateSession(
+		ctx context.Context,
+		record SessionRecord,
+	) (authdomain.Session, error)
+}

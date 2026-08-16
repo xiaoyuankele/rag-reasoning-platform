@@ -23,6 +23,7 @@ const (
 	errorCodeVerificationCodeExpired        = "verification_code_expired"
 	errorCodeVerificationAttemptsExceeded   = "verification_attempts_exceeded"
 	errorCodeContactAlreadyRegistered       = "contact_already_registered"
+	errorCodeInvalidCredentials             = "invalid_credentials"
 	errorCodeInternal                       = "internal_error"
 )
 

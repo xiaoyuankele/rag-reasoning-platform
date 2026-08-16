@@ -28,9 +28,9 @@ import (
 	"rag-reasoning-platform/backend/migrations"
 )
 
-// TestAuthRegistrationHTTPWithPostgreSQL 验证真实的验证码申请、注册事务、
-// Argon2id、Session Token、PostgreSQL 和 Set-Cookie 纵向链路。
-func TestAuthRegistrationHTTPWithPostgreSQL(t *testing.T) {
+// TestAuthRegistrationAndLoginHTTPWithPostgreSQL 验证真实的验证码申请、
+// 注册、再次登录、Argon2id、PostgreSQL Session 和 Set-Cookie 纵向链路。
+func TestAuthRegistrationAndLoginHTTPWithPostgreSQL(t *testing.T) {
 	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
 		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
 	}
@@ -60,6 +60,7 @@ func TestAuthRegistrationHTTPWithPostgreSQL(t *testing.T) {
 
 	challengeRepository := postgresrepository.NewVerificationChallengeRepository(pool)
 	registrationRepository := postgresrepository.NewAuthRegistrationRepository(pool)
+	sessionRepository := postgresrepository.NewAuthSessionRepository(pool)
 	codeHasher, err := verificationinfrastructure.NewHMACCodeHasher(
 		[]byte("0123456789abcdef0123456789abcdef"),
 	)
@@ -93,6 +94,16 @@ func TestAuthRegistrationHTTPWithPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create register service: %v", err)
 	}
+	loginService, err := authapplication.NewLoginService(
+		sessionRepository,
+		passwordHasher,
+		sessioninfrastructure.NewTokenGenerator(),
+		time.Now,
+		authapplication.DefaultSessionTTL,
+	)
+	if err != nil {
+		t.Fatalf("create login service: %v", err)
+	}
 	verificationLimiter, _ := ratelimit.NewSlidingWindowLimiter(time.Minute, 10, 100)
 	authLimiter, _ := ratelimit.NewSlidingWindowLimiter(time.Minute, 10, 100)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -100,6 +111,7 @@ func TestAuthRegistrationHTTPWithPostgreSQL(t *testing.T) {
 	router := api.NewRouter(logger)
 	api.NewVerificationHandler(verificationService, verificationLimiter, logger).RegisterRoutes(router)
 	api.NewAuthRegisterHandler(registerService, authLimiter, logger, false).RegisterRoutes(router)
+	api.NewAuthLoginHandler(loginService, authLimiter, logger, false).RegisterRoutes(router)
 
 	verificationResponse := performJSONRequest(
 		router,
@@ -158,6 +170,40 @@ func TestAuthRegistrationHTTPWithPostgreSQL(t *testing.T) {
 	}
 	if passwordHash == "Example123" || !strings.HasPrefix(passwordHash, "$argon2id$") || consumedAt == nil || sessionCount != 1 {
 		t.Fatalf("stored registration password_hash=%q consumed=%v sessions=%d", passwordHash, consumedAt, sessionCount)
+	}
+
+	invalidLoginResponse := performJSONRequest(
+		router,
+		"/auth/login",
+		fmt.Sprintf(`{"identifier":%q,"password":"Wrong123"}`, destination),
+	)
+	if invalidLoginResponse.Code != http.StatusUnauthorized ||
+		!strings.Contains(invalidLoginResponse.Body.String(), `"code":"invalid_credentials"`) {
+		t.Fatalf("invalid login status=%d body=%s", invalidLoginResponse.Code, invalidLoginResponse.Body.String())
+	}
+
+	loginResponse := performJSONRequest(
+		router,
+		"/auth/login",
+		fmt.Sprintf(`{"identifier":%q,"password":"Example123"}`, destination),
+	)
+	if loginResponse.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", loginResponse.Code, loginResponse.Body.String())
+	}
+	loginCookies := loginResponse.Result().Cookies()
+	if len(loginCookies) != 1 || loginCookies[0].Name != "rag_session" ||
+		!loginCookies[0].HttpOnly || loginCookies[0].Value == cookies[0].Value {
+		t.Fatalf("login cookies=%+v, want a new HttpOnly session", loginCookies)
+	}
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT COUNT(*) FROM user_sessions AS session JOIN users AS account ON account.id = session.user_id WHERE account.email = $1",
+		destination,
+	).Scan(&sessionCount); err != nil {
+		t.Fatalf("count sessions after login: %v", err)
+	}
+	if sessionCount != 2 {
+		t.Fatalf("session count after login=%d, want registration plus login sessions", sessionCount)
 	}
 }
 
