@@ -134,6 +134,8 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 		t.Fatalf("second Migrate() error = %v, want nil", err)
 	}
 
+	assertAuthenticationSchema(t, ctx, testPool)
+
 	var documentsTable string
 	if err := testPool.QueryRow(
 		ctx,
@@ -395,5 +397,237 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 			upgradedChecksum,
 			expectedNormalizedChecksum,
 		)
+	}
+}
+
+// assertAuthenticationSchema 对 P6-B1 的身份表执行真实 PostgreSQL 约束测试。
+// 这些检查证明数据库会拒绝绕过 Go 业务层写入的非法数据。
+func assertAuthenticationSchema(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+
+	for _, tableName := range []string{
+		"users",
+		"user_sessions",
+		"verification_challenges",
+	} {
+		var registeredTable string
+		if err := pool.QueryRow(
+			ctx,
+			"SELECT to_regclass($1)::text",
+			tableName,
+		).Scan(&registeredTable); err != nil {
+			t.Fatalf("query %s table: %v", tableName, err)
+		}
+		if registeredTable != tableName {
+			t.Fatalf("registered table = %q, want %q", registeredTable, tableName)
+		}
+	}
+
+	var emailUserID int64
+	if err := pool.QueryRow(
+		ctx,
+		`
+			INSERT INTO users (
+				email,
+				email_verified_at,
+				display_name,
+				password_hash
+			)
+			VALUES (
+				'owner@example.com',
+				CURRENT_TIMESTAMP,
+				'Email Owner',
+				'argon2id-test-hash'
+			)
+			RETURNING id
+		`,
+	).Scan(&emailUserID); err != nil {
+		t.Fatalf("insert verified email user: %v", err)
+	}
+
+	if _, err := pool.Exec(
+		ctx,
+		`
+			INSERT INTO users (
+				phone_e164,
+				phone_verified_at,
+				display_name,
+				password_hash
+			)
+			VALUES (
+				'+8613800000000',
+				CURRENT_TIMESTAMP,
+				'Phone Owner',
+				'argon2id-test-hash'
+			)
+		`,
+	); err != nil {
+		t.Fatalf("insert verified phone user: %v", err)
+	}
+
+	assertStatementRejected(t, ctx, pool, `
+		INSERT INTO users (display_name, password_hash)
+		VALUES ('Missing Contact', 'argon2id-test-hash')
+	`, "user without a verified contact")
+
+	assertStatementRejected(t, ctx, pool, `
+		INSERT INTO users (email, display_name, password_hash)
+		VALUES ('unverified@example.com', 'Unverified', 'argon2id-test-hash')
+	`, "user with an unverified email")
+
+	assertStatementRejected(t, ctx, pool, `
+		INSERT INTO users (
+			email,
+			email_verified_at,
+			display_name,
+			password_hash
+		)
+		VALUES (
+			'Owner@Example.com',
+			CURRENT_TIMESTAMP,
+			'Unnormalized Email',
+			'argon2id-test-hash'
+		)
+	`, "user with an unnormalized email")
+
+	assertStatementRejected(t, ctx, pool, `
+		INSERT INTO users (
+			email,
+			email_verified_at,
+			display_name,
+			password_hash
+		)
+		VALUES (
+			'owner@example.com',
+			CURRENT_TIMESTAMP,
+			'Duplicate Email',
+			'argon2id-test-hash'
+		)
+	`, "duplicate email")
+
+	if _, err := pool.Exec(
+		ctx,
+		`
+			INSERT INTO user_sessions (
+				user_id,
+				token_hash,
+				expires_at
+			)
+			VALUES ($1, REPEAT('a', 64), CURRENT_TIMESTAMP + INTERVAL '7 days')
+		`,
+		emailUserID,
+	); err != nil {
+		t.Fatalf("insert valid session: %v", err)
+	}
+
+	assertStatementRejected(t, ctx, pool, `
+		INSERT INTO user_sessions (user_id, token_hash, expires_at)
+		VALUES (
+			(SELECT id FROM users WHERE email = 'owner@example.com'),
+			'raw-session-token',
+			CURRENT_TIMESTAMP + INTERVAL '7 days'
+		)
+	`, "session with a non-hash token")
+
+	assertStatementRejected(t, ctx, pool, `
+		INSERT INTO user_sessions (user_id, token_hash, expires_at)
+		VALUES (
+			(SELECT id FROM users WHERE email = 'owner@example.com'),
+			REPEAT('b', 64),
+			CURRENT_TIMESTAMP - INTERVAL '1 second'
+		)
+	`, "already expired session")
+
+	if _, err := pool.Exec(
+		ctx,
+		`
+			INSERT INTO verification_challenges (
+				channel,
+				destination,
+				purpose,
+				code_hash,
+				expires_at
+			)
+			VALUES (
+				'email',
+				'new@example.com',
+				'register',
+				REPEAT('c', 64),
+				CURRENT_TIMESTAMP + INTERVAL '10 minutes'
+			)
+		`,
+	); err != nil {
+		t.Fatalf("insert valid verification challenge: %v", err)
+	}
+
+	assertStatementRejected(t, ctx, pool, `
+		INSERT INTO verification_challenges (
+			channel,
+			destination,
+			purpose,
+			code_hash,
+			expires_at
+		)
+		VALUES (
+			'push',
+			'new@example.com',
+			'register',
+			REPEAT('d', 64),
+			CURRENT_TIMESTAMP + INTERVAL '10 minutes'
+		)
+	`, "challenge with an unsupported channel")
+
+	assertStatementRejected(t, ctx, pool, `
+		INSERT INTO verification_challenges (
+			channel,
+			destination,
+			purpose,
+			code_hash,
+			expires_at
+		)
+		VALUES (
+			'email',
+			'New@Example.com',
+			'register',
+			REPEAT('f', 64),
+			CURRENT_TIMESTAMP + INTERVAL '10 minutes'
+		)
+	`, "challenge with an unnormalized email")
+
+	assertStatementRejected(t, ctx, pool, `
+		INSERT INTO verification_challenges (
+			channel,
+			destination,
+			purpose,
+			code_hash,
+			expires_at,
+			attempt_count
+		)
+		VALUES (
+			'email',
+			'new@example.com',
+			'register',
+			REPEAT('e', 64),
+			CURRENT_TIMESTAMP + INTERVAL '10 minutes',
+			6
+		)
+	`, "challenge above the attempt limit")
+}
+
+func assertStatementRejected(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	statement string,
+	description string,
+) {
+	t.Helper()
+
+	if _, err := pool.Exec(ctx, statement); err == nil {
+		t.Fatalf("%s was accepted, want PostgreSQL constraint error", description)
 	}
 }
