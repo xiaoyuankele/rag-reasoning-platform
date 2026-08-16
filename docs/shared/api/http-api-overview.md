@@ -5,11 +5,12 @@
 
 ## 1. 当前访问边界
 
-当前 API 是个人版、单工作区接口，已经提供验证码申请、注册和登录并能创建 PostgreSQL Session，但还没有 Session 鉴权中间件、成员权限或多租户隔离。所有能访问
-服务端口的调用者都能操作同一组文档、任务、chunks、向量和问答能力。因此开发环境应只监听受信地址，
+当前 API 是个人版、单工作区接口，已经提供验证码申请、注册、登录、Session 鉴权、当前用户和退出，
+但还没有完成业务资源归属、成员权限或多租户隔离。除 `/users/me` 外，现有业务路由尚未接入身份保护；所有能访问
+服务端口的调用者仍能操作同一组文档、任务、chunks、向量和问答能力。因此开发环境应只监听受信地址，
 不能把当前服务直接暴露为公开互联网多人服务。
 
-P6 个人用户域已经完成设计，B1/B2 身份与密码验证码基础已经编码，验证码申请、注册和登录接口已实现；其余认证路由与用户隔离尚未实现。后续调用者
+P6 个人用户域已经完成设计，B1/B2 身份与密码验证码基础以及 B3 全部认证路由已经实现；用户隔离尚未实现。后续调用者
 身份必须来自后端验证的 Session，不能依赖前端传入 `user_id`；文档、任务、检索和问答的数据范围必须由后端
 `owner_user_id` 约束。团队工作区留到 P7。
 
@@ -33,6 +34,8 @@ P6 个人用户域已经完成设计，B1/B2 身份与密码验证码基础已�
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册验证码挑战 | 认证功能；当前默认使用零费用 Fake Sender |
 | `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建用户和 Session | 认证功能；设置 `rag_session` Cookie |
 | `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 核对凭据并创建新 Session | 认证功能；设置 `rag_session` Cookie |
+| `POST` | `/auth/logout` | `rag_session` Cookie（可选） | `204` | 幂等撤销 Session 并清除 Cookie | 认证功能 |
+| `GET` | `/users/me` | `rag_session` Cookie | `200` | 恢复当前用户公开资料 | 认证功能；已受 Session 中间件保护 |
 
 ## 3. P6 认证接口状态
 
@@ -43,18 +46,19 @@ P6 个人用户域已经完成设计，B1/B2 身份与密码验证码基础已�
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 不创建 Session | 已实现 |
 | `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建 Session 并设置 `rag_session` | 已实现 |
 | `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 创建 Session 并设置 `rag_session` | 已实现 |
-| `POST` | `/auth/logout` | 当前 Session Cookie | `204` | 撤销 Session 并清除 Cookie | 未实现 |
-| `GET` | `/users/me` | 当前 Session Cookie | `200` | 不修改 Cookie | 未实现 |
+| `POST` | `/auth/logout` | 当前 Session Cookie | `204` | 撤销 Session 并清除 Cookie | 已实现 |
+| `GET` | `/users/me` | 当前 Session Cookie | `200` | 不修改 Cookie | 已实现 |
 
 当前验证码接口已经实现联系方式 60 秒冷却、远端 IP 限流和进程全局预算。注册接口会原子创建用户与
-PostgreSQL Session，并设置 HttpOnly Cookie；登录接口会核对 Argon2id 并创建独立 Session。默认 Fake Sender 不访问远程渠道。当前还没有任何受保护路由
-消费该 Cookie；面向浏览器的统一 Origin/CORS 边界将在登录和 Session 中间件接入时完成。
+PostgreSQL Session，并设置 HttpOnly Cookie；登录接口会核对 Argon2id 并创建独立 Session。默认 Fake Sender 不访问远程渠道。
+`/users/me` 已通过 Session 中间件消费该 Cookie，退出后旧 Cookie 统一失效。面向浏览器的统一 Origin/CORS
+边界和全部业务路由保护将在 B4/B5 数据隔离改造中一并完成，避免形成只认证、不隔离的假安全。
 
 P6 路由保护边界：
 
 - `GET /health`、验证码发送、注册和登录无需 Session，但必须受 Origin 与限流保护；
 - `POST /auth/logout` 可选读取并撤销 Session，始终清除 Cookie、返回 `204`，但仍须通过同源 Origin 校验；
-- `GET /users/me` 和第 2 节全部业务接口受保护；
+- `GET /users/me` 已受保护；第 2 节业务接口必须在 B4/B5 仓储隔离完成后统一受保护；
 - 业务请求 DTO 不增加客户端可填写的 `user_id`；
 - Session 缺失、过期或撤销统一返回 `401`、`authentication_required`；
 - 资源不存在或不属于当前用户统一返回 `404`，避免 ID 枚举；

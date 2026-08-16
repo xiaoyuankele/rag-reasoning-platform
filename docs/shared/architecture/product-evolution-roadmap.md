@@ -162,8 +162,8 @@ P6 是跨前端、后端和数据库的独立阶段。它不把团队租户复�
 #### P6.1 身份与 Session
 
 > 当前进度：B1 用户、Session、验证码挑战的数据模型与迁移已完成；B2 密码规则、Argon2id、验证码生成与
-> HMAC、Fake Sender、请求验证码用例及并发安全仓储已完成。B3 已交付验证码申请、注册与登录接口，
-> Session 鉴权中间件、当前用户与退出待实现。
+> HMAC、Fake Sender、请求验证码用例及并发安全仓储已完成。B3 已交付验证码申请、注册、登录、
+> Session 鉴权中间件、当前用户与幂等退出，下一步进入 B4 文档归属与基础隔离。
 
 - 建立 `users`、`user_sessions`、`verification_challenges`、密码哈希和随机 Session Token；
 - 以统一验证码挑战支持已验证邮箱或手机号注册；默认 Fake Sender 零费用，真实短信按需后置；

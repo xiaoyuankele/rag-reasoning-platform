@@ -29,7 +29,7 @@ import (
 )
 
 // TestAuthRegistrationAndLoginHTTPWithPostgreSQL 验证真实的验证码申请、
-// 注册、再次登录、Argon2id、PostgreSQL Session 和 Set-Cookie 纵向链路。
+// 注册、再次登录、当前用户、退出、Argon2id、PostgreSQL Session 和 Cookie 纵向链路。
 func TestAuthRegistrationAndLoginHTTPWithPostgreSQL(t *testing.T) {
 	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
 		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
@@ -83,11 +83,12 @@ func TestAuthRegistrationAndLoginHTTPWithPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create password hasher: %v", err)
 	}
+	sessionTokenManager := sessioninfrastructure.NewTokenGenerator()
 	registerService, err := authapplication.NewRegisterService(
 		registrationRepository,
 		passwordHasher,
 		codeHasher,
-		sessioninfrastructure.NewTokenGenerator(),
+		sessionTokenManager,
 		time.Now,
 		authapplication.DefaultSessionTTL,
 	)
@@ -97,12 +98,20 @@ func TestAuthRegistrationAndLoginHTTPWithPostgreSQL(t *testing.T) {
 	loginService, err := authapplication.NewLoginService(
 		sessionRepository,
 		passwordHasher,
-		sessioninfrastructure.NewTokenGenerator(),
+		sessionTokenManager,
 		time.Now,
 		authapplication.DefaultSessionTTL,
 	)
 	if err != nil {
 		t.Fatalf("create login service: %v", err)
+	}
+	sessionService, err := authapplication.NewSessionService(
+		sessionRepository,
+		sessionTokenManager,
+		time.Now,
+	)
+	if err != nil {
+		t.Fatalf("create session service: %v", err)
 	}
 	verificationLimiter, _ := ratelimit.NewSlidingWindowLimiter(time.Minute, 10, 100)
 	authLimiter, _ := ratelimit.NewSlidingWindowLimiter(time.Minute, 10, 100)
@@ -112,6 +121,10 @@ func TestAuthRegistrationAndLoginHTTPWithPostgreSQL(t *testing.T) {
 	api.NewVerificationHandler(verificationService, verificationLimiter, logger).RegisterRoutes(router)
 	api.NewAuthRegisterHandler(registerService, authLimiter, logger, false).RegisterRoutes(router)
 	api.NewAuthLoginHandler(loginService, authLimiter, logger, false).RegisterRoutes(router)
+	api.NewAuthLogoutHandler(sessionService, logger, false).RegisterRoutes(router)
+	users := router.Group("/users")
+	users.Use(api.NewAuthMiddleware(sessionService, logger).Require)
+	api.NewCurrentUserHandler().RegisterRoutes(users)
 
 	verificationResponse := performJSONRequest(
 		router,
@@ -205,6 +218,62 @@ func TestAuthRegistrationAndLoginHTTPWithPostgreSQL(t *testing.T) {
 	if sessionCount != 2 {
 		t.Fatalf("session count after login=%d, want registration plus login sessions", sessionCount)
 	}
+
+	currentUserRequest := httptest.NewRequest(http.MethodGet, "/users/me", nil)
+	currentUserRequest.AddCookie(loginCookies[0])
+	currentUserResponse := httptest.NewRecorder()
+	router.ServeHTTP(currentUserResponse, currentUserRequest)
+	if currentUserResponse.Code != http.StatusOK ||
+		!strings.Contains(currentUserResponse.Body.String(), destination) {
+		t.Fatalf("current user status=%d body=%s", currentUserResponse.Code, currentUserResponse.Body.String())
+	}
+
+	logoutRequest := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	logoutRequest.AddCookie(loginCookies[0])
+	logoutResponse := httptest.NewRecorder()
+	router.ServeHTTP(logoutResponse, logoutRequest)
+	if logoutResponse.Code != http.StatusNoContent {
+		t.Fatalf("logout status=%d body=%s", logoutResponse.Code, logoutResponse.Body.String())
+	}
+	logoutCookies := logoutResponse.Result().Cookies()
+	if len(logoutCookies) != 1 || logoutCookies[0].Name != "rag_session" ||
+		logoutCookies[0].MaxAge != -1 {
+		t.Fatalf("logout cookies=%+v, want deleted rag_session", logoutCookies)
+	}
+
+	oldSessionRequest := httptest.NewRequest(http.MethodGet, "/users/me", nil)
+	oldSessionRequest.AddCookie(loginCookies[0])
+	oldSessionResponse := httptest.NewRecorder()
+	router.ServeHTTP(oldSessionResponse, oldSessionRequest)
+	if oldSessionResponse.Code != http.StatusUnauthorized ||
+		!strings.Contains(oldSessionResponse.Body.String(), `"code":"authentication_required"`) {
+		t.Fatalf("old session status=%d body=%s", oldSessionResponse.Code, oldSessionResponse.Body.String())
+	}
+
+	var revokedAt *time.Time
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT revoked_at FROM user_sessions WHERE token_hash = $1",
+		mustHashSessionToken(t, sessionTokenManager, loginCookies[0].Value),
+	).Scan(&revokedAt); err != nil {
+		t.Fatalf("query revoked login session: %v", err)
+	}
+	if revokedAt == nil {
+		t.Fatal("logout session revoked_at is nil")
+	}
+}
+
+func mustHashSessionToken(
+	t *testing.T,
+	tokenManager *sessioninfrastructure.TokenGenerator,
+	rawToken string,
+) string {
+	t.Helper()
+	tokenHash, err := tokenManager.Hash(rawToken)
+	if err != nil {
+		t.Fatalf("hash session token: %v", err)
+	}
+	return tokenHash
 }
 
 func performJSONRequest(router http.Handler, path string, body string) *httptest.ResponseRecorder {

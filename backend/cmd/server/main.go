@@ -413,11 +413,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("create password hasher: %w", err)
 	}
+	// 同一个 TokenGenerator 同时负责创建和校验 Session Token。
+	// 这里显式组装后，Application 不需要知道具体的随机数与摘要算法。
+	sessionTokenManager := sessioninfrastructure.NewTokenGenerator()
 	authRegisterService, err := authapplication.NewRegisterService(
 		authRegistrationRepository,
 		passwordHasher,
 		verificationCodeHasher,
-		sessioninfrastructure.NewTokenGenerator(),
+		sessionTokenManager,
 		time.Now,
 		authConfig.SessionTTL,
 	)
@@ -427,12 +430,20 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	authLoginService, err := authapplication.NewLoginService(
 		authSessionRepository,
 		passwordHasher,
-		sessioninfrastructure.NewTokenGenerator(),
+		sessionTokenManager,
 		time.Now,
 		authConfig.SessionTTL,
 	)
 	if err != nil {
 		return fmt.Errorf("create auth login service: %w", err)
+	}
+	authSessionService, err := authapplication.NewSessionService(
+		authSessionRepository,
+		sessionTokenManager,
+		time.Now,
+	)
+	if err != nil {
+		return fmt.Errorf("create auth session service: %w", err)
 	}
 	authRequestLimiter, err := ratelimit.NewSlidingWindowLimiter(
 		authConfig.RateLimitWindow,
@@ -561,6 +572,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		logger,
 		authConfig.CookieSecure,
 	)
+	authMiddleware := api.NewAuthMiddleware(authSessionService, logger)
+	currentUserHandler := api.NewCurrentUserHandler()
+	authLogoutHandler := api.NewAuthLogoutHandler(
+		authSessionService,
+		logger,
+		authConfig.CookieSecure,
+	)
 
 	router := api.NewRouter(logger)
 	documentHandler.RegisterRoutes(router)
@@ -582,6 +600,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	verificationHandler.RegisterRoutes(router)
 	authRegisterHandler.RegisterRoutes(router)
 	authLoginHandler.RegisterRoutes(router)
+	authLogoutHandler.RegisterRoutes(router)
+	// /users/me 是第一条真正依赖登录态的受保护路由。
+	// 文档业务路由将在 user_id 归属字段和仓储过滤同时完成后统一接入，
+	// 避免只加 Middleware 却仍能跨用户读取数据的“假隔离”。
+	users := router.Group("/users")
+	users.Use(authMiddleware.Require)
+	currentUserHandler.RegisterRoutes(users)
 
 	// Gin Engine 实现了 http.Handler，所以可以交给标准库 http.Server。
 	// 不再使用 router.Run，是因为我们需要持有 Server，才能在收到退出信号时

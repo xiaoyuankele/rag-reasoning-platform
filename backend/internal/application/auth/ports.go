@@ -40,6 +40,11 @@ type SessionTokenGenerator interface {
 	Generate() (SessionTokenPair, error)
 }
 
+// SessionTokenHasher 校验原始 Session Token 格式并计算数据库查询摘要。
+type SessionTokenHasher interface {
+	Hash(rawToken string) (string, error)
+}
+
 // RegistrationRecord 是 Application 交给事务仓储的注册数据。
 type RegistrationRecord struct {
 	ChallengeID               int64
@@ -103,4 +108,19 @@ type LoginRepository interface {
 		ctx context.Context,
 		record SessionRecord,
 	) (authdomain.Session, error)
+}
+
+// SessionAuthenticationRepository 是认证和退出用例所需的 Session 能力。
+type SessionAuthenticationRepository interface {
+	FindAuthenticatedIdentity(
+		ctx context.Context,
+		tokenHash string,
+		now time.Time,
+	) (AuthenticatedIdentity, error)
+
+	RevokeSession(
+		ctx context.Context,
+		tokenHash string,
+		revokedAt time.Time,
+	) error
 }

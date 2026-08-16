@@ -69,3 +69,20 @@ func writeAuthSessionResponse(
 		},
 	)
 }
+
+// clearSessionCookie 让浏览器立即删除 rag_session。
+func clearSessionCookie(c *gin.Context, cookieSecure bool) {
+	http.SetCookie(
+		c.Writer,
+		&http.Cookie{
+			Name:     sessionCookieName,
+			Value:    "",
+			Path:     "/",
+			Expires:  time.Unix(1, 0).UTC(),
+			MaxAge:   -1,
+			HttpOnly: true,
+			Secure:   cookieSecure,
+			SameSite: http.SameSiteLaxMode,
+		},
+	)
+}

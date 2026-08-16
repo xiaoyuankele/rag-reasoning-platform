@@ -65,6 +65,37 @@ func TestAuthSessionRepositoryFindsAccountAndCreatesSession(t *testing.T) {
 	if createdSession.UserID != userID || !createdSession.IsActive(now) {
 		t.Fatalf("CreateSession() = %+v, want active linked session", createdSession)
 	}
+
+	identity, err := repository.FindAuthenticatedIdentity(
+		ctx,
+		strings.Repeat("f", 64),
+		now,
+	)
+	if err != nil {
+		t.Fatalf("FindAuthenticatedIdentity() error = %v", err)
+	}
+	if identity.Actor.UserID != userID ||
+		identity.Actor.SessionID != createdSession.ID ||
+		identity.User.DisplayName != "Login User" {
+		t.Fatalf("FindAuthenticatedIdentity() = %+v, want linked identity", identity)
+	}
+
+	revokedAt := now.Add(time.Minute)
+	if err := repository.RevokeSession(
+		ctx,
+		strings.Repeat("f", 64),
+		revokedAt,
+	); err != nil {
+		t.Fatalf("RevokeSession() error = %v", err)
+	}
+	_, err = repository.FindAuthenticatedIdentity(
+		ctx,
+		strings.Repeat("f", 64),
+		revokedAt,
+	)
+	if !errors.Is(err, authapplication.ErrAuthenticationRequired) {
+		t.Fatalf("FindAuthenticatedIdentity() after revoke error = %v, want authentication required", err)
+	}
 }
 
 func TestAuthSessionRepositoryRejectsMissingAndDisabledAccounts(t *testing.T) {
