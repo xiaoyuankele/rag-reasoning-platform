@@ -15,6 +15,7 @@ import (
 
 	"rag-reasoning-platform/backend/internal/api"
 	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
+	authapplication "rag-reasoning-platform/backend/internal/application/auth"
 	documentapplication "rag-reasoning-platform/backend/internal/application/document"
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
 	verificationapplication "rag-reasoning-platform/backend/internal/application/verification"
@@ -22,9 +23,11 @@ import (
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
+	passwordinfrastructure "rag-reasoning-platform/backend/internal/infrastructure/password"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
 	"rag-reasoning-platform/backend/internal/infrastructure/pythonprocessor"
 	"rag-reasoning-platform/backend/internal/infrastructure/ratelimit"
+	sessioninfrastructure "rag-reasoning-platform/backend/internal/infrastructure/session"
 	verificationinfrastructure "rag-reasoning-platform/backend/internal/infrastructure/verification"
 	"rag-reasoning-platform/backend/internal/observability"
 	"rag-reasoning-platform/backend/migrations"
@@ -137,6 +140,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("load verification configuration: %w", err)
 	}
 
+	authConfig, err := config.LoadAuth()
+	if err != nil {
+		return fmt.Errorf("load auth configuration: %w", err)
+	}
+
 	// ConnectionString 包含密码，只传给数据库层，不写入日志。
 	databasePool, err := database.Open(
 		ctx,
@@ -179,6 +187,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	chunkRepository := postgres.NewChunkRepository(databasePool)
 	verificationChallengeRepository :=
 		postgres.NewVerificationChallengeRepository(databasePool)
+	authRegistrationRepository :=
+		postgres.NewAuthRegistrationRepository(databasePool)
 
 	// Worker 启动前，先恢复上一次异常退出遗留的 processing 任务。
 	// main 只负责决定调用时机；恢复规则位于 Application，SQL 位于 Repository。
@@ -396,6 +406,32 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("create verification request limiter: %w", err)
 	}
 
+	passwordHasher, err := passwordinfrastructure.NewArgon2idHasher(
+		passwordinfrastructure.DefaultParameters(),
+	)
+	if err != nil {
+		return fmt.Errorf("create password hasher: %w", err)
+	}
+	authRegisterService, err := authapplication.NewRegisterService(
+		authRegistrationRepository,
+		passwordHasher,
+		verificationCodeHasher,
+		sessioninfrastructure.NewTokenGenerator(),
+		time.Now,
+		authConfig.SessionTTL,
+	)
+	if err != nil {
+		return fmt.Errorf("create auth register service: %w", err)
+	}
+	authRequestLimiter, err := ratelimit.NewSlidingWindowLimiter(
+		authConfig.RateLimitWindow,
+		authConfig.PerClientLimit,
+		authConfig.GlobalLimit,
+	)
+	if err != nil {
+		return fmt.Errorf("create auth request limiter: %w", err)
+	}
+
 	// 默认不启动远程向量 Worker，避免开发者未明确授权时产生后台 API 调用。
 	var embeddingWorkerLoop *documentapplication.WorkerLoop
 	if embeddingConfig.WorkerEnabled {
@@ -502,6 +538,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		verificationRequestLimiter,
 		logger,
 	)
+	authRegisterHandler := api.NewAuthRegisterHandler(
+		authRegisterService,
+		authRequestLimiter,
+		logger,
+		authConfig.CookieSecure,
+	)
 
 	router := api.NewRouter(logger)
 	documentHandler.RegisterRoutes(router)
@@ -521,6 +563,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		answerHandler.RegisterRoutes(router)
 	}
 	verificationHandler.RegisterRoutes(router)
+	authRegisterHandler.RegisterRoutes(router)
 
 	// Gin Engine 实现了 http.Handler，所以可以交给标准库 http.Server。
 	// 不再使用 router.Run，是因为我们需要持有 Server，才能在收到退出信号时

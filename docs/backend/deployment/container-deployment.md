@@ -31,8 +31,9 @@ Docker 数据卷   <────命名卷──────> postgres:/var/lib/p
 1. 在项目根目录复制 `.env.example` 为 `.env`；
 2. 至少把 `DB_PASSWORD` 改成真实的本机数据库密码；
 3. 为 `VERIFICATION_HMAC_SECRET` 生成至少 32 字节的本机随机密钥；
-4. `.env` 已被 Git 忽略，不能提交真实密码、HMAC 密钥或 API Key；
-5. 日常无远程费用运行时保持以下开关为 `false`：
+4. 生产 HTTPS 部署设置 `AUTH_COOKIE_SECURE=true`；本地 HTTP 开发保持 `false`；
+5. `.env` 已被 Git 忽略，不能提交真实密码、HMAC 密钥或 API Key；
+6. 日常无远程费用运行时保持以下开关为 `false`：
 
 ```dotenv
 EMBEDDING_WORKER_ENABLED=false

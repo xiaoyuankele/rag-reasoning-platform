@@ -17,6 +17,12 @@ const (
 	errorCodeInvalidVerificationRequest     = "invalid_verification_request"
 	errorCodeVerificationRequestThrottled   = "verification_request_throttled"
 	errorCodeVerificationChannelUnavailable = "verification_channel_unavailable"
+	errorCodeInvalidAuthRequest             = "invalid_auth_request"
+	errorCodeAuthRequestThrottled           = "auth_request_throttled"
+	errorCodeVerificationCodeInvalid        = "verification_code_invalid"
+	errorCodeVerificationCodeExpired        = "verification_code_expired"
+	errorCodeVerificationAttemptsExceeded   = "verification_attempts_exceeded"
+	errorCodeContactAlreadyRegistered       = "contact_already_registered"
 	errorCodeInternal                       = "internal_error"
 )
 

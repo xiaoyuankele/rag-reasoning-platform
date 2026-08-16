@@ -40,7 +40,7 @@
 当前后端已经完成 P5 个人版工程化基线，包括运行路径、配置、日志、部署、备份、恢复和分级回归。
 P5 不包含用户认证。P6 已完成个人账户、Session、文档归属和全链路数据隔离的设计交接；B1 用户、Session、
 验证码挑战的数据模型和迁移已经实现，B2 密码规则、Argon2id、验证码生成与 HMAC、Fake Sender、请求验证码
-用例和 PostgreSQL 仓储也已实现。B3 已交付 `POST /auth/verification-codes`；注册、登录、Session、中间件和数据隔离仍待实现，因此当前服务仍不能开放给
+用例和 PostgreSQL 仓储也已实现。B3 已交付 `POST /auth/verification-codes` 与 `POST /auth/register`；登录、Session 鉴权中间件、当前用户、退出和数据隔离仍待实现，因此当前服务仍不能开放给
 互不信任的多人；
 团队工作区和多租户留到 P7。范围见
 [P6 个人用户域与私有数据闭环](../shared/architecture/personal-user-domain.md)，后端实施顺序见
