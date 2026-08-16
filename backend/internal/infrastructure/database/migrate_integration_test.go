@@ -135,6 +135,7 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 	}
 
 	assertAuthenticationSchema(t, ctx, testPool)
+	assertDocumentOwnerSchema(t, ctx, testPool)
 
 	var documentsTable string
 	if err := testPool.QueryRow(
@@ -397,6 +398,72 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 			upgradedChecksum,
 			expectedNormalizedChecksum,
 		)
+	}
+}
+
+// assertDocumentOwnerSchema 验证 B4 Release A 的文档归属字段、外键和分页索引。
+func assertDocumentOwnerSchema(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+) {
+	t.Helper()
+
+	var isNullable string
+	if err := pool.QueryRow(
+		ctx,
+		`
+			SELECT is_nullable
+			FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'documents'
+			  AND column_name = 'owner_user_id'
+		`,
+	).Scan(&isNullable); err != nil {
+		t.Fatalf("query documents.owner_user_id: %v", err)
+	}
+	if isNullable != "YES" {
+		t.Fatalf("documents.owner_user_id nullable = %q, want YES during Release A", isNullable)
+	}
+
+	var hasOwnerForeignKey bool
+	if err := pool.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_constraint
+				WHERE conname = 'documents_owner_user_id_fkey'
+				  AND conrelid = 'documents'::regclass
+				  AND confrelid = 'users'::regclass
+				  AND contype = 'f'
+				  AND confdeltype = 'r'
+			)
+		`,
+	).Scan(&hasOwnerForeignKey); err != nil {
+		t.Fatalf("query document owner foreign key: %v", err)
+	}
+	if !hasOwnerForeignKey {
+		t.Fatal("documents owner foreign key with ON DELETE RESTRICT was not created")
+	}
+
+	var hasOwnerListIndex bool
+	if err := pool.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_indexes
+				WHERE schemaname = current_schema()
+				  AND tablename = 'documents'
+				  AND indexname = 'idx_documents_owner_created_at'
+			)
+		`,
+	).Scan(&hasOwnerListIndex); err != nil {
+		t.Fatalf("query document owner list index: %v", err)
+	}
+	if !hasOwnerListIndex {
+		t.Fatal("documents owner list index was not created")
 	}
 }
 

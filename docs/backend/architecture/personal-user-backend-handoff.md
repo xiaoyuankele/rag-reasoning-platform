@@ -1,6 +1,6 @@
 # P6 个人用户域后端交接
 
-> 状态：实施中；B1、B2 以及 B3 验证码申请、注册、登录、Session 鉴权、当前用户和退出闭环已完成，下一步进入 B4 文档归属与基础隔离。交接日期：2026-08-16。
+> 状态：实施中；B1、B2 以及 B3 验证码申请、注册、登录、Session 鉴权、当前用户和退出闭环已完成；B4 已进入实施并建立 `domain/access.OwnerScope` 与 `Document.OwnerUserID` 领域地基。交接日期：2026-08-16。
 > 产品边界、主线图和跨端验收标准以
 > [P6 个人用户域与私有数据闭环](../../shared/architecture/personal-user-domain.md) 为准；本文只冻结 Go、PostgreSQL、Worker 和测试的实施边界。
 
@@ -23,12 +23,12 @@ Cookie
 ```text
 backend/internal/
 ├── domain/
+│   ├── access/               # OwnerScope 等跨用例访问范围
 │   ├── user/                 # User、状态、Repository 端口
 │   └── auth/                 # Session、验证码挑战及认证相关稳定类型
 ├── application/
 │   ├── auth/                 # 注册、登录、退出、当前身份
-│   ├── verification/         # 创建和消费验证码挑战
-│   └── scope/                # Actor/OwnerScope 与上下文无关的值对象
+│   └── verification/         # 创建和消费验证码挑战
 ├── api/
 │   ├── auth_handler.go
 │   ├── auth_middleware.go

@@ -63,6 +63,11 @@ func (s Status) CanTransitionTo(next Status) bool {
 // 该结构体只描述业务数据，不包含 SQL 和 JSON 处理逻辑。
 type Document struct {
 	ID int64
+	// OwnerUserID 是这份文档在个人用户域中的数据所有者。
+	// 正常业务返回的文档必须具有正整数 OwnerUserID；迁移期数据库中的
+	// NULL 历史记录不会进入面向用户的作用域查询。
+	OwnerUserID int64
+
 	// Title 是从文档元数据识别或由用户确认的文献标题。
 	// nil 表示尚未获得标题，展示层应回退到 OriginalName。
 	Title        *string
