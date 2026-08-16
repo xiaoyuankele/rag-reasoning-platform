@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,11 +16,14 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"rag-reasoning-platform/backend/internal/api"
+	authapplication "rag-reasoning-platform/backend/internal/application/auth"
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
 	"rag-reasoning-platform/backend/internal/config"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	postgresrepository "rag-reasoning-platform/backend/internal/infrastructure/postgres"
+	sessioninfrastructure "rag-reasoning-platform/backend/internal/infrastructure/session"
 	"rag-reasoning-platform/backend/migrations"
 )
 
@@ -45,10 +50,22 @@ func TestDocumentChunkHTTPWithPostgreSQL(t *testing.T) {
 		t.Fatalf("migrate database: %v", err)
 	}
 
-	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	ownerID := insertDocumentOwnerIntegrationUser(
+		t,
+		ctx,
+		pool,
+		fmt.Sprintf("chunk-http-%d@example.com", time.Now().UnixNano()),
+	)
+	ownerScope, err := accessdomain.NewOwnerScope(ownerID)
+	if err != nil {
+		t.Fatalf("create owner scope: %v", err)
+	}
+	documentRepository := postgresrepository.NewScopedDocumentRepository(pool)
 	chunkRepository := postgresrepository.NewChunkRepository(pool)
+	scopedChunkRepository := postgresrepository.NewScopedChunkRepository(pool)
 	createdDocument, err := documentRepository.Create(
 		ctx,
+		ownerScope,
 		documentdomain.CreateInput{
 			OriginalName: "chunk-http-test.md",
 			StoragePath: fmt.Sprintf(
@@ -73,6 +90,11 @@ func TestDocumentChunkHTTPWithPostgreSQL(t *testing.T) {
 			cleanupContext,
 			"DELETE FROM documents WHERE id = $1",
 			createdDocument.ID,
+		)
+		_, _ = pool.Exec(
+			cleanupContext,
+			"DELETE FROM users WHERE id = $1",
+			ownerID,
 		)
 	}()
 
@@ -99,12 +121,28 @@ func TestDocumentChunkHTTPWithPostgreSQL(t *testing.T) {
 
 	service := applicationdocument.NewChunkListService(
 		documentRepository,
-		chunkRepository,
+		scopedChunkRepository,
 	)
 	handler := api.NewDocumentChunkHandler(service)
+	sessionRepository := postgresrepository.NewAuthSessionRepository(pool)
+	tokenManager := sessioninfrastructure.NewTokenGenerator()
+	rawToken := createDocumentOwnerIntegrationSession(
+		t, ctx, sessionRepository, tokenManager, ownerID,
+	)
+	sessionService, err := authapplication.NewSessionService(
+		sessionRepository,
+		tokenManager,
+		time.Now,
+	)
+	if err != nil {
+		t.Fatalf("create session service: %v", err)
+	}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	handler.RegisterRoutes(router)
+	protectedRoutes := router.Group("")
+	protectedRoutes.Use(api.NewAuthMiddleware(sessionService, logger).Require)
+	handler.RegisterRoutes(protectedRoutes)
 
 	request := httptest.NewRequest(
 		http.MethodGet,
@@ -114,6 +152,7 @@ func TestDocumentChunkHTTPWithPostgreSQL(t *testing.T) {
 		),
 		nil,
 	)
+	request.AddCookie(&http.Cookie{Name: integrationSessionCookieName, Value: rawToken})
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 
@@ -163,6 +202,7 @@ func TestDocumentChunkHTTPWithPostgreSQL(t *testing.T) {
 		fmt.Sprintf("/documents/%d/chunks", createdDocument.ID),
 		nil,
 	)
+	conflictRequest.AddCookie(&http.Cookie{Name: integrationSessionCookieName, Value: rawToken})
 	conflictResponse := httptest.NewRecorder()
 	router.ServeHTTP(conflictResponse, conflictRequest)
 	if conflictResponse.Code != http.StatusConflict {

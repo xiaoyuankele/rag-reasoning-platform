@@ -12,20 +12,22 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 type fakeDocumentProcessingQueueService struct {
-	queueFunc  func(context.Context, int64) (documentdomain.ProcessingJob, error)
+	queueFunc  func(context.Context, accessdomain.OwnerScope, int64) (documentdomain.ProcessingJob, error)
 	queueCalls int
 }
 
 func (f *fakeDocumentProcessingQueueService) Queue(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	documentID int64,
 ) (documentdomain.ProcessingJob, error) {
 	f.queueCalls++
-	return f.queueFunc(ctx, documentID)
+	return f.queueFunc(ctx, scope, documentID)
 }
 
 func newTestDocumentProcessingRouter(
@@ -34,6 +36,7 @@ func newTestDocumentProcessingRouter(
 	gin.SetMode(gin.TestMode)
 
 	router := gin.New()
+	useTestAuthenticatedIdentity(router)
 	handler := NewDocumentProcessingHandler(service)
 	handler.RegisterRoutes(router)
 
@@ -52,6 +55,7 @@ func TestDocumentProcessingHandlerRejectsInvalidID(t *testing.T) {
 			service := &fakeDocumentProcessingQueueService{
 				queueFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					int64,
 				) (documentdomain.ProcessingJob, error) {
 					t.Fatal("Queue() must not be called for invalid ID")
@@ -124,8 +128,12 @@ func TestDocumentProcessingHandlerMapsServiceErrors(t *testing.T) {
 			service := &fakeDocumentProcessingQueueService{
 				queueFunc: func(
 					_ context.Context,
+					scope accessdomain.OwnerScope,
 					documentID int64,
 				) (documentdomain.ProcessingJob, error) {
+					if scope.OwnerUserID() != testAPIOwnerUserID {
+						t.Fatalf("Queue() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+					}
 					if documentID != 7 {
 						t.Fatalf(
 							"Queue() documentID = %d, want 7",
@@ -183,8 +191,12 @@ func TestDocumentProcessingHandlerReturnsAcceptedJob(t *testing.T) {
 	service := &fakeDocumentProcessingQueueService{
 		queueFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			documentID int64,
 		) (documentdomain.ProcessingJob, error) {
+			if scope.OwnerUserID() != testAPIOwnerUserID {
+				t.Fatalf("Queue() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+			}
 			if documentID != expectedJob.DocumentID {
 				t.Fatalf(
 					"Queue() documentID = %d, want %d",

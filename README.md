@@ -139,7 +139,7 @@ rag_reasoning_platform_individual/
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
 | P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
 | P5 | 已完成（个人版基线） | 稳定运行路径、可观测性、容器部署、配套备份恢复、任务恢复、默认回归、一次性数据库集成及发布候选分级验收均已完成；不包含用户与租户系统 |
-| P6 | 实施中（B1～B3 已完成，B4 核心文档接口已隔离） | 身份闭环已经完成；上传、文档列表、详情和删除现已通过 Cookie、OwnerScope 与带所有者条件的 SQL 形成纵向隔离，并通过双用户真实 HTTP/PostgreSQL 测试。解析、chunks、任务、检索和问答仍待迁移，当前服务仍不能开放给互不信任的多人 |
+| P6 | 实施中（B1～B4 已完成） | 身份闭环以及文档、解析任务、chunks 的用户隔离已经完成；相关接口均通过 Cookie、OwnerScope 与所有者 SQL 形成纵向边界，并通过双用户真实 HTTP/PostgreSQL 测试。B5 向量任务、检索和问答仍待迁移，当前服务仍不能开放给互不信任的多人 |
 | P7 | 未开始 | 团队工作区、成员权限、共享、租户配额和审计尚未设计或实现 |
 
 前端 F0、F1 已完成，F3 关键词检索最小切片已通过真实联调；下一步先接入 P6 后端身份边界，再完成
@@ -289,7 +289,10 @@ active 用户，并在 Gin Context 中写入可信 `Actor{UserID, SessionID}`。
 失效的 HTTP 集成测试。B4 已把 `POST /documents`、`GET /documents`、`GET /documents/:id` 和
 `DELETE /documents/:id` 接入认证保护：Handler 只从可信 Actor 构造 OwnerScope，Application 显式传递
 Scope，PostgreSQL 在 SQL 中写入或过滤 `owner_user_id`。双用户真实 HTTP 测试已确认用户 B 看不到、也不能
-删除用户 A 的文档；其余任务、chunks、检索和问答接口仍要在后续 B4/B5 完成同样改造。
+删除用户 A 的文档。B4 还完成了 `POST /documents/:id/process`、`GET /documents/:id/chunks` 和
+`GET /processing-jobs/:id`：解析任务通过关联文档创建和查询，chunks 的统计与分页 SQL 也会连接文档并
+限定所有者；Worker 保持系统级全局消费，不依赖浏览器 Session。B5 仍需隔离向量任务、关键词检索、
+语义检索和问答。
 
 Python PDF 测试依赖 `ai/pyproject.toml` 中锁定的解析库。首次运行前安装项目依赖，然后执行测试：
 

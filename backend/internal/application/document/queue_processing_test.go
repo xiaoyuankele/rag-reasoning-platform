@@ -6,33 +6,36 @@ import (
 	"testing"
 	"time"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 type fakeQueueDocumentFinder struct {
-	getByIDFunc  func(context.Context, int64) (documentdomain.Document, error)
+	getByIDFunc  func(context.Context, accessdomain.OwnerScope, int64) (documentdomain.Document, error)
 	getByIDCalls int
 }
 
 func (f *fakeQueueDocumentFinder) GetByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	id int64,
 ) (documentdomain.Document, error) {
 	f.getByIDCalls++
-	return f.getByIDFunc(ctx, id)
+	return f.getByIDFunc(ctx, scope, id)
 }
 
 type fakeProcessingJobCreator struct {
-	createFunc  func(context.Context, int64) (documentdomain.ProcessingJob, error)
+	createFunc  func(context.Context, accessdomain.OwnerScope, int64) (documentdomain.ProcessingJob, error)
 	createCalls int
 }
 
 func (f *fakeProcessingJobCreator) CreateProcessingJob(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	documentID int64,
 ) (documentdomain.ProcessingJob, error) {
 	f.createCalls++
-	return f.createFunc(ctx, documentID)
+	return f.createFunc(ctx, scope, documentID)
 }
 
 func TestQueueProcessingServiceRejectsInvalidID(t *testing.T) {
@@ -40,7 +43,7 @@ func TestQueueProcessingServiceRejectsInvalidID(t *testing.T) {
 	jobs := newFailOnCallJobCreator(t)
 	service := NewQueueProcessingService(documents, jobs)
 
-	_, err := service.Queue(context.Background(), 0)
+	_, err := service.Queue(context.Background(), testOwnerScope(t), 0)
 
 	if !errors.Is(err, ErrInvalidID) {
 		t.Fatalf("Queue() error = %v, want ErrInvalidID", err)
@@ -52,6 +55,7 @@ func TestQueueProcessingServicePreservesNotFound(t *testing.T) {
 	documents := &fakeQueueDocumentFinder{
 		getByIDFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{}, documentdomain.ErrNotFound
@@ -60,7 +64,7 @@ func TestQueueProcessingServicePreservesNotFound(t *testing.T) {
 	jobs := newFailOnCallJobCreator(t)
 	service := NewQueueProcessingService(documents, jobs)
 
-	_, err := service.Queue(context.Background(), 99)
+	_, err := service.Queue(context.Background(), testOwnerScope(t), 99)
 
 	if !errors.Is(err, documentdomain.ErrNotFound) {
 		t.Fatalf("Queue() error = %v, want ErrNotFound", err)
@@ -88,6 +92,7 @@ func TestQueueProcessingServiceRejectsNonProcessableStatus(t *testing.T) {
 			documents := &fakeQueueDocumentFinder{
 				getByIDFunc: func(
 					_ context.Context,
+					_ accessdomain.OwnerScope,
 					id int64,
 				) (documentdomain.Document, error) {
 					return documentdomain.Document{
@@ -99,7 +104,7 @@ func TestQueueProcessingServiceRejectsNonProcessableStatus(t *testing.T) {
 			jobs := newFailOnCallJobCreator(t)
 			service := NewQueueProcessingService(documents, jobs)
 
-			_, err := service.Queue(context.Background(), 7)
+			_, err := service.Queue(context.Background(), testOwnerScope(t), 7)
 
 			if !errors.Is(err, ErrDocumentNotProcessable) {
 				t.Fatalf(
@@ -116,6 +121,7 @@ func TestQueueProcessingServicePreservesActiveJobConflict(t *testing.T) {
 	documents := &fakeQueueDocumentFinder{
 		getByIDFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			id int64,
 		) (documentdomain.Document, error) {
 			return documentdomain.Document{
@@ -127,6 +133,7 @@ func TestQueueProcessingServicePreservesActiveJobConflict(t *testing.T) {
 	jobs := &fakeProcessingJobCreator{
 		createFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (documentdomain.ProcessingJob, error) {
 			return documentdomain.ProcessingJob{},
@@ -135,7 +142,7 @@ func TestQueueProcessingServicePreservesActiveJobConflict(t *testing.T) {
 	}
 	service := NewQueueProcessingService(documents, jobs)
 
-	_, err := service.Queue(context.Background(), 7)
+	_, err := service.Queue(context.Background(), testOwnerScope(t), 7)
 
 	if !errors.Is(err, documentdomain.ErrActiveProcessingJobExists) {
 		t.Fatalf(
@@ -176,8 +183,12 @@ func TestQueueProcessingServiceCreatesJob(t *testing.T) {
 			documents := &fakeQueueDocumentFinder{
 				getByIDFunc: func(
 					_ context.Context,
+					scope accessdomain.OwnerScope,
 					id int64,
 				) (documentdomain.Document, error) {
+					if scope.OwnerUserID() != testOwnerUserID {
+						t.Fatalf("GetByID() scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
+					}
 					if id != documentID {
 						t.Fatalf(
 							"GetByID() id = %d, want %d",
@@ -195,8 +206,12 @@ func TestQueueProcessingServiceCreatesJob(t *testing.T) {
 			jobs := &fakeProcessingJobCreator{
 				createFunc: func(
 					_ context.Context,
+					scope accessdomain.OwnerScope,
 					actualDocumentID int64,
 				) (documentdomain.ProcessingJob, error) {
+					if scope.OwnerUserID() != testOwnerUserID {
+						t.Fatalf("CreateProcessingJob() scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
+					}
 					if actualDocumentID != documentID {
 						t.Fatalf(
 							"CreateProcessingJob() documentID = %d, want %d",
@@ -212,6 +227,7 @@ func TestQueueProcessingServiceCreatesJob(t *testing.T) {
 
 			actualJob, err := service.Queue(
 				context.Background(),
+				testOwnerScope(t),
 				documentID,
 			)
 
@@ -238,6 +254,7 @@ func newFailOnCallQueueFinder(
 	return &fakeQueueDocumentFinder{
 		getByIDFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (documentdomain.Document, error) {
 			t.Fatal("GetByID() must not be called")
@@ -254,6 +271,7 @@ func newFailOnCallJobCreator(
 	return &fakeProcessingJobCreator{
 		createFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (documentdomain.ProcessingJob, error) {
 			t.Fatal("CreateProcessingJob() must not be called")

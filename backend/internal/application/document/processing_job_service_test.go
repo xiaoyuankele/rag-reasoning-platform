@@ -6,26 +6,29 @@ import (
 	"testing"
 	"time"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 type fakeProcessingJobFinder struct {
-	getByIDFunc  func(context.Context, int64) (documentdomain.ProcessingJob, error)
+	getByIDFunc  func(context.Context, accessdomain.OwnerScope, int64) (documentdomain.ProcessingJob, error)
 	getByIDCalls int
 }
 
 func (f *fakeProcessingJobFinder) GetProcessingJobByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	jobID int64,
 ) (documentdomain.ProcessingJob, error) {
 	f.getByIDCalls++
-	return f.getByIDFunc(ctx, jobID)
+	return f.getByIDFunc(ctx, scope, jobID)
 }
 
 func TestProcessingJobServiceRejectsInvalidID(t *testing.T) {
 	finder := &fakeProcessingJobFinder{
 		getByIDFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (documentdomain.ProcessingJob, error) {
 			t.Fatal("GetProcessingJobByID() must not be called")
@@ -34,7 +37,7 @@ func TestProcessingJobServiceRejectsInvalidID(t *testing.T) {
 	}
 	service := NewProcessingJobService(finder)
 
-	_, err := service.GetByID(context.Background(), 0)
+	_, err := service.GetByID(context.Background(), testOwnerScope(t), 0)
 
 	if !errors.Is(err, ErrInvalidProcessingJobID) {
 		t.Fatalf(
@@ -62,8 +65,12 @@ func TestProcessingJobServiceReturnsJob(t *testing.T) {
 	finder := &fakeProcessingJobFinder{
 		getByIDFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			jobID int64,
 		) (documentdomain.ProcessingJob, error) {
+			if scope.OwnerUserID() != testOwnerUserID {
+				t.Fatalf("GetProcessingJobByID() scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
+			}
 			if jobID != expectedJob.ID {
 				t.Fatalf(
 					"GetProcessingJobByID() jobID = %d, want %d",
@@ -79,6 +86,7 @@ func TestProcessingJobServiceReturnsJob(t *testing.T) {
 
 	actualJob, err := service.GetByID(
 		context.Background(),
+		testOwnerScope(t),
 		expectedJob.ID,
 	)
 
@@ -104,6 +112,7 @@ func TestProcessingJobServicePreservesNotFound(t *testing.T) {
 	finder := &fakeProcessingJobFinder{
 		getByIDFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			int64,
 		) (documentdomain.ProcessingJob, error) {
 			return documentdomain.ProcessingJob{},
@@ -112,7 +121,7 @@ func TestProcessingJobServicePreservesNotFound(t *testing.T) {
 	}
 	service := NewProcessingJobService(finder)
 
-	_, err := service.GetByID(context.Background(), 999)
+	_, err := service.GetByID(context.Background(), testOwnerScope(t), 999)
 
 	if !errors.Is(err, documentdomain.ErrProcessingJobNotFound) {
 		t.Fatalf(

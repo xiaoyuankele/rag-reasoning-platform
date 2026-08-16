@@ -1,6 +1,6 @@
 # P6 个人用户域与私有数据闭环
 
-> 状态：实施中；B1～B3 已完成。B4 已将上传、列表、详情和删除四个核心文档接口接入 Cookie 认证、OwnerScope、Application 与作用域 SQL，并通过双用户真实 HTTP/PostgreSQL 测试；解析、chunks、任务以及 B5 检索与问答隔离待实现。确认日期：2026-08-16。
+> 状态：实施中；B1～B4 已完成。文档、解析任务和 chunks 已接入 Cookie 认证、OwnerScope、Application 与作用域 SQL，并通过双用户真实 HTTP/PostgreSQL 测试；B5 向量任务、检索与问答隔离待实现。确认日期：2026-08-16。
 > 本文是前端、后端、数据库与部署共同遵守的 P6 范围基线；团队工作区、成员角色和真正的多租户属于后续 P7。
 
 ## 1. 本阶段要解决的问题
@@ -332,9 +332,9 @@ Secure   = 生产环境 true，本地 HTTP 开发 false
 | 上传 | 已完成基础隔离 | 从 Actor 写入 `documents.owner_user_id` |
 | 文档列表/详情 | 已完成基础隔离 | 所有查询带 OwnerScope |
 | 删除 | 已完成基础隔离 | 只删除当前用户文档，不属于时返回 404 |
-| 解析任务创建 | 可给任意文档创建任务 | 创建前按 OwnerScope 查文档 |
-| 解析任务轮询 | 可按裸 job ID 查询 | 任务 JOIN 文档并校验 owner |
-| chunks 浏览 | 可按裸 document ID 查询 | 文档归属和 ready 状态同时满足 |
+| 解析任务创建 | 已完成基础隔离 | 创建前按 OwnerScope 查文档，写入 SQL 再次限定 owner |
+| 解析任务轮询 | 已完成基础隔离 | 任务 JOIN 文档并校验 owner |
+| chunks 浏览 | 已完成基础隔离 | 文档归属和 ready 状态同时满足，分页 SQL 也限定 owner |
 | 向量任务 | 可给任意 ready 文档创建/查询 | 创建和轮询都通过所属文档约束 |
 | 关键词检索 | 扫描全部 ready 文档 | SQL 候选集合限定 owner |
 | 语义检索 | 扫描全部可用向量 | 就绪检查和相似度查询都限定 owner |

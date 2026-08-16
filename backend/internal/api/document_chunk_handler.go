@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -17,6 +18,7 @@ import (
 type documentChunkListService interface {
 	List(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		input applicationdocument.ChunkListInput,
 	) (applicationdocument.ChunkListOutput, error)
 }
@@ -57,6 +59,12 @@ type documentChunkListResponse struct {
 
 // List 处理 GET /documents/:id/chunks。
 func (h *DocumentChunkHandler) List(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	documentID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || documentID <= 0 {
 		c.JSON(http.StatusBadRequest, errorResponse{
@@ -91,6 +99,7 @@ func (h *DocumentChunkHandler) List(c *gin.Context) {
 
 	result, err := h.service.List(
 		c.Request.Context(),
+		scope,
 		applicationdocument.ChunkListInput{
 			DocumentID: documentID,
 			Page:       page,

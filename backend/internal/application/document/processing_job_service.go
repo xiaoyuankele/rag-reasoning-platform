@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -15,12 +16,12 @@ var ErrInvalidProcessingJobID = errors.New(
 
 // ProcessingJobService 提供解析任务查询用例。
 type ProcessingJobService struct {
-	jobs documentdomain.ProcessingJobFinder
+	jobs documentdomain.ScopedProcessingJobFinder
 }
 
 // NewProcessingJobService 创建解析任务查询服务。
 func NewProcessingJobService(
-	jobs documentdomain.ProcessingJobFinder,
+	jobs documentdomain.ScopedProcessingJobFinder,
 ) *ProcessingJobService {
 	return &ProcessingJobService{
 		jobs: jobs,
@@ -30,13 +31,14 @@ func NewProcessingJobService(
 // GetByID 校验任务 ID，并查询解析任务。
 func (s *ProcessingJobService) GetByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	jobID int64,
 ) (documentdomain.ProcessingJob, error) {
 	if jobID <= 0 {
 		return documentdomain.ProcessingJob{}, ErrInvalidProcessingJobID
 	}
 
-	foundJob, err := s.jobs.GetProcessingJobByID(ctx, jobID)
+	foundJob, err := s.jobs.GetProcessingJobByID(ctx, scope, jobID)
 	if err != nil {
 		return documentdomain.ProcessingJob{}, fmt.Errorf(
 			"get processing job by ID: %w",

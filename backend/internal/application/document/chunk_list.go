@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -30,14 +31,14 @@ type ChunkListOutput struct {
 
 // ChunkListService 编排“确认文档可读 → 分页查询 chunks”用例。
 type ChunkListService struct {
-	documents documentdomain.Finder
-	chunks    documentdomain.ChunkPageLister
+	documents documentdomain.ScopedFinder
+	chunks    documentdomain.ScopedChunkPageLister
 }
 
 // NewChunkListService 创建文档文本块分页服务。
 func NewChunkListService(
-	documents documentdomain.Finder,
-	chunks documentdomain.ChunkPageLister,
+	documents documentdomain.ScopedFinder,
+	chunks documentdomain.ScopedChunkPageLister,
 ) *ChunkListService {
 	return &ChunkListService{
 		documents: documents,
@@ -48,6 +49,7 @@ func NewChunkListService(
 // List 校验参数，只允许 ready 文档读取正式 chunks，并计算总页数。
 func (s *ChunkListService) List(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input ChunkListInput,
 ) (ChunkListOutput, error) {
 	if input.DocumentID <= 0 {
@@ -60,7 +62,7 @@ func (s *ChunkListService) List(
 		return ChunkListOutput{}, ErrInvalidPageSize
 	}
 
-	foundDocument, err := s.documents.GetByID(ctx, input.DocumentID)
+	foundDocument, err := s.documents.GetByID(ctx, scope, input.DocumentID)
 	if err != nil {
 		return ChunkListOutput{}, fmt.Errorf(
 			"get document before listing chunks: %w",
@@ -74,6 +76,7 @@ func (s *ChunkListService) List(
 	offset := (input.Page - 1) * input.PageSize
 	pageResult, err := s.chunks.ListPageByDocumentID(
 		ctx,
+		scope,
 		foundDocument.ID,
 		documentdomain.ChunkPageOptions{
 			Limit:  input.PageSize,

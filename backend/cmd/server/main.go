@@ -184,8 +184,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentRepository := postgres.NewDocumentRepository(databasePool)
 	scopedDocumentRepository := postgres.NewScopedDocumentRepository(databasePool)
 	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
+	scopedProcessingJobRepository := postgres.NewScopedProcessingJobRepository(databasePool)
 	embeddingJobRepository := postgres.NewEmbeddingJobRepository(databasePool)
 	chunkRepository := postgres.NewChunkRepository(databasePool)
+	scopedChunkRepository := postgres.NewScopedChunkRepository(databasePool)
 	verificationChallengeRepository :=
 		postgres.NewVerificationChallengeRepository(databasePool)
 	authRegistrationRepository :=
@@ -273,17 +275,17 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentUploadService := documentapplication.NewUploadService(scopedDocumentRepository, localFileStorage)
 	documentListService := documentapplication.NewListService(scopedDocumentRepository)
 	documentChunkListService := documentapplication.NewChunkListService(
-		documentRepository,
-		chunkRepository,
+		scopedDocumentRepository,
+		scopedChunkRepository,
 	)
 	documentSearchService := documentapplication.NewSearchService(chunkRepository)
 	documentDeleteService := documentapplication.NewDeleteService(scopedDocumentRepository, localFileStorage)
 	documentProcessingService := documentapplication.NewQueueProcessingService(
-		documentRepository,
-		processingJobRepository,
+		scopedDocumentRepository,
+		scopedProcessingJobRepository,
 	)
 	processingJobService := documentapplication.NewProcessingJobService(
-		processingJobRepository,
+		scopedProcessingJobRepository,
 	)
 	embeddingQueueService := embeddingapplication.NewQueueService(
 		documentRepository,
@@ -582,10 +584,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	)
 
 	router := api.NewRouter(logger)
-	documentChunkHandler.RegisterRoutes(router)
 	documentSearchHandler.RegisterRoutes(router)
-	documentProcessingHandler.RegisterRoutes(router)
-	processingJobHandler.RegisterRoutes(router)
 	documentEmbeddingHandler.RegisterRoutes(router)
 	embeddingJobHandler.RegisterRoutes(router)
 	if semanticSearchHandler != nil {
@@ -607,6 +606,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentUploadHandler.RegisterRoutes(protectedRoutes)
 	documentListHandler.RegisterRoutes(protectedRoutes)
 	documentDeleteHandler.RegisterRoutes(protectedRoutes)
+	documentChunkHandler.RegisterRoutes(protectedRoutes)
+	documentProcessingHandler.RegisterRoutes(protectedRoutes)
+	processingJobHandler.RegisterRoutes(protectedRoutes)
 
 	users := protectedRoutes.Group("/users")
 	currentUserHandler.RegisterRoutes(users)

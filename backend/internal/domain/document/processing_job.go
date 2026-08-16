@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 )
 
 // ErrActiveProcessingJobExists 表示文档已经存在排队中或处理中的任务。
@@ -77,6 +79,26 @@ type ProcessingJobCreator interface {
 type ProcessingJobFinder interface {
 	GetProcessingJobByID(
 		ctx context.Context,
+		jobID int64,
+	) (ProcessingJob, error)
+}
+
+// ScopedProcessingJobCreator 定义只能为当前所有者的文档创建解析任务的能力。
+// 文档不存在和属于其他用户都必须返回 ErrNotFound。
+type ScopedProcessingJobCreator interface {
+	CreateProcessingJob(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		documentID int64,
+	) (ProcessingJob, error)
+}
+
+// ScopedProcessingJobFinder 定义只能查询当前所有者文档所关联任务的能力。
+// 任务不存在和任务属于其他用户都必须返回 ErrProcessingJobNotFound。
+type ScopedProcessingJobFinder interface {
+	GetProcessingJobByID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		jobID int64,
 	) (ProcessingJob, error)
 }

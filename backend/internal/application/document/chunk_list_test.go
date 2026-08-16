@@ -6,34 +6,37 @@ import (
 	"reflect"
 	"testing"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 type fakeChunkListDocumentFinder struct {
-	getByIDFunc  func(context.Context, int64) (documentdomain.Document, error)
+	getByIDFunc  func(context.Context, accessdomain.OwnerScope, int64) (documentdomain.Document, error)
 	getByIDCalls int
 }
 
 func (f *fakeChunkListDocumentFinder) GetByID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	documentID int64,
 ) (documentdomain.Document, error) {
 	f.getByIDCalls++
-	return f.getByIDFunc(ctx, documentID)
+	return f.getByIDFunc(ctx, scope, documentID)
 }
 
 type fakeChunkPageLister struct {
-	listFunc  func(context.Context, int64, documentdomain.ChunkPageOptions) (documentdomain.ChunkPageResult, error)
+	listFunc  func(context.Context, accessdomain.OwnerScope, int64, documentdomain.ChunkPageOptions) (documentdomain.ChunkPageResult, error)
 	listCalls int
 }
 
 func (f *fakeChunkPageLister) ListPageByDocumentID(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	documentID int64,
 	options documentdomain.ChunkPageOptions,
 ) (documentdomain.ChunkPageResult, error) {
 	f.listCalls++
-	return f.listFunc(ctx, documentID, options)
+	return f.listFunc(ctx, scope, documentID, options)
 }
 
 func TestChunkListServiceRejectsInvalidInput(t *testing.T) {
@@ -69,6 +72,7 @@ func TestChunkListServiceRejectsInvalidInput(t *testing.T) {
 			finder := &fakeChunkListDocumentFinder{
 				getByIDFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					int64,
 				) (documentdomain.Document, error) {
 					t.Fatal("GetByID() must not be called for invalid input")
@@ -78,6 +82,7 @@ func TestChunkListServiceRejectsInvalidInput(t *testing.T) {
 			lister := &fakeChunkPageLister{
 				listFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					int64,
 					documentdomain.ChunkPageOptions,
 				) (documentdomain.ChunkPageResult, error) {
@@ -87,7 +92,7 @@ func TestChunkListServiceRejectsInvalidInput(t *testing.T) {
 			}
 			service := NewChunkListService(finder, lister)
 
-			_, err := service.List(context.Background(), testCase.input)
+			_, err := service.List(context.Background(), testOwnerScope(t), testCase.input)
 
 			if !errors.Is(err, testCase.wantErr) {
 				t.Fatalf("List() error = %v, want %v", err, testCase.wantErr)
@@ -111,6 +116,7 @@ func TestChunkListServiceRejectsDocumentThatIsNotReady(t *testing.T) {
 			finder := &fakeChunkListDocumentFinder{
 				getByIDFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					int64,
 				) (documentdomain.Document, error) {
 					return documentdomain.Document{ID: 7, Status: status}, nil
@@ -119,6 +125,7 @@ func TestChunkListServiceRejectsDocumentThatIsNotReady(t *testing.T) {
 			lister := &fakeChunkPageLister{
 				listFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					int64,
 					documentdomain.ChunkPageOptions,
 				) (documentdomain.ChunkPageResult, error) {
@@ -128,7 +135,7 @@ func TestChunkListServiceRejectsDocumentThatIsNotReady(t *testing.T) {
 			}
 			service := NewChunkListService(finder, lister)
 
-			_, err := service.List(context.Background(), ChunkListInput{
+			_, err := service.List(context.Background(), testOwnerScope(t), ChunkListInput{
 				DocumentID: 7,
 				Page:       1,
 				PageSize:   20,
@@ -152,8 +159,12 @@ func TestChunkListServiceReturnsPage(t *testing.T) {
 	finder := &fakeChunkListDocumentFinder{
 		getByIDFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			documentID int64,
 		) (documentdomain.Document, error) {
+			if scope.OwnerUserID() != testOwnerUserID {
+				t.Fatalf("GetByID() scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
+			}
 			return documentdomain.Document{
 				ID:     documentID,
 				Status: documentdomain.StatusReady,
@@ -163,9 +174,13 @@ func TestChunkListServiceReturnsPage(t *testing.T) {
 	lister := &fakeChunkPageLister{
 		listFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			documentID int64,
 			options documentdomain.ChunkPageOptions,
 		) (documentdomain.ChunkPageResult, error) {
+			if scope.OwnerUserID() != testOwnerUserID {
+				t.Fatalf("ListPageByDocumentID() scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
+			}
 			if documentID != 7 {
 				t.Fatalf("document ID = %d, want 7", documentID)
 			}
@@ -184,7 +199,7 @@ func TestChunkListServiceReturnsPage(t *testing.T) {
 	}
 	service := NewChunkListService(finder, lister)
 
-	result, err := service.List(context.Background(), ChunkListInput{
+	result, err := service.List(context.Background(), testOwnerScope(t), ChunkListInput{
 		DocumentID: 7,
 		Page:       2,
 		PageSize:   2,
@@ -207,6 +222,7 @@ func TestChunkListServicePreservesDependencyErrors(t *testing.T) {
 		finder := &fakeChunkListDocumentFinder{
 			getByIDFunc: func(
 				context.Context,
+				accessdomain.OwnerScope,
 				int64,
 			) (documentdomain.Document, error) {
 				return documentdomain.Document{}, documentdomain.ErrNotFound
@@ -215,7 +231,7 @@ func TestChunkListServicePreservesDependencyErrors(t *testing.T) {
 		lister := &fakeChunkPageLister{}
 		service := NewChunkListService(finder, lister)
 
-		_, err := service.List(context.Background(), ChunkListInput{
+		_, err := service.List(context.Background(), testOwnerScope(t), ChunkListInput{
 			DocumentID: 999,
 			Page:       1,
 			PageSize:   20,
@@ -231,6 +247,7 @@ func TestChunkListServicePreservesDependencyErrors(t *testing.T) {
 		finder := &fakeChunkListDocumentFinder{
 			getByIDFunc: func(
 				context.Context,
+				accessdomain.OwnerScope,
 				int64,
 			) (documentdomain.Document, error) {
 				return documentdomain.Document{
@@ -242,6 +259,7 @@ func TestChunkListServicePreservesDependencyErrors(t *testing.T) {
 		lister := &fakeChunkPageLister{
 			listFunc: func(
 				context.Context,
+				accessdomain.OwnerScope,
 				int64,
 				documentdomain.ChunkPageOptions,
 			) (documentdomain.ChunkPageResult, error) {
@@ -250,7 +268,7 @@ func TestChunkListServicePreservesDependencyErrors(t *testing.T) {
 		}
 		service := NewChunkListService(finder, lister)
 
-		_, err := service.List(context.Background(), ChunkListInput{
+		_, err := service.List(context.Background(), testOwnerScope(t), ChunkListInput{
 			DocumentID: 7,
 			Page:       1,
 			PageSize:   20,

@@ -1,6 +1,6 @@
 # P6 个人用户域后端交接
 
-> 状态：实施中；B1～B3 已完成。B4 已建立 OwnerScope、文档所有者字段、Release A 迁移和 ScopedDocumentRepository，并已把上传、列表、详情、删除四个核心文档接口接入 Application、认证中间件与所有者 SQL；下一步隔离解析、chunks 和任务接口。交接日期：2026-08-16。
+> 状态：实施中；B1～B4 已完成。文档、解析任务和 chunks 已接入 OwnerScope、认证中间件与所有者 SQL，并通过双用户真实 HTTP/PostgreSQL 越权测试；下一步进入 B5 向量任务、检索和问答隔离。交接日期：2026-08-16。
 > 产品边界、主线图和跨端验收标准以
 > [P6 个人用户域与私有数据闭环](../../shared/architecture/personal-user-domain.md) 为准；本文只冻结 Go、PostgreSQL、Worker 和测试的实施边界。
 
@@ -244,10 +244,11 @@ RequestID
 
 ### 解析与 chunks
 
-- QueueProcessing 先按 OwnerScope 查询文档；
-- ProcessingJob GetByID 必须 JOIN `documents` 校验 owner；
-- chunks 列表必须同时校验 owner 和 `ready`；
-- Worker 的全局领取逻辑保持系统级，不经过 HTTP Actor；
+- 已完成：QueueProcessing 先按 OwnerScope 查询文档，并通过 `INSERT ... SELECT` 再次限定 owner；
+- 已完成：ProcessingJob GetByID JOIN `documents` 校验 owner；
+- 已完成：chunks 列表同时校验 owner 和 `ready`，count/data SQL 均限定 owner；
+- 已完成：Worker 的全局领取逻辑保持系统级，不经过 HTTP Actor；
+- 已完成：双用户真实 HTTP/PostgreSQL 测试覆盖排队、任务查询和 chunks 越权；
 - Worker 生命周期日志增加 `owner_user_id` 时只记录数字 ID。
 
 ### 向量、检索和问答
@@ -302,8 +303,8 @@ flowchart LR
 
 除正常验证码、注册、登录、退出和过期外，至少建立两个用户 A/B：
 
-1. A 上传文档，B 按 document ID 获取和删除均得到 404（已自动化验证）；解析与 chunks 待下一批验证；
-2. B 按 A 的 processing job ID 和 embedding job ID 查询均得到 404；
+1. A 上传文档，B 按 document ID 获取、删除、解析和查看 chunks 均得到 404（已自动化验证）；
+2. B 按 A 的 processing job ID 查询得到 404（已自动化验证）；embedding job 待 B5；
 3. A/B 使用相同关键词，B 的结果中不出现 A 的 chunk；
 4. B 的语义检索和回答来源中不出现 A 的文档；
 5. 缺少、伪造、过期、撤销 Session 都返回 401；

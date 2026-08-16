@@ -173,9 +173,9 @@ P6 是跨前端、后端和数据库的独立阶段。它不把团队租户复�
 
 #### P6.2 文档归属与基础隔离
 
-> 当前进度：已建立 `domain/access.OwnerScope`、`Document.OwnerUserID` 与 Release A 迁移；上传、列表、详情、
-> 删除已在 Handler、Application 和 ScopedDocumentRepository 全链路显式传递 Scope，并通过双用户真实
-> HTTP/PostgreSQL 隔离测试。下一步处理解析、chunks 与任务查询。
+> 当前进度：已完成。上传、列表、详情、删除、解析任务创建、processing job 查询和 chunks 浏览均在
+> Handler、Application 与 Repository/SQL 全链路显式传递 Scope，并通过双用户真实 HTTP/PostgreSQL
+> 隔离测试；Worker 保持系统级执行者。下一步进入 P6.3/B5。
 
 - 文档增加 `owner_user_id`；
 - 上传、列表、详情、删除、解析、chunks 和两类任务查询全部按 owner 限定；

@@ -13,20 +13,22 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 type fakeDocumentChunkListService struct {
-	listFunc  func(context.Context, applicationdocument.ChunkListInput) (applicationdocument.ChunkListOutput, error)
+	listFunc  func(context.Context, accessdomain.OwnerScope, applicationdocument.ChunkListInput) (applicationdocument.ChunkListOutput, error)
 	listCalls int
 }
 
 func (f *fakeDocumentChunkListService) List(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input applicationdocument.ChunkListInput,
 ) (applicationdocument.ChunkListOutput, error) {
 	f.listCalls++
-	return f.listFunc(ctx, input)
+	return f.listFunc(ctx, scope, input)
 }
 
 func newTestDocumentChunkRouter(
@@ -34,6 +36,7 @@ func newTestDocumentChunkRouter(
 ) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
+	useTestAuthenticatedIdentity(router)
 	handler := NewDocumentChunkHandler(service)
 	handler.RegisterRoutes(router)
 	return router
@@ -56,6 +59,7 @@ func TestDocumentChunkHandlerRejectsInvalidHTTPParameters(t *testing.T) {
 			service := &fakeDocumentChunkListService{
 				listFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					applicationdocument.ChunkListInput,
 				) (applicationdocument.ChunkListOutput, error) {
 					t.Fatal("List() must not be called for invalid HTTP input")
@@ -101,6 +105,7 @@ func TestDocumentChunkHandlerMapsApplicationErrors(t *testing.T) {
 			service := &fakeDocumentChunkListService{
 				listFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					applicationdocument.ChunkListInput,
 				) (applicationdocument.ChunkListOutput, error) {
 					return applicationdocument.ChunkListOutput{}, testCase.serviceErr
@@ -154,8 +159,12 @@ func TestDocumentChunkHandlerReturnsPage(t *testing.T) {
 	service := &fakeDocumentChunkListService{
 		listFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			input applicationdocument.ChunkListInput,
 		) (applicationdocument.ChunkListOutput, error) {
+			if scope.OwnerUserID() != testAPIOwnerUserID {
+				t.Fatalf("List() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+			}
 			expectedInput := applicationdocument.ChunkListInput{
 				DocumentID: 7,
 				Page:       2,
@@ -206,6 +215,7 @@ func TestDocumentChunkHandlerReturnsEmptyArray(t *testing.T) {
 	service := &fakeDocumentChunkListService{
 		listFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			applicationdocument.ChunkListInput,
 		) (applicationdocument.ChunkListOutput, error) {
 			return applicationdocument.ChunkListOutput{

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -15,14 +16,14 @@ var ErrDocumentNotProcessable = errors.New(
 
 // QueueProcessingService 编排“为文档创建解析任务”的用例。
 type QueueProcessingService struct {
-	documents documentdomain.Finder
-	jobs      documentdomain.ProcessingJobCreator
+	documents documentdomain.ScopedFinder
+	jobs      documentdomain.ScopedProcessingJobCreator
 }
 
 // NewQueueProcessingService 创建解析任务排队服务。
 func NewQueueProcessingService(
-	documents documentdomain.Finder,
-	jobs documentdomain.ProcessingJobCreator,
+	documents documentdomain.ScopedFinder,
+	jobs documentdomain.ScopedProcessingJobCreator,
 ) *QueueProcessingService {
 	return &QueueProcessingService{
 		documents: documents,
@@ -36,13 +37,14 @@ func NewQueueProcessingService(
 // 才会转换成 processing，避免“已经标记处理中但还没有 worker 执行”。
 func (s *QueueProcessingService) Queue(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	documentID int64,
 ) (documentdomain.ProcessingJob, error) {
 	if documentID <= 0 {
 		return documentdomain.ProcessingJob{}, ErrInvalidID
 	}
 
-	foundDocument, err := s.documents.GetByID(ctx, documentID)
+	foundDocument, err := s.documents.GetByID(ctx, scope, documentID)
 	if err != nil {
 		return documentdomain.ProcessingJob{}, fmt.Errorf(
 			"get document before queuing processing: %w",
@@ -58,6 +60,7 @@ func (s *QueueProcessingService) Queue(
 
 	createdJob, err := s.jobs.CreateProcessingJob(
 		ctx,
+		scope,
 		foundDocument.ID,
 	)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -17,6 +18,7 @@ import (
 type processingJobQueryService interface {
 	GetByID(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		jobID int64,
 	) (documentdomain.ProcessingJob, error)
 }
@@ -51,6 +53,12 @@ func (h *ProcessingJobHandler) RegisterRoutes(
 
 // GetByID 处理 GET /processing-jobs/:id。
 func (h *ProcessingJobHandler) GetByID(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	jobID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || jobID <= 0 {
 		writeErrorResponse(
@@ -64,6 +72,7 @@ func (h *ProcessingJobHandler) GetByID(c *gin.Context) {
 
 	foundJob, err := h.service.GetByID(
 		c.Request.Context(),
+		scope,
 		jobID,
 	)
 	if errors.Is(err, applicationdocument.ErrInvalidProcessingJobID) {

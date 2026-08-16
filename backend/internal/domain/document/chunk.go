@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 )
 
 var ErrInvalidChunkPageRange = errors.New(
@@ -83,6 +85,17 @@ type ChunkPageResult struct {
 type ChunkPageLister interface {
 	ListPageByDocumentID(
 		ctx context.Context,
+		documentID int64,
+		options ChunkPageOptions,
+	) (ChunkPageResult, error)
+}
+
+// ScopedChunkPageLister 定义只能分页读取当前所有者文档文本块的能力。
+// 它服务于已认证 HTTP 请求；Worker 继续使用不带 Scope 的系统级端口。
+type ScopedChunkPageLister interface {
+	ListPageByDocumentID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		documentID int64,
 		options ChunkPageOptions,
 	) (ChunkPageResult, error)
