@@ -21,6 +21,10 @@ const (
 var (
 	// ErrVerificationCooldown 表示同一联系方式仍处于重发冷却期。
 	ErrVerificationCooldown = errors.New("verification code resend is temporarily unavailable")
+
+	// ErrVerificationDeliveryUnavailable 表示发送渠道暂时无法交付验证码。
+	// Handler 只识别该稳定类别，不把 Sender 的内部错误直接暴露给客户端。
+	ErrVerificationDeliveryUnavailable = errors.New("verification delivery is temporarily unavailable")
 )
 
 // CooldownError 除了稳定错误类别，还携带下一次允许发送的时间。
@@ -233,7 +237,11 @@ func (s *Service) RequestCode(
 	); err != nil {
 		// 外部发送失败不能通过数据库事务“回滚”。保留 send_count=0 的记录，
 		// 后续注册用例会拒绝消费它，定时清理再删除过期记录。
-		return RequestOutput{}, fmt.Errorf("send verification code: %w", err)
+		return RequestOutput{}, fmt.Errorf(
+			"%w: %w",
+			ErrVerificationDeliveryUnavailable,
+			err,
+		)
 	}
 
 	sentAt := s.now().UTC()

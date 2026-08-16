@@ -10,11 +10,14 @@ import (
 )
 
 const (
-	errorCodeInvalidDocumentID      = "invalid_document_id"
-	errorCodeDocumentNotFound       = "document_not_found"
-	errorCodeInvalidProcessingJobID = "invalid_processing_job_id"
-	errorCodeProcessingJobNotFound  = "processing_job_not_found"
-	errorCodeInternal               = "internal_error"
+	errorCodeInvalidDocumentID              = "invalid_document_id"
+	errorCodeDocumentNotFound               = "document_not_found"
+	errorCodeInvalidProcessingJobID         = "invalid_processing_job_id"
+	errorCodeProcessingJobNotFound          = "processing_job_not_found"
+	errorCodeInvalidVerificationRequest     = "invalid_verification_request"
+	errorCodeVerificationRequestThrottled   = "verification_request_throttled"
+	errorCodeVerificationChannelUnavailable = "verification_channel_unavailable"
+	errorCodeInternal                       = "internal_error"
 )
 
 // errorResponse 是返回给 HTTP 调用方的安全错误契约。

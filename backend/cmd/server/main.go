@@ -17,12 +17,15 @@ import (
 	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
 	documentapplication "rag-reasoning-platform/backend/internal/application/document"
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	verificationapplication "rag-reasoning-platform/backend/internal/application/verification"
 	"rag-reasoning-platform/backend/internal/config"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
 	"rag-reasoning-platform/backend/internal/infrastructure/pythonprocessor"
+	"rag-reasoning-platform/backend/internal/infrastructure/ratelimit"
+	verificationinfrastructure "rag-reasoning-platform/backend/internal/infrastructure/verification"
 	"rag-reasoning-platform/backend/internal/observability"
 	"rag-reasoning-platform/backend/migrations"
 )
@@ -129,6 +132,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("load generation configuration: %w", err)
 	}
 
+	verificationConfig, err := config.LoadVerification()
+	if err != nil {
+		return fmt.Errorf("load verification configuration: %w", err)
+	}
+
 	// ConnectionString 包含密码，只传给数据库层，不写入日志。
 	databasePool, err := database.Open(
 		ctx,
@@ -169,6 +177,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
 	embeddingJobRepository := postgres.NewEmbeddingJobRepository(databasePool)
 	chunkRepository := postgres.NewChunkRepository(databasePool)
+	verificationChallengeRepository :=
+		postgres.NewVerificationChallengeRepository(databasePool)
 
 	// Worker 启动前，先恢复上一次异常退出遗留的 processing 任务。
 	// main 只负责决定调用时机；恢复规则位于 Application，SQL 位于 Repository。
@@ -348,6 +358,44 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 	}
 
+	// Application 只依赖验证码端口；这里是组合根，负责选择具体实现。
+	verificationCodeHasher, err :=
+		verificationinfrastructure.NewHMACCodeHasher(
+			[]byte(verificationConfig.HMACSecret),
+		)
+	if err != nil {
+		return fmt.Errorf("create verification code hasher: %w", err)
+	}
+
+	var verificationSender verificationapplication.Sender
+	switch verificationConfig.Sender {
+	case config.VerificationSenderFake:
+		verificationSender = verificationinfrastructure.NewFakeSender()
+	default:
+		return fmt.Errorf(
+			"unsupported verification sender %q",
+			verificationConfig.Sender,
+		)
+	}
+
+	verificationService := verificationapplication.NewService(
+		verificationChallengeRepository,
+		verificationinfrastructure.NewRandomCodeGenerator(),
+		verificationCodeHasher,
+		verificationSender,
+		time.Now,
+		verificationapplication.DefaultChallengeTTL,
+		verificationapplication.DefaultResendCooldown,
+	)
+	verificationRequestLimiter, err := ratelimit.NewSlidingWindowLimiter(
+		verificationConfig.RateLimitWindow,
+		verificationConfig.PerClientLimit,
+		verificationConfig.GlobalLimit,
+	)
+	if err != nil {
+		return fmt.Errorf("create verification request limiter: %w", err)
+	}
+
 	// 默认不启动远程向量 Worker，避免开发者未明确授权时产生后台 API 调用。
 	var embeddingWorkerLoop *documentapplication.WorkerLoop
 	if embeddingConfig.WorkerEnabled {
@@ -449,6 +497,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if answerService != nil {
 		answerHandler = api.NewAnswerHandler(answerService)
 	}
+	verificationHandler := api.NewVerificationHandler(
+		verificationService,
+		verificationRequestLimiter,
+		logger,
+	)
 
 	router := api.NewRouter(logger)
 	documentHandler.RegisterRoutes(router)
@@ -467,6 +520,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if answerHandler != nil {
 		answerHandler.RegisterRoutes(router)
 	}
+	verificationHandler.RegisterRoutes(router)
 
 	// Gin Engine 实现了 http.Handler，所以可以交给标准库 http.Server。
 	// 不再使用 router.Run，是因为我们需要持有 Server，才能在收到退出信号时

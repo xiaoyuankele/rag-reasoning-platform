@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P5（个人版工程化基线）已完成。P0～P4 的文档管理、异步解析、关键词检索、向量生产、语义检索和带来源问答均已形成可运行闭环；P5 已补齐稳定路径、结构化日志、容器部署、配套备份恢复、异常任务恢复及分级自动化回归。P6 个人用户域已进入实施：B1 用户、Session、验证码挑战的数据模型与迁移已经完成；B2 已完成密码规则、Argon2id、验证码生成与 HMAC、零费用 Fake Sender、请求验证码用例及并发安全的 PostgreSQL 仓储。认证 HTTP 接口、Session 和全链路数据隔离仍待实现，因此当前服务仍不能直接开放给互不信任的多人。团队工作区和成员权限留到 P7。混合检索、DOCX、OCR、复杂学术版面及表格公式质量继续作为后续增量能力。
+> 当前状态：P5（个人版工程化基线）已完成。P0～P4 的文档管理、异步解析、关键词检索、向量生产、语义检索和带来源问答均已形成可运行闭环；P5 已补齐稳定路径、结构化日志、容器部署、配套备份恢复、异常任务恢复及分级自动化回归。P6 个人用户域已进入实施：B1 用户、Session、验证码挑战的数据模型与迁移已经完成；B2 密码和验证码基础能力已经完成；B3 已交付第一个 `POST /auth/verification-codes` HTTP 接口。注册、登录、Session、认证中间件和全链路数据隔离仍待实现，因此当前服务仍不能直接开放给互不信任的多人。团队工作区和成员权限留到 P7。混合检索、DOCX、OCR、复杂学术版面及表格公式质量继续作为后续增量能力。
 
 ## 项目目标
 
@@ -139,7 +139,7 @@ rag_reasoning_platform_individual/
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
 | P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
 | P5 | 已完成（个人版基线） | 稳定运行路径、可观测性、容器部署、配套备份恢复、任务恢复、默认回归、一次性数据库集成及发布候选分级验收均已完成；不包含用户与租户系统 |
-| P6 | 实施中（B1、B2 已完成） | 已完成身份数据模型与迁移，以及密码、验证码、Fake Sender、请求验证码用例和 PostgreSQL 仓储基础；认证 HTTP 接口、Session 和全链路用户隔离仍待完成，当前服务仍不能开放给互不信任的多人 |
+| P6 | 实施中（B1、B2 和 B3 首个接口已完成） | 已完成身份数据模型、密码与验证码基础，并交付 `POST /auth/verification-codes`；注册、登录、Session、认证中间件和全链路用户隔离仍待完成，当前服务仍不能开放给互不信任的多人 |
 | P7 | 未开始 | 团队工作区、成员权限、共享、租户配额和审计尚未设计或实现 |
 
 前端 F0、F1 已完成，F3 关键词检索最小切片已通过真实联调；下一步先接入 P6 后端身份边界，再完成
@@ -265,6 +265,13 @@ Token 与供应商错误分类，但不记录用户问题、Prompt、证据正�
 `auto`，由问题中的主要字符选择语言，响应会返回最终解析后的 `zh` 或 `en`。真实 HTTP 验收已确认
 英文问题、省略、自动中文和显式语言覆盖均生效，非法值返回 400。
 
+`POST /auth/verification-codes` 已完成第一条 P6 认证 HTTP 纵向链路。Handler 接收 `channel`、`destination` 和
+`purpose`，Application 调用 Domain 规则规范化联系方式并编排 PostgreSQL Challenge、密码学安全随机码、
+HMAC 和默认零费用 Fake Sender。成功返回 `202` 以及 `verification_id`、UTC `expires_at` 和 UTC
+`resend_after`，不暴露明文验证码或摘要；非法请求返回 `400`，数据库冷却或 HTTP 限流返回带
+`Retry-After` 的 `429`，发送渠道不可用返回 `503`，未知故障返回安全 `500`。除数据库按联系方式执行
+60 秒冷却外，HTTP 边界还按远端 IP 和全局预算执行单实例滑动窗口限流。注册、登录、Session 和业务接口保护尚未实现。
+
 Python PDF 测试依赖 `ai/pyproject.toml` 中锁定的解析库。首次运行前安装项目依赖，然后执行测试：
 
 ```powershell
@@ -320,6 +327,11 @@ Go 后端当前支持以下环境变量：
 | `DB_USER` | `rag_user` | 数据库用户 |
 | `DB_PASSWORD` | 无 | 本机私有密码，必须在 `.env` 中设置 |
 | `DB_SSLMODE` | `disable` | 本地开发时的 PostgreSQL SSL 模式 |
+| `VERIFICATION_HMAC_SECRET` | 无 | 验证码 HMAC 服务端密钥，至少 32 字节，必须保存在本机 `.env` |
+| `VERIFICATION_SENDER` | `fake` | 第一版仅支持不访问远程服务的内存 Fake Sender |
+| `VERIFICATION_RATE_LIMIT_WINDOW` | `1m` | 验证码 HTTP 单实例滑动窗口长度 |
+| `VERIFICATION_PER_CLIENT_LIMIT` | `5` | 同一远端 IP 在窗口内允许占用的请求数 |
+| `VERIFICATION_GLOBAL_LIMIT` | `100` | 整个后端进程在窗口内允许占用的验证码请求数 |
 | `APP_ROOT` | 开发环境自动发现 | 应用运行时资源的共同根目录；显式配置时必须是已经存在的绝对目录 |
 | `STORAGE_ROOT` | `storage` | 本地文档存储根目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `STORAGE_HOST_PATH` | `./storage` | Compose 挂载的宿主机文件目录；恢复验收后可无覆盖切换到新目录 |
@@ -371,13 +383,23 @@ PostgreSQL 与 `storage/` 的配套备份、SHA-256 manifest、默认不覆盖�
 容器 `SIGTERM` 优雅关闭、`SIGKILL` 异常模拟、文档/Embedding 差异化任务恢复及可重复验收命令见
 [容器优雅关闭与异常恢复](docs/backend/deployment/container-lifecycle-and-recovery.md)。
 
-在 PowerShell 中可以这样临时设置 Go 服务端口：
+在 PowerShell 中可以这样临时设置 Go 服务端口和一次性验证码 HMAC 密钥：
 
 ```powershell
 $env:APP_PORT = "9090"
+$env:VERIFICATION_HMAC_SECRET = `
+    [Convert]::ToHexString(
+        [Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+    ).ToLowerInvariant()
+
 go run ./cmd/server
+
 Remove-Item Env:APP_PORT
+Remove-Item Env:VERIFICATION_HMAC_SECRET
 ```
+
+上面的随机密钥只适合单次启动验收；进程重启后旧验证码会失效。正常本地开发应生成一次随机值并写入被 Git
+忽略的 `.env`，再像 `DB_PASSWORD` 一样加载到当前 PowerShell 环境。禁止把真实密钥写入 `.env.example`、日志或提交记录。
 
 本地 PostgreSQL 常用命令：
 

@@ -133,6 +133,9 @@ func TestServiceRequestCodePreservesUnsentChallengeOnSenderFailure(t *testing.T)
 	if !errors.Is(err, sendErr) {
 		t.Fatalf("RequestCode() error = %v, want wrapped sender error", err)
 	}
+	if !errors.Is(err, ErrVerificationDeliveryUnavailable) {
+		t.Fatalf("RequestCode() error = %v, want delivery category", err)
+	}
 	if repository.created.ID == 0 {
 		t.Fatal("pending challenge was not created before sending")
 	}

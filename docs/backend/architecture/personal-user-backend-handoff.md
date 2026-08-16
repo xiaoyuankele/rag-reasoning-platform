@@ -1,6 +1,6 @@
 # P6 个人用户域后端交接
 
-> 状态：实施中；B1 数据地基和 B2 密码、验证码基础能力已完成，下一步进入 B3 认证接口与 Session。交接日期：2026-08-16。
+> 状态：实施中；B1、B2 及 B3 首个验证码 HTTP 接口已完成，下一步实现注册、登录与 Session。交接日期：2026-08-16。
 > 产品边界、主线图和跨端验收标准以
 > [P6 个人用户域与私有数据闭环](../../shared/architecture/personal-user-domain.md) 为准；本文只冻结 Go、PostgreSQL、Worker 和测试的实施边界。
 
@@ -185,6 +185,7 @@ Argon2id 编码值。`user_sessions.token_hash` 保存原始随机 Token 的 SHA
 ```text
 invalid_auth_request
 invalid_verification_request
+verification_request_throttled
 verification_code_invalid
 verification_code_expired
 verification_attempts_exceeded
