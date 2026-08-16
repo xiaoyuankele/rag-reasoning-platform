@@ -27,6 +27,7 @@ func TestVerificationTypesAreValid(t *testing.T) {
 func TestVerificationChallengeCanAttempt(t *testing.T) {
 	now := time.Date(2026, time.August, 16, 8, 0, 0, 0, time.UTC)
 	consumedAt := now.Add(-time.Minute)
+	sentAt := now.Add(-2 * time.Minute)
 
 	testCases := []struct {
 		name      string
@@ -40,15 +41,19 @@ func TestVerificationChallengeCanAttempt(t *testing.T) {
 				Purpose:      VerificationPurposeRegister,
 				ExpiresAt:    now.Add(time.Minute),
 				AttemptCount: MaxVerificationAttempts - 1,
+				SendCount:    1,
+				LastSentAt:   &sentAt,
 			},
 			want: true,
 		},
 		{
 			name: "expired challenge cannot be attempted",
 			challenge: VerificationChallenge{
-				Channel:   VerificationChannelEmail,
-				Purpose:   VerificationPurposeRegister,
-				ExpiresAt: now,
+				Channel:    VerificationChannelEmail,
+				Purpose:    VerificationPurposeRegister,
+				ExpiresAt:  now,
+				SendCount:  1,
+				LastSentAt: &sentAt,
 			},
 			want: false,
 		},
@@ -59,6 +64,8 @@ func TestVerificationChallengeCanAttempt(t *testing.T) {
 				Purpose:    VerificationPurposeRegister,
 				ExpiresAt:  now.Add(time.Minute),
 				ConsumedAt: &consumedAt,
+				SendCount:  1,
+				LastSentAt: &sentAt,
 			},
 			want: false,
 		},
@@ -69,15 +76,19 @@ func TestVerificationChallengeCanAttempt(t *testing.T) {
 				Purpose:      VerificationPurposeRegister,
 				ExpiresAt:    now.Add(time.Minute),
 				AttemptCount: MaxVerificationAttempts,
+				SendCount:    1,
+				LastSentAt:   &sentAt,
 			},
 			want: false,
 		},
 		{
 			name: "invalid channel blocks challenge",
 			challenge: VerificationChallenge{
-				Channel:   VerificationChannel("push"),
-				Purpose:   VerificationPurposeRegister,
-				ExpiresAt: now.Add(time.Minute),
+				Channel:    VerificationChannel("push"),
+				Purpose:    VerificationPurposeRegister,
+				ExpiresAt:  now.Add(time.Minute),
+				SendCount:  1,
+				LastSentAt: &sentAt,
 			},
 			want: false,
 		},
@@ -88,6 +99,17 @@ func TestVerificationChallengeCanAttempt(t *testing.T) {
 				Purpose:      VerificationPurposeRegister,
 				ExpiresAt:    now.Add(time.Minute),
 				AttemptCount: -1,
+				SendCount:    1,
+				LastSentAt:   &sentAt,
+			},
+			want: false,
+		},
+		{
+			name: "unsent challenge cannot be attempted",
+			challenge: VerificationChallenge{
+				Channel:   VerificationChannelEmail,
+				Purpose:   VerificationPurposeRegister,
+				ExpiresAt: now.Add(time.Minute),
 			},
 			want: false,
 		},

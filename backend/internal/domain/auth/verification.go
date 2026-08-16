@@ -60,6 +60,8 @@ func (c VerificationChallenge) CanAttempt(now time.Time) bool {
 	}
 
 	if c.ConsumedAt != nil ||
+		c.LastSentAt == nil ||
+		c.SendCount <= 0 ||
 		c.AttemptCount < 0 ||
 		c.AttemptCount >= MaxVerificationAttempts {
 		return false
