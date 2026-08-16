@@ -37,7 +37,7 @@ func NewSemanticSearchHandler(
 }
 
 // RegisterRoutes 注册语义检索路由。
-func (h *SemanticSearchHandler) RegisterRoutes(router *gin.Engine) {
+func (h *SemanticSearchHandler) RegisterRoutes(router gin.IRoutes) {
 	router.POST("/semantic-search", h.Search)
 }
 

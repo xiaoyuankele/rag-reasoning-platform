@@ -40,7 +40,7 @@ func NewAuthLogoutHandler(
 }
 
 // RegisterRoutes 注册无需有效 Session 也保持幂等的退出路由。
-func (h *AuthLogoutHandler) RegisterRoutes(router *gin.Engine) {
+func (h *AuthLogoutHandler) RegisterRoutes(router gin.IRoutes) {
 	router.POST("/auth/logout", h.Logout)
 }
 

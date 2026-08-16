@@ -35,7 +35,7 @@ func NewDocumentEmbeddingHandler(
 }
 
 // RegisterRoutes 注册手动创建向量任务的路由。
-func (h *DocumentEmbeddingHandler) RegisterRoutes(router *gin.Engine) {
+func (h *DocumentEmbeddingHandler) RegisterRoutes(router gin.IRoutes) {
 	router.POST("/documents/:id/embeddings", h.Queue)
 }
 

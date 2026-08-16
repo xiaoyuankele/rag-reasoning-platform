@@ -34,7 +34,7 @@ func NewDocumentChunkHandler(
 }
 
 // RegisterRoutes 注册文档文本块分页路由。
-func (h *DocumentChunkHandler) RegisterRoutes(router *gin.Engine) {
+func (h *DocumentChunkHandler) RegisterRoutes(router gin.IRoutes) {
 	router.GET("/documents/:id/chunks", h.List)
 }
 

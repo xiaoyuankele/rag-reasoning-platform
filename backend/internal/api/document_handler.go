@@ -50,7 +50,7 @@ func NewDocumentHandler(
 }
 
 // RegisterRoutes 把文档接口注册到 Gin 路由。
-func (h *DocumentHandler) RegisterRoutes(router *gin.Engine) {
+func (h *DocumentHandler) RegisterRoutes(router gin.IRoutes) {
 	router.GET("/documents/:id", h.GetByID)
 }
 

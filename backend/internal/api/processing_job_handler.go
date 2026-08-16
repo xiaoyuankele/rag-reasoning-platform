@@ -44,7 +44,7 @@ func NewProcessingJobHandler(
 
 // RegisterRoutes 注册解析任务查询路由。
 func (h *ProcessingJobHandler) RegisterRoutes(
-	router *gin.Engine,
+	router gin.IRoutes,
 ) {
 	router.GET("/processing-jobs/:id", h.GetByID)
 }

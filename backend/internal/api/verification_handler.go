@@ -64,7 +64,7 @@ func NewVerificationHandler(
 }
 
 // RegisterRoutes 注册不需要 Session 的验证码申请路由。
-func (h *VerificationHandler) RegisterRoutes(router *gin.Engine) {
+func (h *VerificationHandler) RegisterRoutes(router gin.IRoutes) {
 	router.POST("/auth/verification-codes", h.RequestCode)
 }
 

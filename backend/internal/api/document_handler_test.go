@@ -45,8 +45,10 @@ func newTestDocumentRouter(
 	router.Use(RequestIDMiddleware())
 	handler := NewDocumentHandler(service, logger)
 
+	// 空前缀 RouterGroup 模拟 B4 后续挂载 AuthMiddleware 的受保护路由组。
 	// :id 是动态路径参数，例如 /documents/42 中的 42。
-	handler.RegisterRoutes(router)
+	protectedRoutes := router.Group("")
+	handler.RegisterRoutes(protectedRoutes)
 
 	return router
 }

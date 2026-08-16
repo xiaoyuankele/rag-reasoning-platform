@@ -38,7 +38,7 @@ func NewAnswerHandler(service answerService) *AnswerHandler {
 }
 
 // RegisterRoutes 注册带来源问答路由。
-func (h *AnswerHandler) RegisterRoutes(router *gin.Engine) {
+func (h *AnswerHandler) RegisterRoutes(router gin.IRoutes) {
 	router.POST("/answers", h.Answer)
 }
 

@@ -43,7 +43,7 @@ func NewDocumentUploadHandler(
 }
 
 // RegisterRoutes 注册文档上传路由。
-func (h *DocumentUploadHandler) RegisterRoutes(router *gin.Engine) {
+func (h *DocumentUploadHandler) RegisterRoutes(router gin.IRoutes) {
 	router.POST("/documents", h.Upload)
 }
 

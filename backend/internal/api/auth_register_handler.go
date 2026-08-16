@@ -59,7 +59,7 @@ func NewAuthRegisterHandler(
 }
 
 // RegisterRoutes 注册公开但受限流保护的注册路由。
-func (h *AuthRegisterHandler) RegisterRoutes(router *gin.Engine) {
+func (h *AuthRegisterHandler) RegisterRoutes(router gin.IRoutes) {
 	router.POST("/auth/register", h.Register)
 }
 

@@ -34,7 +34,7 @@ func NewEmbeddingJobHandler(
 }
 
 // RegisterRoutes 注册按照任务 ID 查询向量任务的路由。
-func (h *EmbeddingJobHandler) RegisterRoutes(router *gin.Engine) {
+func (h *EmbeddingJobHandler) RegisterRoutes(router gin.IRoutes) {
 	router.GET("/embedding-jobs/:id", h.GetByID)
 }
 

@@ -35,7 +35,7 @@ func NewDocumentListHandler(
 }
 
 // RegisterRoutes 注册文档列表路由。
-func (h *DocumentListHandler) RegisterRoutes(router *gin.Engine) {
+func (h *DocumentListHandler) RegisterRoutes(router gin.IRoutes) {
 	router.GET("/documents", h.List)
 }
 

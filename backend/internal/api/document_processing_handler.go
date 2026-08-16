@@ -37,7 +37,7 @@ func NewDocumentProcessingHandler(
 
 // RegisterRoutes 注册创建文档解析任务的路由。
 func (h *DocumentProcessingHandler) RegisterRoutes(
-	router *gin.Engine,
+	router gin.IRoutes,
 ) {
 	router.POST("/documents/:id/process", h.Queue)
 }

@@ -32,7 +32,7 @@ func NewDocumentDeleteHandler(
 }
 
 // RegisterRoutes 注册文档删除路由。
-func (h *DocumentDeleteHandler) RegisterRoutes(router *gin.Engine) {
+func (h *DocumentDeleteHandler) RegisterRoutes(router gin.IRoutes) {
 	router.DELETE("/documents/:id", h.Delete)
 }
 

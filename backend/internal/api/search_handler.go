@@ -35,7 +35,7 @@ func NewDocumentSearchHandler(
 }
 
 // RegisterRoutes 注册文档搜索路由。
-func (h *DocumentSearchHandler) RegisterRoutes(router *gin.Engine) {
+func (h *DocumentSearchHandler) RegisterRoutes(router gin.IRoutes) {
 	router.GET("/search", h.Search)
 }
 
