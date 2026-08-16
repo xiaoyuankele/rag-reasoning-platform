@@ -6,9 +6,9 @@
 ## 1. 当前访问边界
 
 当前 API 是个人版、单工作区接口。验证码、注册、登录、Session、当前用户和退出已经实现；文档增删查、
-解析任务创建、processing job 查询、chunks 浏览、向量任务创建/查询以及关键词检索也已接入 Session 保护和
-`owner_user_id` SQL 隔离。语义检索和问答路由仍未完成所有者隔离，因此开发环境仍应只监听受信地址，
-不能把当前服务直接暴露为公开互联网多人服务。
+解析任务创建、processing job 查询、chunks 浏览、向量任务创建/查询、关键词检索、语义检索和问答均已接入
+Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据认领和最终数据库约束尚未完成，因此开发环境仍应
+只监听受信地址，不能把当前服务直接暴露为公开互联网多人服务。
 
 身份只来自后端验证的 Session，不能依赖前端传入 `user_id`。团队工作区和成员权限属于 P7。
 
@@ -27,8 +27,8 @@
 | `GET` | `/search` | Session Cookie；`q`、可选 `document_id`、`page`、`page_size` | `200` | 检索当前用户文档的文本块 | 用户功能；已隔离 |
 | `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | `202` | 为当前用户文档手动创建向量任务 | 已隔离；首版 UI 不直接暴露 |
 | `GET` | `/embedding-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的向量任务状态、重试和 Token 信息 | 用户功能；已隔离/轮询 |
-| `POST` | `/semantic-search` | JSON：`query`、可选 `document_id`、`top_k` | `200` | 语义检索 | 用户功能，受功能开关控制 |
-| `POST` | `/answers` | JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200` | 基于来源生成回答 | 用户功能，受功能开关控制 |
+| `POST` | `/semantic-search` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k` | `200` | 在当前用户文档中进行语义检索 | 用户功能；已隔离，受功能开关控制 |
+| `POST` | `/answers` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200` | 基于当前用户来源生成回答 | 用户功能；已隔离，受功能开关控制 |
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册验证码挑战 | 认证功能；当前默认使用零费用 Fake Sender |
 | `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建用户和 Session | 认证功能；设置 `rag_session` Cookie |
 | `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 核对凭据并创建新 Session | 认证功能；设置 `rag_session` Cookie |
@@ -50,13 +50,14 @@
 当前验证码接口已经实现联系方式 60 秒冷却、远端 IP 限流和进程全局预算。注册接口会原子创建用户与
 PostgreSQL Session，并设置 HttpOnly Cookie；登录接口会核对 Argon2id 并创建独立 Session。默认 Fake Sender 不访问远程渠道。
 `/users/me` 已通过 Session 中间件消费该 Cookie，退出后旧 Cookie 统一失效。文档、解析任务、chunks、
-向量任务和关键词检索接口也已完成 OwnerScope 隔离；统一 Origin/CORS 边界以及语义检索、问答路由保护将在 B5 后续完成。
+向量任务、关键词检索、语义检索和问答接口也已完成 OwnerScope 隔离。P6 后续进入历史数据认领、
+数据库约束和发布验收。
 
 P6 路由保护边界：
 
 - `GET /health`、验证码发送、注册和登录无需 Session，但必须受 Origin 与限流保护；
 - `POST /auth/logout` 可选读取并撤销 Session，始终清除 Cookie、返回 `204`，但仍须通过同源 Origin 校验；
-- `GET /users/me`、文档、解析任务、chunks、向量任务和关键词检索接口已受保护；语义检索和问答接口必须在 B5 仓储隔离完成后迁入受保护组；
+- `GET /users/me`、文档、解析任务、chunks、向量任务、关键词检索、语义检索和问答接口均已受保护；
 - 业务请求 DTO 不增加客户端可填写的 `user_id`；
 - Session 缺失、过期或撤销统一返回 `401`、`authentication_required`；
 - 资源不存在或不属于当前用户统一返回 `404`，避免 ID 枚举；

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	generationdomain "rag-reasoning-platform/backend/internal/domain/generation"
 )
@@ -14,15 +15,17 @@ import (
 type fakeSemanticSearcher struct {
 	searchFunc func(
 		context.Context,
+		accessdomain.OwnerScope,
 		embeddingapplication.SemanticSearchInput,
 	) (embeddingapplication.SemanticSearchOutput, error)
 }
 
 func (f *fakeSemanticSearcher) Search(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input embeddingapplication.SemanticSearchInput,
 ) (embeddingapplication.SemanticSearchOutput, error) {
-	return f.searchFunc(ctx, input)
+	return f.searchFunc(ctx, scope, input)
 }
 
 type fakeGenerator struct {
@@ -101,8 +104,16 @@ func TestServiceAnswerRetrievesEvidenceBeforeGeneration(t *testing.T) {
 	searcher := &fakeSemanticSearcher{
 		searchFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			input embeddingapplication.SemanticSearchInput,
 		) (embeddingapplication.SemanticSearchOutput, error) {
+			if scope.OwnerUserID() != testAnswerOwnerUserID {
+				t.Fatalf(
+					"semantic search scope owner = %d, want %d",
+					scope.OwnerUserID(),
+					testAnswerOwnerUserID,
+				)
+			}
 			callOrder = append(callOrder, "search")
 			if input.Query != "怎样检测故障？" ||
 				input.DocumentID == nil || *input.DocumentID != documentID ||
@@ -141,7 +152,7 @@ func TestServiceAnswerRetrievesEvidenceBeforeGeneration(t *testing.T) {
 	}
 	service := newServiceForTest(t, searcher, generator)
 
-	result, err := service.Answer(context.Background(), Input{
+	result, err := service.Answer(context.Background(), testAnswerOwnerScope(t), Input{
 		Query:      "怎样检测故障？",
 		DocumentID: &documentID,
 		TopK:       5,
@@ -211,6 +222,7 @@ func TestServiceAnswerDiversifiesGlobalEvidence(t *testing.T) {
 	searcher := &fakeSemanticSearcher{
 		searchFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			input embeddingapplication.SemanticSearchInput,
 		) (embeddingapplication.SemanticSearchOutput, error) {
 			if input.DocumentID != nil {
@@ -271,7 +283,7 @@ func TestServiceAnswerDiversifiesGlobalEvidence(t *testing.T) {
 	}
 
 	service := newServiceForTest(t, searcher, generator)
-	result, err := service.Answer(context.Background(), Input{
+	result, err := service.Answer(context.Background(), testAnswerOwnerScope(t), Input{
 		Query: "global question",
 		TopK:  5,
 	})
@@ -316,7 +328,7 @@ func TestServiceAnswerDoesNotGenerateWithoutEvidence(t *testing.T) {
 	}
 	service := newServiceForTest(t, searcher, generator)
 
-	result, err := service.Answer(context.Background(), Input{
+	result, err := service.Answer(context.Background(), testAnswerOwnerScope(t), Input{
 		Query:            "No evidence question",
 		TopK:             5,
 		ResponseLanguage: ResponseLanguageAuto,
@@ -341,6 +353,7 @@ func TestServiceAnswerRejectsInvalidResponseLanguageBeforeDependencies(t *testin
 	searcher := &fakeSemanticSearcher{
 		searchFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			embeddingapplication.SemanticSearchInput,
 		) (embeddingapplication.SemanticSearchOutput, error) {
 			searchCalled = true
@@ -358,7 +371,7 @@ func TestServiceAnswerRejectsInvalidResponseLanguageBeforeDependencies(t *testin
 	}
 	service := newServiceForTest(t, searcher, generator)
 
-	_, err := service.Answer(context.Background(), Input{
+	_, err := service.Answer(context.Background(), testAnswerOwnerScope(t), Input{
 		Query:            "question",
 		TopK:             5,
 		ResponseLanguage: ResponseLanguage("ja"),
@@ -391,6 +404,7 @@ func TestServiceAnswerPreservesDependencyErrors(t *testing.T) {
 			searcher: &fakeSemanticSearcher{
 				searchFunc: func(
 					context.Context,
+					accessdomain.OwnerScope,
 					embeddingapplication.SemanticSearchInput,
 				) (embeddingapplication.SemanticSearchOutput, error) {
 					return embeddingapplication.SemanticSearchOutput{}, searchFailure
@@ -417,7 +431,7 @@ func TestServiceAnswerPreservesDependencyErrors(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			service := newServiceForTest(t, test.searcher, test.generator)
-			_, err := service.Answer(context.Background(), Input{
+			_, err := service.Answer(context.Background(), testAnswerOwnerScope(t), Input{
 				Query: "question",
 				TopK:  5,
 			})
@@ -455,6 +469,7 @@ func successfulSearcher(
 	return &fakeSemanticSearcher{
 		searchFunc: func(
 			_ context.Context,
+			_ accessdomain.OwnerScope,
 			input embeddingapplication.SemanticSearchInput,
 		) (embeddingapplication.SemanticSearchOutput, error) {
 			return embeddingapplication.SemanticSearchOutput{

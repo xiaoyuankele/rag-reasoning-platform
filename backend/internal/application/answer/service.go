@@ -9,6 +9,7 @@ import (
 	"time"
 
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	generationdomain "rag-reasoning-platform/backend/internal/domain/generation"
 )
@@ -39,6 +40,7 @@ var (
 type semanticSearcher interface {
 	Search(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		input embeddingapplication.SemanticSearchInput,
 	) (embeddingapplication.SemanticSearchOutput, error)
 }
@@ -118,6 +120,7 @@ func NewService(
 // Answer 先检索证据，再根据证据生成回答。
 func (s *Service) Answer(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input Input,
 ) (Output, error) {
 	responseLanguage, err := resolveResponseLanguage(
@@ -138,6 +141,7 @@ func (s *Service) Answer(
 
 	searchResult, err := s.searcher.Search(
 		ctx,
+		scope,
 		embeddingapplication.SemanticSearchInput{
 			Query:      input.Query,
 			DocumentID: input.DocumentID,

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
@@ -15,10 +16,12 @@ import (
 type fakeSemanticSearcher struct {
 	readinessFunc func(
 		context.Context,
+		accessdomain.OwnerScope,
 		documentdomain.SemanticEmbeddingReadinessOptions,
 	) (bool, error)
 	searchFunc func(
 		context.Context,
+		accessdomain.OwnerScope,
 		documentdomain.SemanticSearchOptions,
 	) ([]documentdomain.SemanticSearchHit, error)
 	calls          int
@@ -27,21 +30,23 @@ type fakeSemanticSearcher struct {
 
 func (f *fakeSemanticSearcher) HasCompleteSemanticEmbeddings(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	options documentdomain.SemanticEmbeddingReadinessOptions,
 ) (bool, error) {
 	f.readinessCalls++
 	if f.readinessFunc == nil {
 		return true, nil
 	}
-	return f.readinessFunc(ctx, options)
+	return f.readinessFunc(ctx, scope, options)
 }
 
 func (f *fakeSemanticSearcher) SearchSimilar(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	options documentdomain.SemanticSearchOptions,
 ) ([]documentdomain.SemanticSearchHit, error) {
 	f.calls++
-	return f.searchFunc(ctx, options)
+	return f.searchFunc(ctx, scope, options)
 }
 
 func TestNewSemanticSearchServiceValidatesDependencies(t *testing.T) {
@@ -98,7 +103,11 @@ func TestSemanticSearchServiceRejectsInvalidInputBeforeDependencies(t *testing.T
 			searcher := &fakeSemanticSearcher{searchFunc: failSemanticSearch(t)}
 			service := newSemanticSearchServiceForTest(t, embedder, searcher)
 
-			_, err := service.Search(context.Background(), test.input)
+			_, err := service.Search(
+				context.Background(),
+				testEmbeddingOwnerScope(t),
+				test.input,
+			)
 			if !errors.Is(err, test.wantedErr) {
 				t.Fatalf("Search() error = %v, want %v", err, test.wantedErr)
 			}
@@ -146,8 +155,16 @@ func TestSemanticSearchServiceEmbedsQueryAndSearchesSimilarChunks(t *testing.T) 
 	searcher := &fakeSemanticSearcher{
 		readinessFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			options documentdomain.SemanticEmbeddingReadinessOptions,
 		) (bool, error) {
+			if scope.OwnerUserID() != testEmbeddingOwnerUserID {
+				t.Fatalf(
+					"readiness scope owner = %d, want %d",
+					scope.OwnerUserID(),
+					testEmbeddingOwnerUserID,
+				)
+			}
 			expectedOptions := documentdomain.SemanticEmbeddingReadinessOptions{
 				DocumentID: documentID,
 				ModelName:  "test-model",
@@ -164,8 +181,16 @@ func TestSemanticSearchServiceEmbedsQueryAndSearchesSimilarChunks(t *testing.T) 
 		},
 		searchFunc: func(
 			_ context.Context,
+			scope accessdomain.OwnerScope,
 			options documentdomain.SemanticSearchOptions,
 		) ([]documentdomain.SemanticSearchHit, error) {
+			if scope.OwnerUserID() != testEmbeddingOwnerUserID {
+				t.Fatalf(
+					"search scope owner = %d, want %d",
+					scope.OwnerUserID(),
+					testEmbeddingOwnerUserID,
+				)
+			}
 			expectedOptions := documentdomain.SemanticSearchOptions{
 				QueryVector: queryVector,
 				ModelName:   "test-model",
@@ -183,6 +208,7 @@ func TestSemanticSearchServiceEmbedsQueryAndSearchesSimilarChunks(t *testing.T) 
 
 	output, err := service.Search(
 		context.Background(),
+		testEmbeddingOwnerScope(t),
 		SemanticSearchInput{
 			Query:      "  协同控制如何改善稳定性？  ",
 			DocumentID: &documentID,
@@ -212,6 +238,7 @@ func TestSemanticSearchServiceRejectsDocumentWithoutCompleteEmbeddings(t *testin
 	searcher := &fakeSemanticSearcher{
 		readinessFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			documentdomain.SemanticEmbeddingReadinessOptions,
 		) (bool, error) {
 			return false, nil
@@ -222,6 +249,7 @@ func TestSemanticSearchServiceRejectsDocumentWithoutCompleteEmbeddings(t *testin
 
 	_, err := service.Search(
 		context.Background(),
+		testEmbeddingOwnerScope(t),
 		SemanticSearchInput{Query: "问题", DocumentID: &documentID, TopK: 5},
 	)
 	if !errors.Is(err, ErrDocumentEmbeddingsNotReady) {
@@ -243,6 +271,7 @@ func TestSemanticSearchServicePreservesReadinessError(t *testing.T) {
 	searcher := &fakeSemanticSearcher{
 		readinessFunc: func(
 			context.Context,
+			accessdomain.OwnerScope,
 			documentdomain.SemanticEmbeddingReadinessOptions,
 		) (bool, error) {
 			return false, documentdomain.ErrNotFound
@@ -253,6 +282,7 @@ func TestSemanticSearchServicePreservesReadinessError(t *testing.T) {
 
 	_, err := service.Search(
 		context.Background(),
+		testEmbeddingOwnerScope(t),
 		SemanticSearchInput{Query: "问题", DocumentID: &documentID, TopK: 5},
 	)
 	if !errors.Is(err, documentdomain.ErrNotFound) {
@@ -280,6 +310,7 @@ func TestSemanticSearchServicePreservesEmbedderError(t *testing.T) {
 
 	_, err := service.Search(
 		context.Background(),
+		testEmbeddingOwnerScope(t),
 		SemanticSearchInput{Query: "问题", TopK: 5},
 	)
 	if !errors.Is(err, providerError) {
@@ -312,6 +343,7 @@ func TestSemanticSearchServiceRejectsInvalidEmbeddingResult(t *testing.T) {
 
 			_, err := service.Search(
 				context.Background(),
+				testEmbeddingOwnerScope(t),
 				SemanticSearchInput{Query: "问题", TopK: 5},
 			)
 			if !errors.Is(err, embeddingdomain.ErrInvalidEmbeddingResponse) {
@@ -332,7 +364,7 @@ func TestSemanticSearchServicePreservesRepositoryError(t *testing.T) {
 		},
 	}
 	searcher := &fakeSemanticSearcher{
-		searchFunc: func(context.Context, documentdomain.SemanticSearchOptions) ([]documentdomain.SemanticSearchHit, error) {
+		searchFunc: func(context.Context, accessdomain.OwnerScope, documentdomain.SemanticSearchOptions) ([]documentdomain.SemanticSearchHit, error) {
 			return nil, repositoryError
 		},
 	}
@@ -340,6 +372,7 @@ func TestSemanticSearchServicePreservesRepositoryError(t *testing.T) {
 
 	_, err := service.Search(
 		context.Background(),
+		testEmbeddingOwnerScope(t),
 		SemanticSearchInput{Query: "问题", TopK: 5},
 	)
 	if !errors.Is(err, repositoryError) {
@@ -354,7 +387,7 @@ func TestSemanticSearchServiceNormalizesEmptyHits(t *testing.T) {
 		},
 	}
 	searcher := &fakeSemanticSearcher{
-		searchFunc: func(context.Context, documentdomain.SemanticSearchOptions) ([]documentdomain.SemanticSearchHit, error) {
+		searchFunc: func(context.Context, accessdomain.OwnerScope, documentdomain.SemanticSearchOptions) ([]documentdomain.SemanticSearchHit, error) {
 			return nil, nil
 		},
 	}
@@ -362,6 +395,7 @@ func TestSemanticSearchServiceNormalizesEmptyHits(t *testing.T) {
 
 	output, err := service.Search(
 		context.Background(),
+		testEmbeddingOwnerScope(t),
 		SemanticSearchInput{Query: "没有结果的问题", TopK: 5},
 	)
 	if err != nil {
@@ -397,9 +431,9 @@ func failSemanticEmbed(
 
 func failSemanticSearch(
 	t *testing.T,
-) func(context.Context, documentdomain.SemanticSearchOptions) ([]documentdomain.SemanticSearchHit, error) {
+) func(context.Context, accessdomain.OwnerScope, documentdomain.SemanticSearchOptions) ([]documentdomain.SemanticSearchHit, error) {
 	t.Helper()
-	return func(context.Context, documentdomain.SemanticSearchOptions) ([]documentdomain.SemanticSearchHit, error) {
+	return func(context.Context, accessdomain.OwnerScope, documentdomain.SemanticSearchOptions) ([]documentdomain.SemanticSearchHit, error) {
 		t.Fatal("SearchSimilar() must not be called")
 		return nil, nil
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
@@ -22,14 +23,17 @@ type fakeSemanticSearchService struct {
 	output        embeddingapplication.SemanticSearchOutput
 	err           error
 	receivedInput embeddingapplication.SemanticSearchInput
+	receivedScope accessdomain.OwnerScope
 	callCount     int
 }
 
 func (f *fakeSemanticSearchService) Search(
 	_ context.Context,
+	scope accessdomain.OwnerScope,
 	input embeddingapplication.SemanticSearchInput,
 ) (embeddingapplication.SemanticSearchOutput, error) {
 	f.callCount++
+	f.receivedScope = scope
 	f.receivedInput = input
 	return f.output, f.err
 }
@@ -39,6 +43,7 @@ func newSemanticSearchTestRouter(
 ) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
+	useTestAuthenticatedIdentity(router)
 	handler := NewSemanticSearchHandler(service)
 	handler.RegisterRoutes(router)
 	return router
@@ -91,6 +96,13 @@ func TestSemanticSearchHandlerReturnsResults(t *testing.T) {
 	if service.callCount != 1 {
 		t.Fatalf("service call count = %d, want 1", service.callCount)
 	}
+	if service.receivedScope.OwnerUserID() != testAPIOwnerUserID {
+		t.Fatalf(
+			"scope owner = %d, want %d",
+			service.receivedScope.OwnerUserID(),
+			testAPIOwnerUserID,
+		)
+	}
 	if service.receivedInput.Query != "  磁悬浮振动  " {
 		t.Fatalf("query = %q, want raw request query", service.receivedInput.Query)
 	}
@@ -117,6 +129,32 @@ func TestSemanticSearchHandlerReturnsResults(t *testing.T) {
 		response.Hits[0].Title == nil ||
 		*response.Hits[0].Title != title {
 		t.Fatalf("unexpected response hit: %+v", response.Hits[0])
+	}
+}
+
+// TestSemanticSearchHandlerRequiresAuthenticatedIdentity 验证无 Session 身份时
+// 不解析业务请求，也不会调用可能产生远程费用的 Application 服务。
+func TestSemanticSearchHandlerRequiresAuthenticatedIdentity(t *testing.T) {
+	service := &fakeSemanticSearchService{}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	NewSemanticSearchHandler(service).RegisterRoutes(router)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/semantic-search",
+		strings.NewReader(`{"query":"control"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized || service.callCount != 0 {
+		t.Fatalf(
+			"status=%d calls=%d want 401/0 body=%s",
+			response.Code,
+			service.callCount,
+			response.Body.String(),
+		)
 	}
 }
 

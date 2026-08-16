@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
@@ -343,6 +344,152 @@ func TestChunkRepositoryHasCompleteSemanticEmbeddings(t *testing.T) {
 	)
 	if !errors.Is(err, documentdomain.ErrNotFound) {
 		t.Fatalf("missing document error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestScopedChunkRepositorySemanticSearchEnforcesOwnerBoundary 验证向量就绪
+// 检查和相似度查询都通过关联文档限制 OwnerScope。
+func TestScopedChunkRepositorySemanticSearchEnforcesOwnerBoundary(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	if err := database.RefreshVectorTypes(ctx, pool); err != nil {
+		t.Fatalf("refresh pgvector types for scoped semantic schema: %v", err)
+	}
+
+	ownerAID := insertScopedRepositoryUser(t, ctx, pool, "semantic-owner-a@example.com")
+	ownerBID := insertScopedRepositoryUser(t, ctx, pool, "semantic-owner-b@example.com")
+	ownerA, _ := accessdomain.NewOwnerScope(ownerAID)
+	ownerB, _ := accessdomain.NewOwnerScope(ownerBID)
+	documents := postgresrepository.NewDocumentRepository(pool)
+	systemChunks := postgresrepository.NewChunkRepository(pool)
+	jobs := postgresrepository.NewEmbeddingJobRepository(pool)
+	scopedChunks := postgresrepository.NewScopedChunkRepository(pool)
+
+	ownerADocument := createSemanticSearchFixture(
+		t,
+		ctx,
+		pool,
+		documents,
+		systemChunks,
+		jobs,
+		"scoped-owner-a",
+		"text-embedding-v4",
+		[]semanticChunkFixture{{
+			content: "owner A semantic evidence",
+			page:    1,
+			vector:  semanticTestVector(1, 0),
+		}},
+	)
+	ownerBDocument := createSemanticSearchFixture(
+		t,
+		ctx,
+		pool,
+		documents,
+		systemChunks,
+		jobs,
+		"scoped-owner-b",
+		"text-embedding-v4",
+		[]semanticChunkFixture{{
+			content: "owner B semantic evidence",
+			page:    2,
+			vector:  semanticTestVector(1, 0),
+		}},
+	)
+	if _, err := pool.Exec(
+		ctx,
+		"UPDATE documents SET owner_user_id = $1 WHERE id = $2",
+		ownerAID,
+		ownerADocument.ID,
+	); err != nil {
+		t.Fatalf("assign owner A semantic document: %v", err)
+	}
+	if _, err := pool.Exec(
+		ctx,
+		"UPDATE documents SET owner_user_id = $1 WHERE id = $2",
+		ownerBID,
+		ownerBDocument.ID,
+	); err != nil {
+		t.Fatalf("assign owner B semantic document: %v", err)
+	}
+
+	readinessOptions := documentdomain.SemanticEmbeddingReadinessOptions{
+		DocumentID: ownerADocument.ID,
+		ModelName:  "text-embedding-v4",
+		Dimensions: semanticSearchTestDimensions,
+	}
+	ready, err := scopedChunks.HasCompleteSemanticEmbeddings(
+		ctx,
+		ownerA,
+		readinessOptions,
+	)
+	if err != nil || !ready {
+		t.Fatalf("owner A readiness = (%t, %v), want true/nil", ready, err)
+	}
+	if _, err := scopedChunks.HasCompleteSemanticEmbeddings(
+		ctx,
+		ownerB,
+		readinessOptions,
+	); !errors.Is(err, documentdomain.ErrNotFound) {
+		t.Fatalf("owner B readiness for owner A document error = %v, want ErrNotFound", err)
+	}
+
+	searchOptions := documentdomain.SemanticSearchOptions{
+		QueryVector: semanticTestVector(1, 0),
+		ModelName:   "text-embedding-v4",
+		Dimensions:  semanticSearchTestDimensions,
+		Limit:       10,
+	}
+	ownerAHits, err := scopedChunks.SearchSimilar(ctx, ownerA, searchOptions)
+	if err != nil {
+		t.Fatalf("SearchSimilar(owner A) error = %v", err)
+	}
+	if len(ownerAHits) != 1 || ownerAHits[0].DocumentID != ownerADocument.ID {
+		t.Fatalf("SearchSimilar(owner A) = %+v, want only owner A", ownerAHits)
+	}
+	ownerBHits, err := scopedChunks.SearchSimilar(ctx, ownerB, searchOptions)
+	if err != nil {
+		t.Fatalf("SearchSimilar(owner B) error = %v", err)
+	}
+	if len(ownerBHits) != 1 || ownerBHits[0].DocumentID != ownerBDocument.ID {
+		t.Fatalf("SearchSimilar(owner B) = %+v, want only owner B", ownerBHits)
+	}
+
+	foreignDocumentID := ownerADocument.ID
+	searchOptions.DocumentID = &foreignDocumentID
+	foreignHits, err := scopedChunks.SearchSimilar(ctx, ownerB, searchOptions)
+	if err != nil {
+		t.Fatalf("SearchSimilar(owner B, owner A document) error = %v", err)
+	}
+	if foreignHits == nil || len(foreignHits) != 0 {
+		t.Fatalf("foreign document hits = %#v, want non-nil empty slice", foreignHits)
+	}
+}
+
+// TestScopedChunkRepositorySemanticSearchRejectsInvalidScope 验证无效作用域
+// 会在访问数据库或构造 pgvector 查询前被拒绝。
+func TestScopedChunkRepositorySemanticSearchRejectsInvalidScope(t *testing.T) {
+	var invalidScope accessdomain.OwnerScope
+	repository := postgresrepository.NewScopedChunkRepository(nil)
+	ctx := context.Background()
+
+	if _, err := repository.HasCompleteSemanticEmbeddings(
+		ctx,
+		invalidScope,
+		documentdomain.SemanticEmbeddingReadinessOptions{DocumentID: 1},
+	); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
+		t.Fatalf("HasCompleteSemanticEmbeddings(invalid scope) error = %v", err)
+	}
+	if _, err := repository.SearchSimilar(
+		ctx,
+		invalidScope,
+		documentdomain.SemanticSearchOptions{},
+	); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
+		t.Fatalf("SearchSimilar(invalid scope) error = %v", err)
 	}
 }
 

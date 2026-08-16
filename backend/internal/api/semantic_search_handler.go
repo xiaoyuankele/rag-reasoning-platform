@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
@@ -20,6 +21,7 @@ const defaultSemanticSearchTopK = 5
 type semanticSearchService interface {
 	Search(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		input embeddingapplication.SemanticSearchInput,
 	) (embeddingapplication.SemanticSearchOutput, error)
 }
@@ -73,6 +75,12 @@ type semanticSearchResponse struct {
 
 // Search 读取 JSON 请求，调用 Application，并把结果转换为 HTTP 响应。
 func (h *SemanticSearchHandler) Search(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	var request semanticSearchRequest
 
 	// ShouldBindJSON 读取请求体并按照 json 标签绑定字段。必须传 &request，
@@ -91,6 +99,7 @@ func (h *SemanticSearchHandler) Search(c *gin.Context) {
 
 	result, err := h.service.Search(
 		c.Request.Context(),
+		scope,
 		embeddingapplication.SemanticSearchInput{
 			Query:      request.Query,
 			DocumentID: request.DocumentID,

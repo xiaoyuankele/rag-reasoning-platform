@@ -13,6 +13,7 @@ import (
 
 	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	generationdomain "rag-reasoning-platform/backend/internal/domain/generation"
@@ -24,14 +25,17 @@ type fakeAnswerService struct {
 	output        answerapplication.Output
 	err           error
 	receivedInput answerapplication.Input
+	receivedScope accessdomain.OwnerScope
 	callCount     int
 }
 
 func (f *fakeAnswerService) Answer(
 	_ context.Context,
+	scope accessdomain.OwnerScope,
 	input answerapplication.Input,
 ) (answerapplication.Output, error) {
 	f.callCount++
+	f.receivedScope = scope
 	f.receivedInput = input
 	return f.output, f.err
 }
@@ -39,6 +43,7 @@ func (f *fakeAnswerService) Answer(
 func newAnswerTestRouter(service answerService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
+	useTestAuthenticatedIdentity(router)
 	handler := NewAnswerHandler(service)
 	handler.RegisterRoutes(router)
 	return router
@@ -100,6 +105,13 @@ func TestAnswerHandlerReturnsAnswerAndSources(t *testing.T) {
 	if service.callCount != 1 {
 		t.Fatalf("service call count = %d, want 1", service.callCount)
 	}
+	if service.receivedScope.OwnerUserID() != testAPIOwnerUserID {
+		t.Fatalf(
+			"scope owner = %d, want %d",
+			service.receivedScope.OwnerUserID(),
+			testAPIOwnerUserID,
+		)
+	}
 	if service.receivedInput.Query != "  磁悬浮振动如何抑制？  " {
 		t.Fatalf("query = %q, want raw request query", service.receivedInput.Query)
 	}
@@ -136,6 +148,32 @@ func TestAnswerHandlerReturnsAnswerAndSources(t *testing.T) {
 		response.Usage.CompletionTokens != 30 ||
 		response.Usage.TotalTokens != 150 {
 		t.Fatalf("unexpected usage: %+v", response.Usage)
+	}
+}
+
+// TestAnswerHandlerRequiresAuthenticatedIdentity 验证无 Session 身份时，
+// 不进入可能调用 Embedding 和 Generation 的问答 Application。
+func TestAnswerHandlerRequiresAuthenticatedIdentity(t *testing.T) {
+	service := &fakeAnswerService{}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	NewAnswerHandler(service).RegisterRoutes(router)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/answers",
+		strings.NewReader(`{"query":"control"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized || service.callCount != 0 {
+		t.Fatalf(
+			"status=%d calls=%d want 401/0 body=%s",
+			response.Code,
+			service.callCount,
+			response.Body.String(),
+		)
 	}
 }
 

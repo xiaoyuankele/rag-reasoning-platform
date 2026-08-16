@@ -9,6 +9,7 @@ import (
 
 	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	generationdomain "rag-reasoning-platform/backend/internal/domain/generation"
@@ -23,6 +24,7 @@ const defaultAnswerTopK = 5
 type answerService interface {
 	Answer(
 		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		input answerapplication.Input,
 	) (answerapplication.Output, error)
 }
@@ -85,6 +87,12 @@ type answerResponse struct {
 
 // Answer 绑定 JSON、调用 Application，并把统一结果转换成 HTTP 响应。
 func (h *AnswerHandler) Answer(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
 	var request answerRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		c.JSON(http.StatusBadRequest, errorResponse{
@@ -100,6 +108,7 @@ func (h *AnswerHandler) Answer(c *gin.Context) {
 
 	result, err := h.service.Answer(
 		c.Request.Context(),
+		scope,
 		answerapplication.Input{
 			Query:            request.Query,
 			DocumentID:       request.DocumentID,

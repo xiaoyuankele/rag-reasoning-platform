@@ -342,7 +342,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		semanticSearchService, err =
 			embeddingapplication.NewSemanticSearchService(
 				embedder,
-				chunkRepository,
+				scopedChunkRepository,
 				embeddingConfig.ModelName,
 				embeddingConfig.Dimensions,
 			)
@@ -585,12 +585,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	)
 
 	router := api.NewRouter(logger)
-	if semanticSearchHandler != nil {
-		semanticSearchHandler.RegisterRoutes(router)
-	}
-	if answerHandler != nil {
-		answerHandler.RegisterRoutes(router)
-	}
 	verificationHandler.RegisterRoutes(router)
 	authRegisterHandler.RegisterRoutes(router)
 	authLoginHandler.RegisterRoutes(router)
@@ -610,6 +604,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentEmbeddingHandler.RegisterRoutes(protectedRoutes)
 	embeddingJobHandler.RegisterRoutes(protectedRoutes)
 	documentSearchHandler.RegisterRoutes(protectedRoutes)
+	if semanticSearchHandler != nil {
+		semanticSearchHandler.RegisterRoutes(protectedRoutes)
+	}
+	if answerHandler != nil {
+		answerHandler.RegisterRoutes(protectedRoutes)
+	}
 
 	users := protectedRoutes.Group("/users")
 	currentUserHandler.RegisterRoutes(users)

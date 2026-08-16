@@ -41,7 +41,7 @@ func TestServiceObservesSkippedGenerationWithoutEvidence(t *testing.T) {
 		t.Fatalf("NewService() error = %v, want nil", err)
 	}
 
-	_, err = service.Answer(context.Background(), Input{
+	_, err = service.Answer(context.Background(), testAnswerOwnerScope(t), Input{
 		Query:            "No evidence question",
 		TopK:             5,
 		ResponseLanguage: ResponseLanguageEnglish,
@@ -90,7 +90,7 @@ func TestServiceObservesSuccessfulGenerationAndTokenUsage(t *testing.T) {
 		t.Fatalf("NewService() error = %v, want nil", err)
 	}
 
-	_, err = service.Answer(context.Background(), Input{
+	_, err = service.Answer(context.Background(), testAnswerOwnerScope(t), Input{
 		Query:      "question",
 		DocumentID: &documentID,
 		TopK:       5,
@@ -136,7 +136,11 @@ func TestServiceObservesClassifiedGenerationFailure(t *testing.T) {
 		t.Fatalf("NewService() error = %v, want nil", err)
 	}
 
-	_, err = service.Answer(context.Background(), Input{Query: "question", TopK: 5})
+	_, err = service.Answer(
+		context.Background(),
+		testAnswerOwnerScope(t),
+		Input{Query: "question", TopK: 5},
+	)
 	if !errors.Is(err, generationdomain.ErrGenerationRateLimited) {
 		t.Fatalf("Answer() error = %v, want wrapped rate-limit error", err)
 	}

@@ -1,6 +1,10 @@
 package document
 
-import "context"
+import (
+	"context"
+
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
+)
 
 // SemanticSearchOptions 表示语义检索仓储执行一次向量查询所需的完整条件。
 //
@@ -44,6 +48,16 @@ type SemanticChunkSearcher interface {
 	) ([]SemanticSearchHit, error)
 }
 
+// ScopedSemanticChunkSearcher 定义只能在当前所有者文档范围内执行向量检索的能力。
+// Repository 必须在 SQL 候选集合中限制 owner，不能先查询全局向量再过滤。
+type ScopedSemanticChunkSearcher interface {
+	SearchSimilar(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		options SemanticSearchOptions,
+	) ([]SemanticSearchHit, error)
+}
+
 // SemanticEmbeddingReadinessOptions 表示核对一份文档语义检索就绪状态所需的条件。
 //
 // 同一个维度的不同模型并不一定处于同一向量空间，因此 ModelName 和 Dimensions
@@ -61,6 +75,16 @@ type SemanticEmbeddingReadinessOptions struct {
 type SemanticEmbeddingReadinessChecker interface {
 	HasCompleteSemanticEmbeddings(
 		ctx context.Context,
+		options SemanticEmbeddingReadinessOptions,
+	) (bool, error)
+}
+
+// ScopedSemanticEmbeddingReadinessChecker 定义只能核对当前所有者文档
+// 向量完整性的能力；不存在和属于其他用户都返回 ErrNotFound。
+type ScopedSemanticEmbeddingReadinessChecker interface {
+	HasCompleteSemanticEmbeddings(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
 		options SemanticEmbeddingReadinessOptions,
 	) (bool, error)
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
@@ -63,8 +64,8 @@ var (
 // Application 只依赖这个小接口，不依赖 PostgreSQL 的具体实现。生产环境和测试 Fake
 // 都必须同时提供“检查向量就绪状态”和“执行相似度查询”这两个插口。
 type semanticSearchRepository interface {
-	documentdomain.SemanticEmbeddingReadinessChecker
-	documentdomain.SemanticChunkSearcher
+	documentdomain.ScopedSemanticEmbeddingReadinessChecker
+	documentdomain.ScopedSemanticChunkSearcher
 }
 
 // SemanticSearchInput 是 HTTP 等上层入口交给语义检索用例的数据。
@@ -118,6 +119,7 @@ func NewSemanticSearchService(
 // Search 校验自然语言问题，生成一条查询向量，再读取最相近的文本块。
 func (s *SemanticSearchService) Search(
 	ctx context.Context,
+	scope accessdomain.OwnerScope,
 	input SemanticSearchInput,
 ) (SemanticSearchOutput, error) {
 	query, err := validateSemanticSearchInput(input)
@@ -131,6 +133,7 @@ func (s *SemanticSearchService) Search(
 	if input.DocumentID != nil {
 		ready, err := s.repository.HasCompleteSemanticEmbeddings(
 			ctx,
+			scope,
 			documentdomain.SemanticEmbeddingReadinessOptions{
 				DocumentID: *input.DocumentID,
 				ModelName:  s.modelName,
@@ -177,6 +180,7 @@ func (s *SemanticSearchService) Search(
 
 	hits, err := s.repository.SearchSimilar(
 		ctx,
+		scope,
 		documentdomain.SemanticSearchOptions{
 			QueryVector: embeddedQuery.Vectors[0],
 			ModelName:   s.modelName,
