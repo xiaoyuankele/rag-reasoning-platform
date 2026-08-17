@@ -2,7 +2,7 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P5（个人版工程化基线）已完成。P0～P4 的文档管理、异步解析、关键词检索、向量生产、语义检索和带来源问答均已形成可运行闭环；P5 已补齐稳定路径、结构化日志、容器部署、配套备份恢复、异常任务恢复及分级自动化回归。P6 个人用户域正在实施：B1～B5 的身份闭环、Session，以及文档、任务、chunks、向量、关键词检索、语义检索和问答隔离已经完成。下一步是 B6 显式认领历史无归属数据，再以 B7 收紧 `owner_user_id` 并执行发布验收；完成前仍不能直接开放给互不信任的多人。团队工作区和成员权限留到 P7。混合检索、DOCX、OCR、复杂学术版面及表格公式质量继续作为后续增量能力。
+> 当前状态：P5（个人版工程化基线）已完成。P0～P4 的文档管理、异步解析、关键词检索、向量生产、语义检索和带来源问答均已形成可运行闭环；P5 已补齐稳定路径、结构化日志、容器部署、配套备份恢复、异常任务恢复及分级自动化回归。P6 个人用户域正在实施：B1～B6 的身份闭环、Session、全链路数据隔离、本地 Mailpit 邮件联调和历史数据显式认领已经完成。下一步以 B7 收紧 `owner_user_id` 并执行发布验收；完成前仍不能直接开放给互不信任的多人。团队工作区和成员权限留到 P7。混合检索、DOCX、OCR、复杂学术版面及表格公式质量继续作为后续增量能力。
 
 ## 项目目标
 
@@ -139,7 +139,7 @@ rag_reasoning_platform_individual/
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
 | P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
 | P5 | 已完成（个人版基线） | 稳定运行路径、可观测性、容器部署、配套备份恢复、任务恢复、默认回归、一次性数据库集成及发布候选分级验收均已完成；不包含用户与租户系统 |
-| P6 | 实施中（B1～B5 已完成） | 身份闭环以及文档、解析任务、chunks、向量任务、关键词检索、语义检索和问答的用户隔离已经完成；相关接口通过 Cookie、OwnerScope 与所有者 SQL 形成纵向边界，并通过双用户真实 HTTP/PostgreSQL 测试。下一步执行 B6 历史数据认领和 B7 `NOT NULL`/发布验收，完成前仍不能开放给互不信任的多人 |
+| P6 | 实施中（B1～B6 已完成） | 身份闭环、全链路用户隔离、本地 Mailpit 注册和历史无主数据显式认领已经完成；46 篇历史文档已事务化归属正式个人用户，关联任务、chunks 与向量保持完整。下一步执行 B7 `NOT NULL`/发布验收，完成前仍不能开放给互不信任的多人 |
 | P7 | 未开始 | 团队工作区、成员权限、共享、租户配额和审计尚未设计或实现 |
 
 前端 F0、F1 已完成，F3 关键词检索最小切片已通过真实联调；下一步先接入 P6 后端身份边界，再完成
@@ -301,8 +301,10 @@ Scope，PostgreSQL 在 SQL 中写入或过滤 `owner_user_id`。双用户真实 
 路由，count/data SQL 都限定 OwnerScope；双用户相同关键词与越权 `document_id` 过滤已通过真实 HTTP/PostgreSQL
 测试。B5.3～B5.4 已把语义检索和问答迁入受保护路由：向量就绪检查与 pgvector 候选集都在 SQL 阶段
 限定所有者，Answer Service 继续传递同一 Scope。双用户真实 HTTP/PostgreSQL 测试使用本地固定 Embedder
-和 Generator 验证结果与引用来源不串用户，并保证默认回归不产生远程费用。B5 已完成，下一步进入 B6
-历史数据显式认领。
+和 Generator 验证结果与引用来源不串用户，并保证默认回归不产生远程费用。B6 已提供默认 dry-run、显式
+`-confirm` 和预计数量复核的 `assign-document-owner` 运维命令，并在单个 PostgreSQL 事务中把 46 篇历史
+无主文档认领给正式个人用户；2729 个 chunks、45 个解析任务、8 个向量任务和 460 条向量继续通过
+`document_id` 继承归属，没有复制或丢失。当前无主文档数量为 0，下一步进入 B7 数据库非空约束和发布验收。
 
 Python PDF 测试依赖 `ai/pyproject.toml` 中锁定的解析库。首次运行前安装项目依赖，然后执行测试：
 
@@ -360,7 +362,15 @@ Go 后端当前支持以下环境变量：
 | `DB_PASSWORD` | 无 | 本机私有密码，必须在 `.env` 中设置 |
 | `DB_SSLMODE` | `disable` | 本地开发时的 PostgreSQL SSL 模式 |
 | `VERIFICATION_HMAC_SECRET` | 无 | 验证码 HMAC 服务端密钥，至少 32 字节，必须保存在本机 `.env` |
-| `VERIFICATION_SENDER` | `fake` | 第一版仅支持不访问远程服务的内存 Fake Sender |
+| `VERIFICATION_SENDER` | `fake` | 验证码发送实现；`fake` 仅供自动化测试，`mailpit` 用于本地人工邮件联调 |
+| `VERIFICATION_SMTP_HOST` | `127.0.0.1` | 直接运行 Go 后端时连接 Mailpit 的 SMTP 主机 |
+| `VERIFICATION_SMTP_COMPOSE_HOST` | `mailpit` | Compose 后端容器内使用的 Mailpit 服务名 |
+| `VERIFICATION_SMTP_PORT` | `1025` | Mailpit 容器内部 SMTP 端口 |
+| `VERIFICATION_SMTP_FROM_ADDRESS` | `no-reply@rag.local` | 本地验证码邮件的信封和头部发件地址 |
+| `VERIFICATION_SMTP_FROM_NAME` | `RAG Reasoning Platform` | 本地验证码邮件的发件人显示名 |
+| `VERIFICATION_SMTP_TIMEOUT` | `5s` | 本地 SMTP 建连和交付的最长等待时间 |
+| `MAILPIT_SMTP_HOST_PORT` | `1025` | Mailpit SMTP 映射到宿主机的端口 |
+| `MAILPIT_WEB_HOST_PORT` | `8025` | Mailpit Web 收件箱映射到宿主机的端口 |
 | `VERIFICATION_RATE_LIMIT_WINDOW` | `1m` | 验证码 HTTP 单实例滑动窗口长度 |
 | `VERIFICATION_PER_CLIENT_LIMIT` | `5` | 同一远端 IP 在窗口内允许占用的请求数 |
 | `VERIFICATION_GLOBAL_LIMIT` | `100` | 整个后端进程在窗口内允许占用的验证码请求数 |
@@ -437,6 +447,28 @@ Remove-Item Env:VERIFICATION_HMAC_SECRET
 
 上面的随机密钥只适合单次启动验收；进程重启后旧验证码会失效。正常本地开发应生成一次随机值并写入被 Git
 忽略的 `.env`，再像 `DB_PASSWORD` 一样加载到当前 PowerShell 环境。禁止把真实密钥写入 `.env.example`、日志或提交记录。
+
+本地人工注册可以启动可选 Mailpit：
+
+```powershell
+docker compose --profile mailpit up -d mailpit
+```
+
+然后把当前后端进程的 `VERIFICATION_SENDER` 设置为 `mailpit`，保持
+`VERIFICATION_SMTP_HOST=127.0.0.1` 和 `VERIFICATION_SMTP_PORT=1025`，再访问
+`http://localhost:8025` 查看验证码邮件。Mailpit 不向互联网发送邮件，也不能证明真实邮箱所有权；它只用于
+零费用本地开发。默认 `fake` 回归不启动或访问 Mailpit。
+
+P6/B6 历史文档认领必须先执行 dry-run，确认目标用户和数量：
+
+```powershell
+cd backend
+go run ./cmd/assign-document-owner -owner-user-id 17
+```
+
+工具不会在 dry-run 修改数据库，并会输出一条包含当前预计数量的确认命令。只有显式提供 `-confirm` 和完全
+匹配的 `-expected-unowned` 才会在单个事务内写入；目标用户不存在、已停用或数量变化都会整体拒绝，不会
+留下部分认领。用户 ID 和数量必须以本机 dry-run 为准，不能照抄文档中的历史示例值。
 
 本地 PostgreSQL 常用命令：
 

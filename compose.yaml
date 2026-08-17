@@ -36,6 +36,14 @@ services:
       # P6 验证码接口默认使用零费用 Fake Sender，但 HMAC 密钥仍必须显式配置。
       VERIFICATION_HMAC_SECRET: ${VERIFICATION_HMAC_SECRET:-}
       VERIFICATION_SENDER: ${VERIFICATION_SENDER:-fake}
+
+      # 容器内使用 Compose 服务名 mailpit；宿主机直接 go run 时使用
+      # .env 中的 VERIFICATION_SMTP_HOST=127.0.0.1。
+      VERIFICATION_SMTP_HOST: ${VERIFICATION_SMTP_COMPOSE_HOST:-mailpit}
+      VERIFICATION_SMTP_PORT: 1025
+      VERIFICATION_SMTP_FROM_ADDRESS: ${VERIFICATION_SMTP_FROM_ADDRESS:-no-reply@rag.local}
+      VERIFICATION_SMTP_FROM_NAME: ${VERIFICATION_SMTP_FROM_NAME:-RAG Reasoning Platform}
+      VERIFICATION_SMTP_TIMEOUT: ${VERIFICATION_SMTP_TIMEOUT:-5s}
       VERIFICATION_RATE_LIMIT_WINDOW: ${VERIFICATION_RATE_LIMIT_WINDOW:-1m}
       VERIFICATION_PER_CLIENT_LIMIT: ${VERIFICATION_PER_CLIENT_LIMIT:-5}
       VERIFICATION_GLOBAL_LIMIT: ${VERIFICATION_GLOBAL_LIMIT:-100}
@@ -133,6 +141,22 @@ services:
       - shared_buffers=64MB
       - -c
       - max_connections=20
+
+  mailpit:
+    # Mailpit 只在本地人工注册联调时启动；普通数据库和默认回归不依赖它。
+    image: axllent/mailpit:v1.30.0
+    container_name: rag_reasoning_mailpit
+    profiles:
+      - mailpit
+
+    # SMTP 和 Web UI 都只绑定本机，不能公开暴露开发验证码收件箱。
+    ports:
+      - "127.0.0.1:${MAILPIT_SMTP_HOST_PORT:-1025}:1025"
+      - "127.0.0.1:${MAILPIT_WEB_HOST_PORT:-8025}:8025"
+
+    # 官方镜像已经内置 /mailpit readyz 健康检查。
+    mem_limit: 64m
+    cpus: 0.25
 
 volumes:
   rag_postgres_data:

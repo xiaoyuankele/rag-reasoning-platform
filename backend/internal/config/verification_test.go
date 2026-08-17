@@ -18,10 +18,39 @@ func TestLoadVerificationUsesSafeDefaults(t *testing.T) {
 	}
 	if verificationConfig.HMACSecret != testVerificationHMACSecret ||
 		verificationConfig.Sender != VerificationSenderFake ||
+		verificationConfig.SMTPHost != defaultVerificationSMTPHost ||
+		verificationConfig.SMTPPort != defaultVerificationSMTPPort ||
+		verificationConfig.SMTPFromAddress != defaultVerificationSMTPFromAddress ||
+		verificationConfig.SMTPFromName != defaultVerificationSMTPFromName ||
+		verificationConfig.SMTPTimeout != defaultVerificationSMTPTimeout ||
 		verificationConfig.RateLimitWindow != time.Minute ||
 		verificationConfig.PerClientLimit != 5 ||
 		verificationConfig.GlobalLimit != 100 {
 		t.Fatalf("LoadVerification() = %+v, want safe defaults", verificationConfig)
+	}
+}
+
+func TestLoadVerificationUsesMailpitSMTPEnvironment(t *testing.T) {
+	clearVerificationEnvironment(t)
+	t.Setenv("VERIFICATION_HMAC_SECRET", testVerificationHMACSecret)
+	t.Setenv("VERIFICATION_SENDER", " MAILPIT ")
+	t.Setenv("VERIFICATION_SMTP_HOST", "mailpit")
+	t.Setenv("VERIFICATION_SMTP_PORT", "2025")
+	t.Setenv("VERIFICATION_SMTP_FROM_ADDRESS", "verify@example.test")
+	t.Setenv("VERIFICATION_SMTP_FROM_NAME", "Local Verification")
+	t.Setenv("VERIFICATION_SMTP_TIMEOUT", "7s")
+
+	verificationConfig, err := LoadVerification()
+	if err != nil {
+		t.Fatalf("LoadVerification() error = %v, want nil", err)
+	}
+	if verificationConfig.Sender != VerificationSenderMailpit ||
+		verificationConfig.SMTPHost != "mailpit" ||
+		verificationConfig.SMTPPort != 2025 ||
+		verificationConfig.SMTPFromAddress != "verify@example.test" ||
+		verificationConfig.SMTPFromName != "Local Verification" ||
+		verificationConfig.SMTPTimeout != 7*time.Second {
+		t.Fatalf("LoadVerification() = %+v, want Mailpit SMTP values", verificationConfig)
 	}
 }
 
@@ -43,6 +72,60 @@ func TestLoadVerificationUsesEnvironment(t *testing.T) {
 		verificationConfig.PerClientLimit != 7 ||
 		verificationConfig.GlobalLimit != 200 {
 		t.Fatalf("LoadVerification() = %+v, want environment values", verificationConfig)
+	}
+}
+
+func TestLoadVerificationRejectsInvalidMailpitSMTPConfiguration(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(t *testing.T)
+	}{
+		{
+			name: "invalid host",
+			configure: func(t *testing.T) {
+				t.Setenv("VERIFICATION_SMTP_HOST", "mailpit\r\ninvalid")
+			},
+		},
+		{
+			name: "invalid port",
+			configure: func(t *testing.T) {
+				t.Setenv("VERIFICATION_SMTP_PORT", "70000")
+			},
+		},
+		{
+			name: "invalid from address",
+			configure: func(t *testing.T) {
+				t.Setenv("VERIFICATION_SMTP_FROM_ADDRESS", "RAG <verify@example.test>")
+			},
+		},
+		{
+			name: "invalid from name",
+			configure: func(t *testing.T) {
+				t.Setenv("VERIFICATION_SMTP_FROM_NAME", "RAG\r\nBcc: attacker@example.test")
+			},
+		},
+		{
+			name: "invalid timeout",
+			configure: func(t *testing.T) {
+				t.Setenv("VERIFICATION_SMTP_TIMEOUT", "0s")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			clearVerificationEnvironment(t)
+			t.Setenv("VERIFICATION_HMAC_SECRET", testVerificationHMACSecret)
+			t.Setenv("VERIFICATION_SENDER", VerificationSenderMailpit)
+			test.configure(t)
+
+			_, err := LoadVerification()
+			if !errors.Is(err, ErrInvalidVerificationSMTPConfiguration) {
+				t.Fatalf(
+					"LoadVerification() error = %v, want %v",
+					err,
+					ErrInvalidVerificationSMTPConfiguration,
+				)
+			}
+		})
 	}
 }
 
@@ -131,6 +214,11 @@ func clearVerificationEnvironment(t *testing.T) {
 	for _, name := range []string{
 		"VERIFICATION_HMAC_SECRET",
 		"VERIFICATION_SENDER",
+		"VERIFICATION_SMTP_HOST",
+		"VERIFICATION_SMTP_PORT",
+		"VERIFICATION_SMTP_FROM_ADDRESS",
+		"VERIFICATION_SMTP_FROM_NAME",
+		"VERIFICATION_SMTP_TIMEOUT",
 		"VERIFICATION_RATE_LIMIT_WINDOW",
 		"VERIFICATION_PER_CLIENT_LIMIT",
 		"VERIFICATION_GLOBAL_LIMIT",

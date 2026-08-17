@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"os"
 	"strings"
 	"time"
@@ -13,12 +14,21 @@ const (
 	// 它不会访问邮件或短信服务，因此适合作为开发和自动化测试默认值。
 	VerificationSenderFake = "fake"
 
+	// VerificationSenderMailpit 表示通过无认证 SMTP 把验证码交给本地 Mailpit。
+	// 该模式只用于本机人工联调，不能直接作为生产邮件发送方案。
+	VerificationSenderMailpit = "mailpit"
+
 	minimumVerificationHMACSecretBytes = 32
 	defaultVerificationRateLimitWindow = time.Minute
 	defaultVerificationPerClientLimit  = 5
 	defaultVerificationGlobalLimit     = 100
 	maximumVerificationPerClientLimit  = 1000
 	maximumVerificationGlobalLimit     = 10000
+	defaultVerificationSMTPHost        = "127.0.0.1"
+	defaultVerificationSMTPPort        = 1025
+	defaultVerificationSMTPFromAddress = "no-reply@rag.local"
+	defaultVerificationSMTPFromName    = "RAG Reasoning Platform"
+	defaultVerificationSMTPTimeout     = 5 * time.Second
 )
 
 var (
@@ -34,7 +44,12 @@ var (
 
 	// ErrInvalidVerificationSender 表示配置了当前版本不支持的发送器。
 	ErrInvalidVerificationSender = errors.New(
-		"VERIFICATION_SENDER must be fake",
+		"VERIFICATION_SENDER must be fake or mailpit",
+	)
+
+	// ErrInvalidVerificationSMTPConfiguration 表示 Mailpit SMTP 地址或发件人配置不安全。
+	ErrInvalidVerificationSMTPConfiguration = errors.New(
+		"verification SMTP configuration is invalid",
 	)
 
 	// ErrInvalidVerificationRateLimits 表示全局限额小于单客户端限额。
@@ -48,6 +63,11 @@ var (
 type VerificationConfig struct {
 	HMACSecret      string
 	Sender          string
+	SMTPHost        string
+	SMTPPort        int
+	SMTPFromAddress string
+	SMTPFromName    string
+	SMTPTimeout     time.Duration
 	RateLimitWindow time.Duration
 	PerClientLimit  int
 	GlobalLimit     int
@@ -67,8 +87,75 @@ func LoadVerification() (VerificationConfig, error) {
 	if sender == "" {
 		sender = VerificationSenderFake
 	}
-	if sender != VerificationSenderFake {
+	if sender != VerificationSenderFake && sender != VerificationSenderMailpit {
 		return VerificationConfig{}, ErrInvalidVerificationSender
+	}
+
+	smtpHost := defaultVerificationSMTPHost
+	smtpPort := defaultVerificationSMTPPort
+	smtpFromAddress := defaultVerificationSMTPFromAddress
+	smtpFromName := defaultVerificationSMTPFromName
+	smtpTimeout := defaultVerificationSMTPTimeout
+	if sender == VerificationSenderMailpit {
+		var err error
+		smtpHost = environmentOrDefault(
+			"VERIFICATION_SMTP_HOST",
+			defaultVerificationSMTPHost,
+		)
+		if strings.ContainsAny(smtpHost, "\r\n\t /\\") {
+			return VerificationConfig{}, fmt.Errorf(
+				"%w: VERIFICATION_SMTP_HOST contains invalid characters",
+				ErrInvalidVerificationSMTPConfiguration,
+			)
+		}
+
+		smtpPort, err = loadPositiveBoundedInt(
+			"VERIFICATION_SMTP_PORT",
+			defaultVerificationSMTPPort,
+			maxPort,
+		)
+		if err != nil {
+			return VerificationConfig{}, fmt.Errorf(
+				"%w: load VERIFICATION_SMTP_PORT: %w",
+				ErrInvalidVerificationSMTPConfiguration,
+				err,
+			)
+		}
+
+		smtpFromAddress = environmentOrDefault(
+			"VERIFICATION_SMTP_FROM_ADDRESS",
+			defaultVerificationSMTPFromAddress,
+		)
+		parsedFromAddress, parseErr := mail.ParseAddress(smtpFromAddress)
+		if parseErr != nil || parsedFromAddress.Address != smtpFromAddress {
+			return VerificationConfig{}, fmt.Errorf(
+				"%w: VERIFICATION_SMTP_FROM_ADDRESS must be one plain email address",
+				ErrInvalidVerificationSMTPConfiguration,
+			)
+		}
+
+		smtpFromName = environmentOrDefault(
+			"VERIFICATION_SMTP_FROM_NAME",
+			defaultVerificationSMTPFromName,
+		)
+		if strings.ContainsAny(smtpFromName, "\r\n") {
+			return VerificationConfig{}, fmt.Errorf(
+				"%w: VERIFICATION_SMTP_FROM_NAME contains a line break",
+				ErrInvalidVerificationSMTPConfiguration,
+			)
+		}
+
+		smtpTimeout, err = loadPositiveDuration(
+			"VERIFICATION_SMTP_TIMEOUT",
+			defaultVerificationSMTPTimeout,
+		)
+		if err != nil {
+			return VerificationConfig{}, fmt.Errorf(
+				"%w: load VERIFICATION_SMTP_TIMEOUT: %w",
+				ErrInvalidVerificationSMTPConfiguration,
+				err,
+			)
+		}
 	}
 
 	rateLimitWindow, err := loadPositiveDuration(
@@ -112,6 +199,11 @@ func LoadVerification() (VerificationConfig, error) {
 	return VerificationConfig{
 		HMACSecret:      hmacSecret,
 		Sender:          sender,
+		SMTPHost:        smtpHost,
+		SMTPPort:        smtpPort,
+		SMTPFromAddress: smtpFromAddress,
+		SMTPFromName:    smtpFromName,
+		SMTPTimeout:     smtpTimeout,
 		RateLimitWindow: rateLimitWindow,
 		PerClientLimit:  perClientLimit,
 		GlobalLimit:     globalLimit,

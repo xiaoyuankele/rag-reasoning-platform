@@ -1,6 +1,6 @@
 # P6 个人用户域后端交接
 
-> 状态：实施中；B1～B5 已完成。文档、解析任务、chunks、向量任务、关键词检索、语义检索和问答已接入 OwnerScope、认证中间件与所有者 SQL，并通过双用户真实 HTTP/PostgreSQL 越权测试；下一步执行 B6 历史数据显式认领。交接日期：2026-08-16。
+> 状态：实施中；B1～B6 已完成。全链路 OwnerScope 隔离、本地 Mailpit 注册和历史数据显式认领已经通过真实 HTTP/PostgreSQL 验收；下一步执行 B7 非空约束与发布验收。交接更新日期：2026-08-17。
 > 产品边界、主线图和跨端验收标准以
 > [P6 个人用户域与私有数据闭环](../../shared/architecture/personal-user-domain.md) 为准；本文只冻结 Go、PostgreSQL、Worker 和测试的实施边界。
 
@@ -79,7 +79,7 @@ Application；它只从 Context 取出 Actor，再构造普通输入值。
 
 ## 4. 数据库迁移交接
 
-当前最新迁移为 `000009`。按两个发布门禁实施：
+当前已执行至 `000011`。按两个发布门禁实施：
 
 ### Release A
 
@@ -88,8 +88,9 @@ Application；它只从 Context 取出 Actor，再构造普通输入值。
 - `000011_add_document_owner.up.sql`：增加暂时可空的 `documents.owner_user_id`、外键和
   `(owner_user_id, created_at DESC, id DESC)` 索引；
 - 应用查询对 `owner_user_id IS NULL` 默认拒绝访问；
-- 增加一次性 `cmd/assign-document-owner`，只接受明确的用户 ID，事务内认领空归属文档，输出更新数量，
-  不打印邮箱、文件名或正文。
+- 已增加一次性 `cmd/assign-document-owner`：默认 dry-run；确认时同时要求明确用户 ID、`-confirm` 和
+  dry-run 得到的预计数量。事务内锁定 documents 写入并再次核对数量，不打印邮箱、文件名或正文。
+- 2026-08-17 已把 46 篇历史文档认领给正式个人用户；无主文档为 0，关联任务、chunks 和向量完整。
 
 ### Release B
 
@@ -325,8 +326,8 @@ flowchart LR
 
 ## 11. 前端交接点
 
-后端 B3 已可以交付登录态联调，B5 现已完成全部用户业务查询的纵向隔离。完成 B6 历史数据认领、
-B7 数据库约束与发布验收后，才可声明多人数据安全边界完整交付。
+后端 B3 已可以交付登录态联调，B5 已完成全部用户业务查询的纵向隔离，B6 已完成历史数据认领。
+完成 B7 数据库约束与发布验收后，才可声明多人数据安全边界完整交付。
 
 前端只依赖：
 

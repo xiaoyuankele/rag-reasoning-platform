@@ -386,6 +386,19 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	switch verificationConfig.Sender {
 	case config.VerificationSenderFake:
 		verificationSender = verificationinfrastructure.NewFakeSender()
+	case config.VerificationSenderMailpit:
+		verificationSender, err = verificationinfrastructure.NewSMTPSender(
+			verificationinfrastructure.SMTPOptions{
+				Host:        verificationConfig.SMTPHost,
+				Port:        verificationConfig.SMTPPort,
+				FromAddress: verificationConfig.SMTPFromAddress,
+				FromName:    verificationConfig.SMTPFromName,
+				Timeout:     verificationConfig.SMTPTimeout,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create Mailpit SMTP verification sender: %w", err)
+		}
 	default:
 		return fmt.Errorf(
 			"unsupported verification sender %q",
