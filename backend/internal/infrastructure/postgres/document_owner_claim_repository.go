@@ -8,8 +8,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	userdomain "rag-reasoning-platform/backend/internal/domain/user"
+	documentowner "rag-reasoning-platform/backend/internal/maintenance/documentowner"
 )
 
 // DocumentOwnerClaimRepository 使用 PostgreSQL 完成一次性的历史文档归属迁移。
@@ -28,7 +28,7 @@ func NewDocumentOwnerClaimRepository(
 func (r *DocumentOwnerClaimRepository) PreviewOwnerClaim(
 	ctx context.Context,
 	ownerUserID int64,
-) (documentdomain.OwnerClaimPreview, error) {
+) (documentowner.Preview, error) {
 	transaction, err := r.pool.BeginTx(
 		ctx,
 		pgx.TxOptions{
@@ -37,7 +37,7 @@ func (r *DocumentOwnerClaimRepository) PreviewOwnerClaim(
 		},
 	)
 	if err != nil {
-		return documentdomain.OwnerClaimPreview{}, fmt.Errorf(
+		return documentowner.Preview{}, fmt.Errorf(
 			"begin owner claim preview transaction: %w",
 			err,
 		)
@@ -46,22 +46,22 @@ func (r *DocumentOwnerClaimRepository) PreviewOwnerClaim(
 
 	target, err := loadOwnerClaimTarget(ctx, transaction, ownerUserID, false)
 	if err != nil {
-		return documentdomain.OwnerClaimPreview{}, err
+		return documentowner.Preview{}, err
 	}
 
 	unownedDocuments, err := countUnownedDocuments(ctx, transaction)
 	if err != nil {
-		return documentdomain.OwnerClaimPreview{}, err
+		return documentowner.Preview{}, err
 	}
 
 	if err := transaction.Commit(ctx); err != nil {
-		return documentdomain.OwnerClaimPreview{}, fmt.Errorf(
+		return documentowner.Preview{}, fmt.Errorf(
 			"commit owner claim preview transaction: %w",
 			err,
 		)
 	}
 
-	return documentdomain.OwnerClaimPreview{
+	return documentowner.Preview{
 		Target:           target,
 		UnownedDocuments: unownedDocuments,
 	}, nil
@@ -73,10 +73,10 @@ func (r *DocumentOwnerClaimRepository) ClaimUnownedDocuments(
 	ctx context.Context,
 	ownerUserID int64,
 	expectedUnowned int64,
-) (documentdomain.OwnerClaimResult, error) {
+) (documentowner.Result, error) {
 	transaction, err := r.pool.Begin(ctx)
 	if err != nil {
-		return documentdomain.OwnerClaimResult{}, fmt.Errorf(
+		return documentowner.Result{}, fmt.Errorf(
 			"begin owner claim transaction: %w",
 			err,
 		)
@@ -86,7 +86,7 @@ func (r *DocumentOwnerClaimRepository) ClaimUnownedDocuments(
 	// KEY SHARE 防止目标用户在事务提交前被删除，但不阻碍普通用户读取。
 	target, err := loadOwnerClaimTarget(ctx, transaction, ownerUserID, true)
 	if err != nil {
-		return documentdomain.OwnerClaimResult{}, err
+		return documentowner.Result{}, err
 	}
 
 	// 这是一次性运维操作。短暂阻止 documents 并发写入，保证“先数后改”期间
@@ -95,7 +95,7 @@ func (r *DocumentOwnerClaimRepository) ClaimUnownedDocuments(
 		ctx,
 		"LOCK TABLE documents IN SHARE ROW EXCLUSIVE MODE",
 	); err != nil {
-		return documentdomain.OwnerClaimResult{}, fmt.Errorf(
+		return documentowner.Result{}, fmt.Errorf(
 			"lock documents for owner claim: %w",
 			err,
 		)
@@ -103,11 +103,11 @@ func (r *DocumentOwnerClaimRepository) ClaimUnownedDocuments(
 
 	actualUnowned, err := countUnownedDocuments(ctx, transaction)
 	if err != nil {
-		return documentdomain.OwnerClaimResult{}, err
+		return documentowner.Result{}, err
 	}
 	if actualUnowned != expectedUnowned {
-		return documentdomain.OwnerClaimResult{},
-			&documentdomain.OwnerClaimCountMismatchError{
+		return documentowner.Result{},
+			&documentowner.CountMismatchError{
 				Expected: expectedUnowned,
 				Actual:   actualUnowned,
 			}
@@ -121,14 +121,14 @@ func (r *DocumentOwnerClaimRepository) ClaimUnownedDocuments(
 		ownerUserID,
 	)
 	if err != nil {
-		return documentdomain.OwnerClaimResult{}, fmt.Errorf(
+		return documentowner.Result{}, fmt.Errorf(
 			"update unowned document owners: %w",
 			err,
 		)
 	}
 	claimedDocuments := commandTag.RowsAffected()
 	if claimedDocuments != expectedUnowned {
-		return documentdomain.OwnerClaimResult{}, fmt.Errorf(
+		return documentowner.Result{}, fmt.Errorf(
 			"owner claim updated %d documents, expected %d",
 			claimedDocuments,
 			expectedUnowned,
@@ -137,16 +137,16 @@ func (r *DocumentOwnerClaimRepository) ClaimUnownedDocuments(
 
 	remainingUnowned, err := countUnownedDocuments(ctx, transaction)
 	if err != nil {
-		return documentdomain.OwnerClaimResult{}, err
+		return documentowner.Result{}, err
 	}
 	if err := transaction.Commit(ctx); err != nil {
-		return documentdomain.OwnerClaimResult{}, fmt.Errorf(
+		return documentowner.Result{}, fmt.Errorf(
 			"commit owner claim transaction: %w",
 			err,
 		)
 	}
 
-	return documentdomain.OwnerClaimResult{
+	return documentowner.Result{
 		Target:           target,
 		ClaimedDocuments: claimedDocuments,
 		RemainingUnowned: remainingUnowned,
@@ -163,7 +163,7 @@ func loadOwnerClaimTarget(
 	querier ownerClaimQueryRow,
 	ownerUserID int64,
 	lockUser bool,
-) (documentdomain.OwnerClaimTarget, error) {
+) (documentowner.Target, error) {
 	query := `
 		SELECT id, display_name, status
 		FROM users
@@ -173,7 +173,7 @@ func loadOwnerClaimTarget(
 		query += " FOR KEY SHARE"
 	}
 
-	var target documentdomain.OwnerClaimTarget
+	var target documentowner.Target
 	var status string
 	err := querier.QueryRow(ctx, query, ownerUserID).Scan(
 		&target.UserID,
@@ -181,11 +181,11 @@ func loadOwnerClaimTarget(
 		&status,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return documentdomain.OwnerClaimTarget{},
-			documentdomain.ErrOwnerClaimTargetNotFound
+		return documentowner.Target{},
+			documentowner.ErrTargetNotFound
 	}
 	if err != nil {
-		return documentdomain.OwnerClaimTarget{}, fmt.Errorf(
+		return documentowner.Target{}, fmt.Errorf(
 			"load owner claim target: %w",
 			err,
 		)
@@ -193,8 +193,8 @@ func loadOwnerClaimTarget(
 
 	target.Status = userdomain.Status(status)
 	if target.Status != userdomain.StatusActive {
-		return documentdomain.OwnerClaimTarget{},
-			documentdomain.ErrOwnerClaimTargetInactive
+		return documentowner.Target{},
+			documentowner.ErrTargetInactive
 	}
 	return target, nil
 }

@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"rag-reasoning-platform/backend/internal/config"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
@@ -100,10 +102,29 @@ func TestPDFProcessorPersistsPageMetadataInPostgreSQL(t *testing.T) {
 		t.Fatalf("migrate database: %v", err)
 	}
 
-	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	documentRepository := postgresrepository.NewScopedDocumentRepository(pool)
+	var ownerID int64
+	if err := pool.QueryRow(
+		ctx,
+		`
+			INSERT INTO users (
+				email, email_verified_at, display_name, password_hash
+			)
+			VALUES ($1, CURRENT_TIMESTAMP, 'PDF Test Owner', '$argon2id$test-hash')
+			RETURNING id
+		`,
+		fmt.Sprintf("pdf-integration-%d@example.com", time.Now().UnixNano()),
+	).Scan(&ownerID); err != nil {
+		t.Fatalf("create PDF integration owner: %v", err)
+	}
+	ownerScope, err := accessdomain.NewOwnerScope(ownerID)
+	if err != nil {
+		t.Fatalf("create PDF integration owner scope: %v", err)
+	}
 	chunkRepository := postgresrepository.NewChunkRepository(pool)
 	createdDocument, err := documentRepository.Create(
 		ctx,
+		ownerScope,
 		documentdomain.CreateInput{
 			OriginalName: "page-metadata-test.pdf",
 			StoragePath:  storedFile.StoragePath,
@@ -128,6 +149,14 @@ func TestPDFProcessorPersistsPageMetadataInPostgreSQL(t *testing.T) {
 			createdDocument.ID,
 		); err != nil {
 			t.Errorf("clean up PDF document record: %v", err)
+			return
+		}
+		if _, err := pool.Exec(
+			cleanupContext,
+			"DELETE FROM users WHERE id = $1",
+			ownerID,
+		); err != nil {
+			t.Errorf("clean up PDF integration owner: %v", err)
 		}
 	})
 

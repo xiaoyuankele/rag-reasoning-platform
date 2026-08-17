@@ -9,8 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	postgresrepository "rag-reasoning-platform/backend/internal/infrastructure/postgres"
+	documentowner "rag-reasoning-platform/backend/internal/maintenance/documentowner"
 )
 
 // TestDocumentOwnerClaimRepositoryUsesOneAtomicClaim 验证：
@@ -23,6 +23,14 @@ func TestDocumentOwnerClaimRepositoryUsesOneAtomicClaim(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	pool := openIsolatedDocumentTestPool(t, ctx)
+	// 认领命令只服务于升级前仍允许 NULL owner_user_id 的旧数据库。
+	// 隔离测试先执行全部新迁移，因此这里显式恢复 B6 旧表状态来验证过渡工具。
+	if _, err := pool.Exec(
+		ctx,
+		"ALTER TABLE documents ALTER COLUMN owner_user_id DROP NOT NULL",
+	); err != nil {
+		t.Fatalf("prepare legacy owner-claim schema: %v", err)
+	}
 	repository := postgresrepository.NewDocumentOwnerClaimRepository(pool)
 
 	targetUserID := insertScopedRepositoryUser(
@@ -53,7 +61,7 @@ func TestDocumentOwnerClaimRepositoryUsesOneAtomicClaim(t *testing.T) {
 
 	// 模拟 dry-run 后数据数量发生变化。仓储必须拒绝执行且不留下部分更新。
 	_, err = repository.ClaimUnownedDocuments(ctx, targetUserID, 1)
-	var mismatch *documentdomain.OwnerClaimCountMismatchError
+	var mismatch *documentowner.CountMismatchError
 	if !errors.As(err, &mismatch) || mismatch.Expected != 1 || mismatch.Actual != 2 {
 		t.Fatalf("ClaimUnownedDocuments(expected=1) error = %v, want 1/2 mismatch", err)
 	}
@@ -80,7 +88,7 @@ func TestDocumentOwnerClaimRepositoryRejectsMissingOrInactiveTarget(t *testing.T
 	pool := openIsolatedDocumentTestPool(t, ctx)
 	repository := postgresrepository.NewDocumentOwnerClaimRepository(pool)
 
-	if _, err := repository.PreviewOwnerClaim(ctx, 999999); !errors.Is(err, documentdomain.ErrOwnerClaimTargetNotFound) {
+	if _, err := repository.PreviewOwnerClaim(ctx, 999999); !errors.Is(err, documentowner.ErrTargetNotFound) {
 		t.Fatalf("PreviewOwnerClaim(missing) error = %v, want target not found", err)
 	}
 
@@ -97,7 +105,7 @@ func TestDocumentOwnerClaimRepositoryRejectsMissingOrInactiveTarget(t *testing.T
 	); err != nil {
 		t.Fatalf("disable owner claim test user: %v", err)
 	}
-	if _, err := repository.PreviewOwnerClaim(ctx, disabledUserID); !errors.Is(err, documentdomain.ErrOwnerClaimTargetInactive) {
+	if _, err := repository.PreviewOwnerClaim(ctx, disabledUserID); !errors.Is(err, documentowner.ErrTargetInactive) {
 		t.Fatalf("PreviewOwnerClaim(disabled) error = %v, want inactive target", err)
 	}
 }

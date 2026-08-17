@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"rag-reasoning-platform/backend/internal/config"
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	postgresrepository "rag-reasoning-platform/backend/internal/infrastructure/postgres"
@@ -77,6 +78,25 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 	}
 
 	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	documentCreator := postgresrepository.NewScopedDocumentRepository(pool)
+	var ownerID int64
+	if err := pool.QueryRow(
+		ctx,
+		`
+			INSERT INTO users (
+				email, email_verified_at, display_name, password_hash
+			)
+			VALUES ($1, CURRENT_TIMESTAMP, 'Worker Test Owner', '$argon2id$test-hash')
+			RETURNING id
+		`,
+		fmt.Sprintf("worker-integration-%d@example.com", time.Now().UnixNano()),
+	).Scan(&ownerID); err != nil {
+		t.Fatalf("create Worker integration owner: %v", err)
+	}
+	ownerScope, err := accessdomain.NewOwnerScope(ownerID)
+	if err != nil {
+		t.Fatalf("create Worker integration owner scope: %v", err)
+	}
 	jobRepository := postgresrepository.NewProcessingJobRepository(pool)
 	chunkRepository := postgresrepository.NewChunkRepository(pool)
 	createdDocumentIDs := make([]int64, 0, 2)
@@ -100,6 +120,13 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 				)
 			}
 		}
+		if _, cleanupErr := pool.Exec(
+			cleanupContext,
+			"DELETE FROM users WHERE id = $1",
+			ownerID,
+		); cleanupErr != nil {
+			t.Errorf("clean up Worker integration owner: %v", cleanupErr)
+		}
 	}()
 
 	t.Run("successful processor completes job", func(t *testing.T) {
@@ -107,7 +134,8 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			createWorkerIntegrationJob(
 				t,
 				ctx,
-				documentRepository,
+				documentCreator,
+				ownerScope,
 				jobRepository,
 				"success",
 				"a",
@@ -200,7 +228,8 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			createWorkerIntegrationJob(
 				t,
 				ctx,
-				documentRepository,
+				documentCreator,
+				ownerScope,
 				jobRepository,
 				"failure",
 				"b",
@@ -276,7 +305,8 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 func createWorkerIntegrationJob(
 	t *testing.T,
 	ctx context.Context,
-	documentRepository *postgresrepository.DocumentRepository,
+	documentCreator documentdomain.ScopedCreator,
+	ownerScope accessdomain.OwnerScope,
 	jobRepository *postgresrepository.ProcessingJobRepository,
 	suffix string,
 	hashCharacter string,
@@ -287,8 +317,9 @@ func createWorkerIntegrationJob(
 	t.Helper()
 
 	uniqueValue := time.Now().UnixNano()
-	createdDocument, err := documentRepository.Create(
+	createdDocument, err := documentCreator.Create(
 		ctx,
+		ownerScope,
 		documentdomain.CreateInput{
 			OriginalName: fmt.Sprintf(
 				"worker-integration-%s.pdf",

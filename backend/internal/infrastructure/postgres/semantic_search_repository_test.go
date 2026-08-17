@@ -36,7 +36,7 @@ func TestChunkRepositorySearchSimilar(t *testing.T) {
 		t.Fatalf("refresh pgvector types for isolated search schema: %v", err)
 	}
 
-	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	documentRepository := newOwnedDocumentFixture(t, ctx, pool)
 	chunkRepository := postgresrepository.NewChunkRepository(pool)
 	jobRepository := postgresrepository.NewEmbeddingJobRepository(pool)
 
@@ -212,7 +212,7 @@ func TestChunkRepositoryHasCompleteSemanticEmbeddings(t *testing.T) {
 		t.Fatalf("refresh pgvector types for isolated readiness schema: %v", err)
 	}
 
-	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	documentRepository := newOwnedDocumentFixture(t, ctx, pool)
 	chunkRepository := postgresrepository.NewChunkRepository(pool)
 	jobRepository := postgresrepository.NewEmbeddingJobRepository(pool)
 
@@ -365,7 +365,7 @@ func TestScopedChunkRepositorySemanticSearchEnforcesOwnerBoundary(t *testing.T) 
 	ownerBID := insertScopedRepositoryUser(t, ctx, pool, "semantic-owner-b@example.com")
 	ownerA, _ := accessdomain.NewOwnerScope(ownerAID)
 	ownerB, _ := accessdomain.NewOwnerScope(ownerBID)
-	documents := postgresrepository.NewDocumentRepository(pool)
+	documents := newOwnedDocumentFixture(t, ctx, pool)
 	systemChunks := postgresrepository.NewChunkRepository(pool)
 	jobs := postgresrepository.NewEmbeddingJobRepository(pool)
 	scopedChunks := postgresrepository.NewScopedChunkRepository(pool)
@@ -503,7 +503,7 @@ func createSemanticSearchFixture(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	documentRepository *postgresrepository.DocumentRepository,
+	documentRepository *ownedDocumentFixture,
 	chunkRepository *postgresrepository.ChunkRepository,
 	jobRepository *postgresrepository.EmbeddingJobRepository,
 	name string,

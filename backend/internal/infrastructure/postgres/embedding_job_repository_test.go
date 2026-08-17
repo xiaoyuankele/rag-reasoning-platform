@@ -35,13 +35,13 @@ func TestEmbeddingJobRepositoryCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
 
-	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	documentRepository := newOwnedDocumentFixture(t, ctx, pool)
 	embeddingJobRepository := postgresrepository.NewEmbeddingJobRepository(pool)
 	uniqueValue := time.Now().UnixNano()
 
@@ -193,13 +193,13 @@ func TestEmbeddingJobRepositoryRequeue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
 
-	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	documentRepository := newOwnedDocumentFixture(t, ctx, pool)
 	embeddingJobRepository := postgresrepository.NewEmbeddingJobRepository(pool)
 	uniqueValue := time.Now().UnixNano()
 

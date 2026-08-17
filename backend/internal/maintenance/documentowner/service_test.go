@@ -1,4 +1,4 @@
-package document
+package documentowner
 
 import (
 	"context"
@@ -8,10 +8,10 @@ import (
 	userdomain "rag-reasoning-platform/backend/internal/domain/user"
 )
 
-func TestOwnerClaimServicePreviewsWithoutWriting(t *testing.T) {
-	repository := &fakeOwnerClaimRepository{
-		preview: OwnerClaimPreview{
-			Target: OwnerClaimTarget{
+func TestServicePreviewsWithoutWriting(t *testing.T) {
+	repository := &fakeRepository{
+		preview: Preview{
+			Target: Target{
 				UserID:      17,
 				DisplayName: "bigboss",
 				Status:      userdomain.StatusActive,
@@ -19,14 +19,14 @@ func TestOwnerClaimServicePreviewsWithoutWriting(t *testing.T) {
 			UnownedDocuments: 46,
 		},
 	}
-	service := NewOwnerClaimService(repository)
+	service := NewService(repository)
 
-	result, err := service.Preview(context.Background(), 17)
+	result, err := service.PreviewClaim(context.Background(), 17)
 	if err != nil {
-		t.Fatalf("Preview() error = %v", err)
+		t.Fatalf("PreviewClaim() error = %v", err)
 	}
 	if result.UnownedDocuments != 46 || result.Target.UserID != 17 {
-		t.Fatalf("Preview() = %+v, want user 17 and 46 documents", result)
+		t.Fatalf("PreviewClaim() = %+v, want user 17 and 46 documents", result)
 	}
 	if repository.previewCalls != 1 || repository.claimCalls != 0 {
 		t.Fatalf(
@@ -37,10 +37,10 @@ func TestOwnerClaimServicePreviewsWithoutWriting(t *testing.T) {
 	}
 }
 
-func TestOwnerClaimServiceClaimsExpectedDocuments(t *testing.T) {
-	repository := &fakeOwnerClaimRepository{
-		claimResult: OwnerClaimResult{
-			Target: OwnerClaimTarget{
+func TestServiceClaimsExpectedDocuments(t *testing.T) {
+	repository := &fakeRepository{
+		claimResult: Result{
+			Target: Target{
 				UserID:      17,
 				DisplayName: "bigboss",
 				Status:      userdomain.StatusActive,
@@ -49,7 +49,7 @@ func TestOwnerClaimServiceClaimsExpectedDocuments(t *testing.T) {
 			RemainingUnowned: 0,
 		},
 	}
-	service := NewOwnerClaimService(repository)
+	service := NewService(repository)
 
 	result, err := service.Claim(context.Background(), 17, 46)
 	if err != nil {
@@ -67,27 +67,27 @@ func TestOwnerClaimServiceClaimsExpectedDocuments(t *testing.T) {
 	}
 }
 
-func TestOwnerClaimServiceRejectsInvalidInputBeforeRepository(t *testing.T) {
-	repository := &fakeOwnerClaimRepository{}
-	service := NewOwnerClaimService(repository)
+func TestServiceRejectsInvalidInputBeforeRepository(t *testing.T) {
+	repository := &fakeRepository{}
+	service := NewService(repository)
 
-	if _, err := service.Preview(context.Background(), 0); !errors.Is(err, ErrInvalidOwnerClaimUserID) {
-		t.Fatalf("Preview(0) error = %v, want ErrInvalidOwnerClaimUserID", err)
+	if _, err := service.PreviewClaim(context.Background(), 0); !errors.Is(err, ErrInvalidUserID) {
+		t.Fatalf("PreviewClaim(0) error = %v, want ErrInvalidUserID", err)
 	}
-	if _, err := service.Claim(context.Background(), 17, -1); !errors.Is(err, ErrInvalidExpectedUnownedCount) {
-		t.Fatalf("Claim(expected=-1) error = %v, want ErrInvalidExpectedUnownedCount", err)
+	if _, err := service.Claim(context.Background(), 17, -1); !errors.Is(err, ErrInvalidExpectedCount) {
+		t.Fatalf("Claim(expected=-1) error = %v, want ErrInvalidExpectedCount", err)
 	}
 	if repository.previewCalls != 0 || repository.claimCalls != 0 {
 		t.Fatalf("invalid input reached repository: %+v", repository)
 	}
 }
 
-// fakeOwnerClaimRepository 是 OwnerClaimService 的内存测试替身。
+// fakeRepository 是维护 Service 的内存测试替身。
 // 它只记录调用参数，不访问 PostgreSQL，也不会修改真实文档。
-type fakeOwnerClaimRepository struct {
-	preview          OwnerClaimPreview
+type fakeRepository struct {
+	preview          Preview
 	previewErr       error
-	claimResult      OwnerClaimResult
+	claimResult      Result
 	claimErr         error
 	previewCalls     int
 	claimCalls       int
@@ -96,21 +96,21 @@ type fakeOwnerClaimRepository struct {
 }
 
 // PreviewOwnerClaim 返回测试预设的只读预览。
-func (r *fakeOwnerClaimRepository) PreviewOwnerClaim(
+func (r *fakeRepository) PreviewOwnerClaim(
 	_ context.Context,
 	ownerUserID int64,
-) (OwnerClaimPreview, error) {
+) (Preview, error) {
 	r.previewCalls++
 	r.receivedOwnerID = ownerUserID
 	return r.preview, r.previewErr
 }
 
 // ClaimUnownedDocuments 返回测试预设的认领结果并记录预计数量。
-func (r *fakeOwnerClaimRepository) ClaimUnownedDocuments(
+func (r *fakeRepository) ClaimUnownedDocuments(
 	_ context.Context,
 	ownerUserID int64,
 	expectedUnowned int64,
-) (OwnerClaimResult, error) {
+) (Result, error) {
 	r.claimCalls++
 	r.receivedOwnerID = ownerUserID
 	r.receivedExpected = expectedUnowned

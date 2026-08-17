@@ -1,6 +1,6 @@
 # P6 个人用户域后端交接
 
-> 状态：实施中；B1～B6 已完成。全链路 OwnerScope 隔离、本地 Mailpit 注册和历史数据显式认领已经通过真实 HTTP/PostgreSQL 验收；下一步执行 B7 非空约束与发布验收。交接更新日期：2026-08-17。
+> 状态：后端 B1～B7 已完成。全链路 OwnerScope 隔离、本地 Mailpit 注册、历史数据显式认领、`owner_user_id NOT NULL` 和发布验收均已通过。交接更新日期：2026-08-17。
 > 产品边界、主线图和跨端验收标准以
 > [P6 个人用户域与私有数据闭环](../../shared/architecture/personal-user-domain.md) 为准；本文只冻结 Go、PostgreSQL、Worker 和测试的实施边界。
 
@@ -79,7 +79,7 @@ Application；它只从 Context 取出 Actor，再构造普通输入值。
 
 ## 4. 数据库迁移交接
 
-当前已执行至 `000011`。按两个发布门禁实施：
+当前已执行至 `000012`。两个发布门禁均已完成：
 
 ### Release A
 
@@ -94,9 +94,12 @@ Application；它只从 Context 取出 Actor，再构造普通输入值。
 
 ### Release B
 
-- 运行只读检查：`SELECT COUNT(*) FROM documents WHERE owner_user_id IS NULL` 必须为 0；
-- `000012_require_document_owner.up.sql` 将字段改为 `NOT NULL`；
-- 删除仅为迁移期存在的兼容分支。
+- 已确认 `SELECT COUNT(*) FROM documents WHERE owner_user_id IS NULL` 为 0；
+- `000012_require_document_owner.up.sql` 已将字段改为 `NOT NULL`；
+- 历史认领能力已移入 `internal/maintenance/documentowner`，不再污染核心 Document Domain；
+- 系统级 `DocumentRepository` 只保留 Worker 所需的只读 `Finder`，用户创建、列表和删除只能经过
+  `ScopedDocumentRepository + OwnerScope`；
+- 默认零费用回归和一次性 PostgreSQL 发布验收均已通过。
 
 `users.email` 入库前统一 `strings.ToLower(strings.TrimSpace(...))`，手机号保存规范化的 E.164 形式。两列均可空，
 但数据库约束要求至少一列非空，并分别使用只覆盖非空值的唯一索引；`password_hash` 保存带算法和参数的
@@ -326,8 +329,9 @@ flowchart LR
 
 ## 11. 前端交接点
 
-后端 B3 已可以交付登录态联调，B5 已完成全部用户业务查询的纵向隔离，B6 已完成历史数据认领。
-完成 B7 数据库约束与发布验收后，才可声明多人数据安全边界完整交付。
+后端 B3 已交付登录态，B5 已完成全部用户业务查询的纵向隔离，B6 已完成历史数据认领，B7 已完成
+数据库非空约束与发布验收。后端个人用户数据安全边界已经完整交付；下一步由前端接入认证壳、受保护路由和
+带 Cookie 的文档/检索/问答闭环。
 
 前端只依赖：
 

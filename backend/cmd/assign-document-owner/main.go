@@ -11,10 +11,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	documentapplication "rag-reasoning-platform/backend/internal/application/document"
 	"rag-reasoning-platform/backend/internal/config"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
+	documentowner "rag-reasoning-platform/backend/internal/maintenance/documentowner"
 )
 
 func main() {
@@ -61,7 +61,7 @@ func run(
 		return fmt.Errorf("unexpected positional arguments: %v", flags.Args())
 	}
 	if *ownerUserID <= 0 {
-		return documentapplication.ErrInvalidOwnerClaimUserID
+		return documentowner.ErrInvalidUserID
 	}
 	if *confirm && *expectedUnowned < 0 {
 		return fmt.Errorf(
@@ -80,10 +80,10 @@ func run(
 	defer pool.Close()
 
 	repository := postgres.NewDocumentOwnerClaimRepository(pool)
-	service := documentapplication.NewOwnerClaimService(repository)
+	service := documentowner.NewService(repository)
 
 	if !*confirm {
-		preview, err := service.Preview(ctx, *ownerUserID)
+		preview, err := service.PreviewClaim(ctx, *ownerUserID)
 		if err != nil {
 			return err
 		}
@@ -101,7 +101,7 @@ func run(
 
 func printPreview(
 	output io.Writer,
-	preview documentapplication.OwnerClaimPreview,
+	preview documentowner.Preview,
 ) {
 	fmt.Fprintln(output, "DRY RUN: no database rows were changed")
 	fmt.Fprintf(output, "target_user_id: %d\n", preview.Target.UserID)
@@ -120,7 +120,7 @@ func printPreview(
 
 func printResult(
 	output io.Writer,
-	result documentapplication.OwnerClaimResult,
+	result documentowner.Result,
 ) {
 	fmt.Fprintln(output, "OWNER CLAIM COMMITTED")
 	fmt.Fprintf(output, "target_user_id: %d\n", result.Target.UserID)

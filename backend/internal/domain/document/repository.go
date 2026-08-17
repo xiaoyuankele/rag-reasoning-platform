@@ -21,12 +21,8 @@ type CreateInput struct {
 	SHA256       string
 }
 
-// Creator 定义创建文档所需的仓储能力
-type Creator interface {
-	Create(ctx context.Context, input CreateInput) (Document, error)
-}
-
 // Finder 定义按 ID 查询文档所需的仓储能力。
+// 该无作用域能力仅供后台 Worker 按任务中的文档 ID 读取文档。
 type Finder interface {
 	GetByID(ctx context.Context, id int64) (Document, error)
 }
@@ -57,15 +53,6 @@ type ListResult struct {
 // Lister 定义查询文档列表所需的仓储能力。
 type Lister interface {
 	List(ctx context.Context, options ListOptions) (ListResult, error)
-}
-
-// Repository 定义文档持久化需要提供的能力。
-// 这里只规定“能做什么”，不规定使用 PostgreSQL、内存还是其他存储。
-type Repository interface {
-	Creator
-	Finder
-	Lister
-	Deleter
 }
 
 // ScopedCreator 定义必须在可信所有者范围内创建文档的仓储能力。

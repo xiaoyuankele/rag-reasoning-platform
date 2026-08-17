@@ -28,7 +28,7 @@ func TestChunkRepositorySearch(t *testing.T) {
 
 	// 每次测试使用独立 schema，不读取或修改开发库 public 中的真实文档。
 	pool := openIsolatedDocumentTestPool(t, ctx)
-	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	documentRepository := newOwnedDocumentFixture(t, ctx, pool)
 	chunkRepository := postgresrepository.NewChunkRepository(pool)
 
 	chineseDocument := createSearchTestDocument(
@@ -323,7 +323,7 @@ func TestChunkRepositorySearch(t *testing.T) {
 func createSearchTestDocument(
 	t *testing.T,
 	ctx context.Context,
-	repository *postgresrepository.DocumentRepository,
+	repository *ownedDocumentFixture,
 	originalName string,
 	storagePath string,
 	mimeType string,

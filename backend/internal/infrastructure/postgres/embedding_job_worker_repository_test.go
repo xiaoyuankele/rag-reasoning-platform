@@ -39,7 +39,7 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
 		t.Fatalf("migrate database: %v", err)
@@ -48,7 +48,7 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 		t.Fatalf("refresh pgvector types: %v", err)
 	}
 
-	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	documentRepository := newOwnedDocumentFixture(t, ctx, pool)
 	chunkRepository := postgresrepository.NewChunkRepository(pool)
 	jobRepository := postgresrepository.NewEmbeddingJobRepository(pool)
 
@@ -231,7 +231,7 @@ func createEmbeddingWorkerFixture(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	documentRepository *postgresrepository.DocumentRepository,
+	documentRepository *ownedDocumentFixture,
 	chunkRepository *postgresrepository.ChunkRepository,
 	jobRepository *postgresrepository.EmbeddingJobRepository,
 	suffix string,

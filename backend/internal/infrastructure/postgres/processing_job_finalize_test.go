@@ -43,13 +43,13 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
 
-	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	documentRepository := newOwnedDocumentFixture(t, ctx, pool)
 	jobRepository := postgresrepository.NewProcessingJobRepository(pool)
 	createdDocumentIDs := make([]int64, 0, 3)
 	defer func() {
@@ -233,7 +233,7 @@ func createProcessingJobForFinalization(
 	t *testing.T,
 	ctx context.Context,
 	pool *pgxpool.Pool,
-	documentRepository *postgresrepository.DocumentRepository,
+	documentRepository *ownedDocumentFixture,
 	jobRepository *postgresrepository.ProcessingJobRepository,
 	suffix string,
 ) (
@@ -321,7 +321,7 @@ func assertFinalizedJobAndDocument(
 	t *testing.T,
 	ctx context.Context,
 	jobRepository *postgresrepository.ProcessingJobRepository,
-	documentRepository *postgresrepository.DocumentRepository,
+	documentRepository *ownedDocumentFixture,
 	jobID int64,
 	documentID int64,
 	expectedJobStatus documentdomain.ProcessingJobStatus,

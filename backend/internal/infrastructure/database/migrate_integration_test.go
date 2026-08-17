@@ -401,7 +401,7 @@ func TestMigrateAppliesEmbeddedMigrationsOnce(t *testing.T) {
 	}
 }
 
-// assertDocumentOwnerSchema 验证 B4 Release A 的文档归属字段、外键和分页索引。
+// assertDocumentOwnerSchema 验证 P6 Release B 的非空归属、外键和分页索引。
 func assertDocumentOwnerSchema(
 	t *testing.T,
 	ctx context.Context,
@@ -422,8 +422,27 @@ func assertDocumentOwnerSchema(
 	).Scan(&isNullable); err != nil {
 		t.Fatalf("query documents.owner_user_id: %v", err)
 	}
-	if isNullable != "YES" {
-		t.Fatalf("documents.owner_user_id nullable = %q, want YES during Release A", isNullable)
+	if isNullable != "NO" {
+		t.Fatalf("documents.owner_user_id nullable = %q, want NO after Release B", isNullable)
+	}
+
+	// 最终约束必须在数据库层拒绝绕过 Go Application 的无主文档写入。
+	if _, err := pool.Exec(
+		ctx,
+		`
+			INSERT INTO documents (
+				original_name, storage_path, mime_type, size_bytes, sha256
+			)
+			VALUES (
+				'owner-required.pdf',
+				'migration-tests/owner-required.pdf',
+				'application/pdf',
+				1,
+				repeat('a', 64)
+			)
+		`,
+	); err == nil {
+		t.Fatal("database accepted a document without owner_user_id after Release B")
 	}
 
 	var hasOwnerForeignKey bool

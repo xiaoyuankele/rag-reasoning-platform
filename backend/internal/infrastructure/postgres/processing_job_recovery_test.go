@@ -37,7 +37,7 @@ func TestProcessingJobRepositoryRecoversInterruptedJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
 		t.Fatalf("migrate database: %v", err)
@@ -59,7 +59,7 @@ func TestProcessingJobRepositoryRecoversInterruptedJobs(t *testing.T) {
 		)
 	}
 
-	documentRepository := postgresrepository.NewDocumentRepository(pool)
+	documentRepository := newOwnedDocumentFixture(t, ctx, pool)
 	jobRepository := postgresrepository.NewProcessingJobRepository(pool)
 	createdDocumentIDs := make([]int64, 0, 2)
 	defer func() {

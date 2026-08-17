@@ -131,8 +131,9 @@ func openIsolatedDocumentTestPool(
 	return testPool
 }
 
-// TestDocumentRepositoryCreateAndGetByID 使用真实 PostgreSQL 验证仓储。
-func TestDocumentRepositoryCreateAndGetByID(t *testing.T) {
+// TestDocumentRepositoryGetByIDAfterOwnerConstraint 使用真实 PostgreSQL 验证
+// 系统 Worker 的只读仓储仍可读取带所有者的文档。
+func TestDocumentRepositoryGetByIDAfterOwnerConstraint(t *testing.T) {
 	// 普通 go test 默认跳过真实数据库测试。
 	// 只有显式设置 RUN_DATABASE_TESTS=1 时才执行。
 	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
@@ -158,9 +159,12 @@ func TestDocumentRepositoryCreateAndGetByID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
+	// 系统 Worker 仍需要不带用户范围的只读 GetByID；创建测试数据则必须
+	// 经过 ScopedDocumentRepository，确保测试也遵守 owner_user_id 约束。
 	repository := postgresrepository.NewDocumentRepository(pool)
+	creator := newOwnedDocumentFixture(t, ctx, pool)
 
 	// 使用纳秒时间生成唯一存储路径，避免多次运行测试时冲突。
 	storagePath := fmt.Sprintf(
@@ -176,7 +180,7 @@ func TestDocumentRepositoryCreateAndGetByID(t *testing.T) {
 		SHA256:       strings.Repeat("a", 64),
 	}
 
-	savedDocument, err := repository.Create(ctx, input)
+	savedDocument, err := creator.Create(ctx, input)
 	if err != nil {
 		t.Fatalf("create document: %v", err)
 	}
@@ -251,9 +255,9 @@ func TestDocumentRepositoryCreateAndGetByID(t *testing.T) {
 	}
 }
 
-// TestDocumentRepositoryDelete 使用真实 PostgreSQL 验证删除成功，
+// TestScopedDocumentRepositoryDeleteAfterOwnerConstraint 使用真实 PostgreSQL 验证删除成功，
 // 并验证重复删除同一 ID 时返回稳定的领域错误。
-func TestDocumentRepositoryDelete(t *testing.T) {
+func TestScopedDocumentRepositoryDeleteAfterOwnerConstraint(t *testing.T) {
 	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
 		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
 	}
@@ -276,9 +280,9 @@ func TestDocumentRepositoryDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
-	repository := postgresrepository.NewDocumentRepository(pool)
+	repository := newOwnedDocumentFixture(t, ctx, pool)
 	storagePath := fmt.Sprintf(
 		"integration-tests/delete-%d.pdf",
 		time.Now().UnixNano(),
@@ -336,9 +340,9 @@ func TestDocumentRepositoryDelete(t *testing.T) {
 	}
 }
 
-// TestDocumentRepositoryList 使用真实 PostgreSQL 验证总数、分页、稳定排序
+// TestScopedDocumentRepositoryListAfterOwnerConstraint 使用真实 PostgreSQL 验证总数、分页、稳定排序
 // 以及超过末页时返回空切片。测试只清理自己创建的记录。
-func TestDocumentRepositoryList(t *testing.T) {
+func TestScopedDocumentRepositoryListAfterOwnerConstraint(t *testing.T) {
 	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
 		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
 	}
@@ -350,7 +354,7 @@ func TestDocumentRepositoryList(t *testing.T) {
 	defer cancel()
 
 	pool := openIsolatedDocumentTestPool(t, ctx)
-	repository := postgresrepository.NewDocumentRepository(pool)
+	repository := newOwnedDocumentFixture(t, ctx, pool)
 
 	createdDocuments := make([]document.Document, 0, 3)
 
