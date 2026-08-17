@@ -72,7 +72,8 @@ P6 路由保护边界：
 
 完整响应 DTO、错误码和主线图见
 [P6 个人用户域与私有数据闭环](../architecture/personal-user-domain.md)；后端实施细节见
-[P6 个人用户域后端交接](../../backend/architecture/personal-user-backend-handoff.md)。
+[P6 个人用户域后端交接](../../backend/architecture/personal-user-backend-handoff.md)；前端状态机、表单流程和
+验收清单见 [P6 个人用户认证前端交接](../../frontend/architecture/p6-authentication-handoff.md)。
 
 ## 4. 参数来源
 

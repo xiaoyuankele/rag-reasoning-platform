@@ -81,11 +81,11 @@ Go 后端
 F1 API 基础至此完成。F3 的基础关键词检索已经可用，但完整检索工作台仍等待 F2 文档选择能力，
 因此 F3 状态为“最小可用切片完成，持续完善”。
 
-## 7. P6 个人用户前端切片
+## 7. P6 个人用户前端切片（后端就绪，前端待实现）
 
 - 后端 `P5` 负责运行路径、配置、日志、部署、备份和可观测性，不等于前端开发；
-- P6 已完成个人用户域设计交接和后端 B1 数据地基，但认证接口尚未实现；前端在继续开放 F2 文档管理前接入后端身份闭环；
-- P6 前端增加 `entities/user`、`features/auth`、登录/注册页面和全局 Auth Store；
+- P6 后端 B1～B7、验证码、注册、登录、当前用户、退出、忘记/重置密码和全链路 OwnerScope 隔离均已完成；
+- P6 前端增加 `entities/user`、`features/auth`、登录/注册/忘记密码页面和全局 Auth Store；
 - 应用启动时 `/users/me` 决定 `unknown → authenticated/anonymous`，避免认证状态未确定时闪现受保护页面；
 - 业务 API 不传 `user_id`，同源浏览器自动携带 `HttpOnly` Cookie；
 - 统一 API Client 遇到稳定 `401 authentication_required` 时清理 Auth Store 并跳转登录，登录接口本身
@@ -100,6 +100,7 @@ P6 前端顺序：
 Auth DTO/API
   → Auth Store 与启动恢复
   → 登录/注册/退出
+  → 忘记/重置密码
   → 受保护应用外壳
   → F2 文档管理
   → F3/F4 只显示当前用户证据
@@ -108,4 +109,5 @@ Auth DTO/API
 
 完整阶段边界与执行顺序见
 [P6 个人用户域与私有数据闭环](../../shared/architecture/personal-user-domain.md) 和
-[产品演进路线](../../shared/architecture/product-evolution-roadmap.md)。
+[产品演进路线](../../shared/architecture/product-evolution-roadmap.md)。可直接执行的字段、状态机、错误映射和
+验收清单见 [P6 个人用户认证前端交接](p6-authentication-handoff.md)。
