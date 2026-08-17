@@ -150,7 +150,11 @@ func (h *AuthRegisterHandler) writeRegisterError(c *gin.Context, err error) bool
 func isInvalidRegistrationInput(err error) bool {
 	return errors.Is(err, authapplication.ErrInvalidRegistrationRequest) ||
 		errors.Is(err, userdomain.ErrInvalidDisplayName) ||
-		errors.Is(err, userdomain.ErrPasswordTooShort) ||
+		isInvalidPasswordInput(err)
+}
+
+func isInvalidPasswordInput(err error) bool {
+	return errors.Is(err, userdomain.ErrPasswordTooShort) ||
 		errors.Is(err, userdomain.ErrPasswordTooLong) ||
 		errors.Is(err, userdomain.ErrPasswordInvalidCharacter) ||
 		errors.Is(err, userdomain.ErrPasswordMissingUppercase) ||

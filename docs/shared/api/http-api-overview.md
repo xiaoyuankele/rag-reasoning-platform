@@ -5,7 +5,7 @@
 
 ## 1. 当前访问边界
 
-当前 API 是个人版、单工作区接口。验证码、注册、登录、Session、当前用户和退出已经实现；文档增删查、
+当前 API 是个人版、单工作区接口。验证码、注册、登录、密码重置、Session、当前用户和退出已经实现；文档增删查、
 解析任务创建、processing job 查询、chunks 浏览、向量任务创建/查询、关键词检索、语义检索和问答均已接入
 Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成显式认领，数据库也已通过 `NOT NULL`
 禁止再次产生无主文档；后端双用户数据隔离发布验收已经通过。公开互联网部署仍需配套 HTTPS、真实邮件渠道、
@@ -30,9 +30,10 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `GET` | `/embedding-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的向量任务状态、重试和 Token 信息 | 用户功能；已隔离/轮询 |
 | `POST` | `/semantic-search` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k` | `200` | 在当前用户文档中进行语义检索 | 用户功能；已隔离，受功能开关控制 |
 | `POST` | `/answers` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200` | 基于当前用户来源生成回答 | 用户功能；已隔离，受功能开关控制 |
-| `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册验证码挑战 | 认证功能；当前默认使用零费用 Fake Sender |
+| `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册或密码重置验证码挑战 | 认证功能；`purpose` 为 `register` 或 `password_reset` |
 | `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建用户和 Session | 认证功能；设置 `rag_session` Cookie |
 | `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 核对凭据并创建新 Session | 认证功能；设置 `rag_session` Cookie |
+| `POST` | `/auth/password-reset` | JSON：`verification_id`、`verification_code`、`new_password` | `204` | 更新密码并撤销全部旧 Session | 认证功能；清除当前 `rag_session` Cookie |
 | `POST` | `/auth/logout` | `rag_session` Cookie（可选） | `204` | 幂等撤销 Session 并清除 Cookie | 认证功能 |
 | `GET` | `/users/me` | `rag_session` Cookie | `200` | 恢复当前用户公开资料 | 认证功能；已受 Session 中间件保护 |
 
@@ -45,18 +46,21 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 不创建 Session | 已实现 |
 | `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建 Session 并设置 `rag_session` | 已实现 |
 | `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 创建 Session 并设置 `rag_session` | 已实现 |
+| `POST` | `/auth/password-reset` | JSON：`verification_id`、`verification_code`、`new_password` | `204` | 撤销全部旧 Session 并清除 `rag_session` | 已实现 |
 | `POST` | `/auth/logout` | 当前 Session Cookie | `204` | 撤销 Session 并清除 Cookie | 已实现 |
 | `GET` | `/users/me` | 当前 Session Cookie | `200` | 不修改 Cookie | 已实现 |
 
-当前验证码接口已经实现联系方式 60 秒冷却、远端 IP 限流和进程全局预算。注册接口会原子创建用户与
+当前验证码接口已经实现联系方式 60 秒冷却、远端 IP 限流和进程全局预算，并按 `register`、
+`password_reset` 隔离用途。注册接口会原子创建用户与
 PostgreSQL Session，并设置 HttpOnly Cookie；登录接口会核对 Argon2id 并创建独立 Session。默认 Fake Sender 不访问远程渠道。
+密码重置接口会原子更新密码、消费挑战并撤销全部旧 Session，成功后要求重新登录。
 `/users/me` 已通过 Session 中间件消费该 Cookie，退出后旧 Cookie 统一失效。文档、解析任务、chunks、
 向量任务、关键词检索、语义检索和问答接口也已完成 OwnerScope 隔离。P6 后端 B1～B7 已完成，后续进入
 前端认证壳、受保护页面和个人用户产品闭环联调。
 
 P6 路由保护边界：
 
-- `GET /health`、验证码发送、注册和登录无需 Session，但必须受 Origin 与限流保护；
+- `GET /health`、验证码发送、注册、登录和密码重置无需 Session，但必须受 Origin 与限流保护；
 - `POST /auth/logout` 可选读取并撤销 Session，始终清除 Cookie、返回 `204`，但仍须通过同源 Origin 校验；
 - `GET /users/me`、文档、解析任务、chunks、向量任务、关键词检索、语义检索和问答接口均已受保护；
 - 业务请求 DTO 不增加客户端可填写的 `user_id`；

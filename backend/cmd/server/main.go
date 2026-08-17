@@ -193,6 +193,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		postgres.NewVerificationChallengeRepository(databasePool)
 	authRegistrationRepository :=
 		postgres.NewAuthRegistrationRepository(databasePool)
+	authPasswordResetRepository :=
+		postgres.NewAuthPasswordResetRepository(databasePool)
 	authSessionRepository := postgres.NewAuthSessionRepository(databasePool)
 
 	// Worker 启动前，先恢复上一次异常退出遗留的 processing 任务。
@@ -444,6 +446,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("create auth register service: %w", err)
 	}
+	authPasswordResetService, err := authapplication.NewPasswordResetService(
+		authPasswordResetRepository,
+		passwordHasher,
+		verificationCodeHasher,
+		time.Now,
+	)
+	if err != nil {
+		return fmt.Errorf("create auth password reset service: %w", err)
+	}
 	authLoginService, err := authapplication.NewLoginService(
 		authSessionRepository,
 		passwordHasher,
@@ -589,6 +600,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		logger,
 		authConfig.CookieSecure,
 	)
+	authPasswordResetHandler := api.NewAuthPasswordResetHandler(
+		authPasswordResetService,
+		authRequestLimiter,
+		logger,
+		authConfig.CookieSecure,
+	)
 	authMiddleware := api.NewAuthMiddleware(authSessionService, logger)
 	currentUserHandler := api.NewCurrentUserHandler()
 	authLogoutHandler := api.NewAuthLogoutHandler(
@@ -601,6 +618,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	verificationHandler.RegisterRoutes(router)
 	authRegisterHandler.RegisterRoutes(router)
 	authLoginHandler.RegisterRoutes(router)
+	authPasswordResetHandler.RegisterRoutes(router)
 	authLogoutHandler.RegisterRoutes(router)
 
 	// 只有已经在 Application 与 SQL 两层强制 OwnerScope 的接口，

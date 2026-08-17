@@ -24,6 +24,7 @@ const (
 	errorCodeVerificationAttemptsExceeded   = "verification_attempts_exceeded"
 	errorCodeContactAlreadyRegistered       = "contact_already_registered"
 	errorCodeInvalidCredentials             = "invalid_credentials"
+	errorCodeInvalidPasswordResetRequest    = "invalid_password_reset_request"
 	errorCodeAuthenticationRequired         = "authentication_required"
 	errorCodeInternal                       = "internal_error"
 )

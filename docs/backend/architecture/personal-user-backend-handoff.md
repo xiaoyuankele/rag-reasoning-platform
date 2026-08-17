@@ -79,7 +79,8 @@ Application；它只从 Context 取出 Actor，再构造普通输入值。
 
 ## 4. 数据库迁移交接
 
-当前已执行至 `000012`。两个发布门禁均已完成：
+当前已执行至 `000013`；`000013_add_password_reset_verification_purpose` 在 B7 后增加独立
+`password_reset` 验证码用途。两个数据归属发布门禁均已完成：
 
 ### Release A
 
@@ -169,6 +170,29 @@ Argon2id 编码值。`user_sessions.token_hash` 保存原始随机 Token 的 SHA
 }
 ```
 
+### `POST /auth/password-reset`
+
+先通过 `POST /auth/verification-codes` 申请 `purpose=password_reset` 的挑战，再提交：
+
+```json
+{
+  "verification_id": 456,
+  "verification_code": "483921",
+  "new_password": "Changed123"
+}
+```
+
+成功返回 `204 No Content` 并清除当前 `rag_session` Cookie。Repository 必须在同一个 PostgreSQL 事务中：
+
+1. `FOR UPDATE` 锁定并重新核对未过期、未消费、未超次数的 `password_reset` 挑战；
+2. 更新已验证联系方式对应 active 用户的 Argon2id 密码哈希；
+3. 消费挑战；
+4. 撤销该用户全部未撤销 Session；
+5. 全部成功后提交，否则整体回滚。
+
+旧密码、旧 Session 和重复使用的验证码都会失效。注册用途验证码必须返回
+`verification_code_invalid`；联系方式没有 active 账户时也使用同一公开错误，不能暴露账户是否存在。
+
 ### `POST /auth/logout`
 
 已实现。撤销当前 Session、清除 Cookie 并返回 `204`。重复退出保持幂等，不泄露 Session 是否曾经存在。
@@ -197,6 +221,7 @@ verification_attempts_exceeded
 contact_already_registered
 verification_channel_unavailable
 invalid_credentials
+invalid_password_reset_request
 authentication_required
 request_origin_not_allowed
 internal_error
@@ -211,6 +236,7 @@ GET  /health
 POST /auth/verification-codes
 POST /auth/register
 POST /auth/login
+POST /auth/password-reset
 POST /auth/logout（可选读取并撤销 Session，始终清除 Cookie）
 ```
 

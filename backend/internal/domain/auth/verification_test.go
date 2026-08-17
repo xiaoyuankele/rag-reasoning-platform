@@ -19,6 +19,9 @@ func TestVerificationTypesAreValid(t *testing.T) {
 	if !VerificationPurposeRegister.IsValid() {
 		t.Fatal("register verification purpose should be valid")
 	}
+	if !VerificationPurposePasswordReset.IsValid() {
+		t.Fatal("password reset verification purpose should be valid")
+	}
 	if VerificationPurpose("login").IsValid() {
 		t.Fatal("unknown verification purpose should be invalid")
 	}

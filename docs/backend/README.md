@@ -42,7 +42,8 @@ P5 不包含用户认证。P6 后端 B1～B5 已交付个人账户、Session 以
 的所有者隔离。B6 又补齐本地 Mailpit 邮件联调与
 历史数据受控认领：46 篇文档已归属正式个人用户，关联的 2729 个 chunks、45 个解析任务、8 个向量任务和
 460 条向量保持完整。B7 已完成 `owner_user_id NOT NULL`、无作用域写入口清理和最终发布验收，后端个人
-用户数据边界已经闭环；下一步是前端登录态和个人用户产品验收。
+用户数据边界已经闭环。随后补齐了忘记密码闭环：独立用途验证码、Argon2id 新密码、原子消费挑战以及全部
+旧 Session 撤销均已实现并通过真实 HTTP/PostgreSQL 回归；下一步是前端登录态和个人用户产品验收。
 团队工作区和多租户留到 P7。范围见
 [P6 个人用户域与私有数据闭环](../shared/architecture/personal-user-domain.md)，后端实施顺序见
 [P6 个人用户域后端交接](architecture/personal-user-backend-handoff.md)。

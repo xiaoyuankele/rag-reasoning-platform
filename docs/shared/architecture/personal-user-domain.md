@@ -295,12 +295,14 @@ erDiagram
 | `POST` | `/auth/verification-codes` | 公开、严格限流和 Origin 校验 | `202`，返回挑战 ID、过期和重发时间 |
 | `POST` | `/auth/register` | 公开、受限流和 Origin 校验 | `201`，创建用户和 Session，设置 Cookie |
 | `POST` | `/auth/login` | 公开、受限流和 Origin 校验 | `200`，创建 Session，设置 Cookie |
+| `POST` | `/auth/password-reset` | 公开、受限流和 Origin 校验 | `204`，更新密码、撤销全部旧 Session 并清除 Cookie |
 | `POST` | `/auth/logout` | Session 可选、必须同源 | `204`，存在时撤销 Session，并始终清除 Cookie |
 | `GET` | `/users/me` | 已登录 | `200`，返回当前用户公开信息 |
 
-当前验证码用途只支持 `register`，忘记密码/重置密码接口尚未实现。正式对外提供长期账户前应增加独立的
-`reset_password` 挑战用途、统一防账号枚举响应、密码更新事务以及全部旧 Session 撤销；不能把注册验证码
-直接复用成重置密码凭证。
+当前验证码用途支持 `register` 和 `password_reset`，两种 HMAC 摘要和消费流程严格隔离，不能把注册验证码
+复用成重置密码凭证。密码重置在一个 PostgreSQL 事务中更新 Argon2id 哈希、消费挑战并撤销全部旧 Session；
+成功后清除当前 Cookie、返回 `204`，用户必须使用新密码重新登录。没有匹配账户时统一返回验证码无效，避免
+通过重置接口枚举账户。
 
 `GET /health` 保持公开。`POST /auth/logout` 使用可选身份以保证重复退出仍返回 `204`；`GET /users/me` 和
 当前全部文档、任务、搜索、语义检索和问答接口都变为受保护接口。注册只引用服务端保存的验证码挑战，

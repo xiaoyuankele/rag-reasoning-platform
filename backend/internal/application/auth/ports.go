@@ -82,6 +82,35 @@ type RegistrationRepository interface {
 	) (RegistrationResult, error)
 }
 
+// PasswordResetRecord 是 Application 交给原子重置事务的数据。
+// 明文密码和验证码都不会越过 Application 进入 Repository。
+type PasswordResetRecord struct {
+	ChallengeID               int64
+	ExpectedChallengeCodeHash string
+	PasswordHash              string
+	ResetAt                   time.Time
+}
+
+// PasswordResetRepository 是重置密码用例需要的最小持久化能力。
+// ResetPassword 必须原子完成密码更新、挑战消费和该用户全部 Session 撤销。
+type PasswordResetRepository interface {
+	FindVerificationChallenge(
+		ctx context.Context,
+		challengeID int64,
+	) (authdomain.VerificationChallenge, error)
+
+	IncrementVerificationAttempts(
+		ctx context.Context,
+		challengeID int64,
+		attemptedAt time.Time,
+	) (int, error)
+
+	ResetPassword(
+		ctx context.Context,
+		record PasswordResetRecord,
+	) error
+}
+
 // LoginAccount 把公开 User 与仅用于认证核对的密码哈希组合起来。
 // PasswordHash 不属于公开领域对象，也不得越过 Application 进入 Handler。
 type LoginAccount struct {

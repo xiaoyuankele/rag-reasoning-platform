@@ -30,11 +30,15 @@ type VerificationPurpose string
 const (
 	// VerificationPurposeRegister 表示验证码只用于注册新账户。
 	VerificationPurposeRegister VerificationPurpose = "register"
+
+	// VerificationPurposePasswordReset 表示验证码只用于重置已有账户密码。
+	VerificationPurposePasswordReset VerificationPurpose = "password_reset"
 )
 
 // IsValid 判断用途是否属于当前契约支持的集合。
 func (p VerificationPurpose) IsValid() bool {
-	return p == VerificationPurposeRegister
+	return p == VerificationPurposeRegister ||
+		p == VerificationPurposePasswordReset
 }
 
 // VerificationChallenge 表示一次有限次数、有限时间且只能消费一次的验证过程。

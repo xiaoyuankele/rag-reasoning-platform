@@ -650,6 +650,38 @@ func assertAuthenticationSchema(
 		t.Fatalf("insert valid verification challenge: %v", err)
 	}
 
+	if _, err := pool.Exec(
+		ctx,
+		`
+			INSERT INTO verification_challenges (
+				channel,
+				destination,
+				purpose,
+				code_hash,
+				expires_at
+			)
+			VALUES (
+				'email',
+				'password-reset@example.com',
+				'password_reset',
+				REPEAT('a', 64),
+				CURRENT_TIMESTAMP + INTERVAL '10 minutes'
+			)
+		`,
+	); err != nil {
+		t.Fatalf("insert valid password reset challenge: %v", err)
+	}
+
+	assertStatementRejected(t, ctx, pool, `
+		INSERT INTO verification_challenges (
+			channel, destination, purpose, code_hash, expires_at
+		)
+		VALUES (
+			'email', 'new@example.com', 'login', REPEAT('a', 64),
+			CURRENT_TIMESTAMP + INTERVAL '10 minutes'
+		)
+	`, "challenge with an unsupported purpose")
+
 	assertStatementRejected(t, ctx, pool, `
 		INSERT INTO verification_challenges (
 			channel,

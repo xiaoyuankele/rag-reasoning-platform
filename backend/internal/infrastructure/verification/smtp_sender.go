@@ -133,7 +133,7 @@ func buildVerificationEmail(
 	body := fmt.Sprintf(
 		"你的验证码是：%s\r\n\r\n用途：%s\r\n有效期至：%s UTC\r\n\r\n如果不是你本人操作，请忽略本邮件。\r\n",
 		message.Code,
-		message.Purpose,
+		verificationPurposeDisplayName(message.Purpose),
 		message.ExpiresAt.UTC().Format("2006-01-02 15:04:05"),
 	)
 
@@ -147,6 +147,21 @@ func buildVerificationEmail(
 		"",
 		body,
 	}, "\r\n"))
+}
+
+// verificationPurposeDisplayName 把内部用途枚举转换成面向用户的邮件文案。
+// 安全校验仍然使用原始枚举；该函数只负责 Infrastructure 的展示适配。
+func verificationPurposeDisplayName(
+	purpose authdomain.VerificationPurpose,
+) string {
+	switch purpose {
+	case authdomain.VerificationPurposeRegister:
+		return "注册账户"
+	case authdomain.VerificationPurposePasswordReset:
+		return "重置密码"
+	default:
+		return "账户验证"
+	}
 }
 
 // deliverSMTPMessage 使用带超时的 TCP 连接完成无认证 SMTP 交付。

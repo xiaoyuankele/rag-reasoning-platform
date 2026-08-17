@@ -69,12 +69,32 @@ func TestSMTPSenderBuildsVerificationEmail(t *testing.T) {
 		"Subject: =?UTF-8?",
 		"Content-Type: text/plain; charset=UTF-8",
 		"483921",
-		"register",
+		"注册账户",
 		"2026-08-17 02:30:00 UTC",
 	} {
 		if !strings.Contains(email, wanted) {
 			t.Fatalf("verification email = %q, want substring %q", email, wanted)
 		}
+	}
+}
+
+func TestVerificationPurposeDisplayName(t *testing.T) {
+	tests := []struct {
+		name    string
+		purpose authdomain.VerificationPurpose
+		want    string
+	}{
+		{name: "register", purpose: authdomain.VerificationPurposeRegister, want: "注册账户"},
+		{name: "password reset", purpose: authdomain.VerificationPurposePasswordReset, want: "重置密码"},
+		{name: "unknown", purpose: authdomain.VerificationPurpose("unknown"), want: "账户验证"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := verificationPurposeDisplayName(test.purpose); got != test.want {
+				t.Fatalf("verificationPurposeDisplayName(%q) = %q, want %q", test.purpose, got, test.want)
+			}
+		})
 	}
 }
 

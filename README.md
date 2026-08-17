@@ -286,6 +286,12 @@ Session，重复联系方式由唯一索引稳定映射为 `409`。成功返回 
 `401 invalid_credentials`；不存在账户仍执行哑 Argon2id 核对，减少通过响应耗时枚举账户的差异。成功登录
 创建新的 PostgreSQL Session、返回 `200` 和与注册相同的公开 DTO，并设置新的 `rag_session` Cookie。
 
+忘记密码使用现有 `POST /auth/verification-codes`，但必须提交独立用途 `purpose=password_reset`；注册验证码
+不能用于重置密码。`POST /auth/password-reset` 接收 `verification_id`、六位 `verification_code` 和
+`new_password`。PostgreSQL 在一个事务中锁定并消费挑战、更新 Argon2id 密码哈希并撤销该用户全部旧
+Session；成功清除当前 Cookie 并返回 `204`，随后必须使用新密码重新登录。旧密码、旧 Cookie 和重复使用的
+验证码均会失效；联系方式没有账户时也统一表现为验证码无效，不向 HTTP 调用方暴露账户是否存在。
+
 Session 鉴权中间件会把 `rag_session` 原始 Token 转换为 SHA-256 摘要，联表恢复仍有效的 Session 与
 active 用户，并在 Gin Context 中写入可信 `Actor{UserID, SessionID}`。`GET /users/me` 使用该身份返回
 公开用户 DTO；缺少、伪造、过期或已撤销的 Cookie 统一返回 `401 authentication_required`。
