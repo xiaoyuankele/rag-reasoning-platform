@@ -1,7 +1,10 @@
 # 前端正式文档
 
-> 当前状态：F0 工程骨架与 F1 API 基础已完成，F2 文档管理已完成带登录态的列表、单文件上传和
-> 同用户内容去重前端切片，F3 关键词检索最小可用切片已经开放并通过真实联调；
+> 当前状态：F0 工程骨架与 F1 API 基础已完成，F2-A 已完成带登录态的列表、单文件上传和
+> 同用户内容去重前端切片；F2-B 已实现详情、解析任务创建与轮询、chunks 分页和删除二次确认，
+> 批量导入解析队列也已复用现有单文档接口完成；自动化门禁已通过，真实上传、解析和删除已由用户验证正常，
+> 真实多文件批次、chunks 分页和刷新恢复仍待专项验收。
+> F3 关键词检索最小可用切片已经开放并通过真实联调；
 > P6 前端第一批认证基础、公共页面和受保护应用外壳已经实现，并通过真实 Go 后端、PostgreSQL、Mailpit、
 > Vite `/api` 代理和浏览器表单纵向联调。
 > Vue 3 + TypeScript + Vite、
@@ -9,8 +12,8 @@
 > P6 后端 B1～B7、忘记/重置密码和全链路个人数据隔离均已完成并通过发布验收；前端已接入
 > Auth DTO/API、三态 Auth Store、`/users/me` 启动恢复、登录/注册/退出、忘记/重置密码和受保护路由。
 > F2 上传 API 会把 `201 + duplicate:false` 表现为新建成功，把 `200 + duplicate:true` 表现为
-> “该内容已存在”并刷新已有列表，不按文件名自行判重。下一步补齐详情、解析任务轮询、chunks、删除确认，
-> 再用文档选择器替代检索页中的临时文档 ID 输入，并完成真实服务与双用户产品隔离验收；
+> “该内容已存在”并刷新已有列表，不按文件名自行判重。下一步完成 F2-B 真实纵向验收，
+> 再用文档选择器替代检索页中的临时文档 ID 输入，并完成双用户产品隔离验收；
 > Element Plus 仍按需后置，不作为基础架构依赖。
 > 成员管理与租户切换仍留到 P7；前端不读取 HttpOnly Cookie，也不向业务接口提交 `user_id`。
 
@@ -23,7 +26,9 @@
 5. [工程化、个人用户与团队演进路线](../shared/architecture/product-evolution-roadmap.md)；
 6. [P6 个人用户认证前端交接](architecture/p6-authentication-handoff.md)；
 7. [F2 文档上传去重联调交接](architecture/f2-document-upload-integration-handoff.md)；
-8. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
+8. [F2-B 文档操作闭环](architecture/f2b-document-lifecycle.md)；
+9. [F2 批量导入与解析队列](architecture/f2-batch-import-queue.md)；
+10. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
 
 ## 文档边界
 

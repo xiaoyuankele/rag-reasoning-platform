@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '../../../shared/api/api-error'
-import { mapDocumentListResponse, mapDocumentUploadResponse } from './document-api'
+import {
+  mapDocumentListResponse,
+  mapDocumentResponse,
+  mapDocumentUploadResponse,
+} from './document-api'
 
 const documentDto = {
   id: 42,
@@ -16,6 +20,14 @@ const documentDto = {
 }
 
 describe('document API response mapping', () => {
+  it('把单份文档 DTO 转换为详情模型', () => {
+    expect(mapDocumentResponse(documentDto)).toMatchObject({
+      id: 42,
+      originalName: 'maglev.pdf',
+      status: 'uploaded',
+    })
+  })
+
   it('把分页列表 DTO 转换为前端文档模型', () => {
     const result = mapDocumentListResponse({
       documents: [documentDto],

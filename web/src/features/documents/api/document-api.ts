@@ -107,6 +107,15 @@ function mapDocument(source: DocumentDto): ResearchDocument {
   }
 }
 
+/** 校验 GET /documents/:id 的运行时响应。 */
+export function mapDocumentResponse(data: unknown): ResearchDocument {
+  if (!isDocumentDto(data)) {
+    throw new ApiError('invalid-response', '后端文档详情响应不符合约定。')
+  }
+
+  return mapDocument(data)
+}
+
 function mapPagination(source: DocumentPaginationDto): DocumentPagination {
   return {
     page: source.page,
@@ -176,6 +185,15 @@ export async function listDocuments(
   return mapDocumentListResponse(response.data)
 }
 
+/** 获取当前登录用户拥有的单份文档。 */
+export async function getDocument(
+  documentId: number,
+  signal?: AbortSignal,
+): Promise<ResearchDocument> {
+  const response = await httpClient.get<unknown>(`/documents/${documentId}`, { signal })
+  return mapDocumentResponse(response.data)
+}
+
 /** 上传单个文件；浏览器只发送原始文件，内容哈希和最终去重由后端完成。 */
 export async function uploadDocument(
   file: File,
@@ -190,4 +208,12 @@ export async function uploadDocument(
   })
 
   return mapDocumentUploadResponse(response.data, response.status)
+}
+
+/** 删除文档及后端关联数据；成功响应必须是无正文的 204。 */
+export async function deleteDocument(documentId: number, signal?: AbortSignal): Promise<void> {
+  const response = await httpClient.delete(`/documents/${documentId}`, { signal })
+  if (response.status !== 204) {
+    throw new ApiError('invalid-response', '后端文档删除响应不符合约定。')
+  }
 }
