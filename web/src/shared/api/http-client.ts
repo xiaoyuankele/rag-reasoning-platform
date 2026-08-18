@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { toApiError } from './api-error'
+import { notifyAuthenticationRequired } from './authentication-events'
 
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '/api'
 
@@ -7,6 +8,7 @@ const apiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim() || '/api'
 export const httpClient = axios.create({
   baseURL: apiBaseUrl,
   timeout: 10_000,
+  withCredentials: true,
   headers: {
     Accept: 'application/json',
   },
@@ -14,5 +16,11 @@ export const httpClient = axios.create({
 
 httpClient.interceptors.response.use(
   (response) => response,
-  (error: unknown) => Promise.reject(toApiError(error)),
+  (error: unknown) => {
+    const apiError = toApiError(error)
+    if (apiError.status === 401 && apiError.code === 'authentication_required') {
+      notifyAuthenticationRequired(apiError)
+    }
+    return Promise.reject(apiError)
+  },
 )
