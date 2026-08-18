@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
@@ -30,6 +31,17 @@ type StoredFile struct {
 	SizeBytes   int64
 	SHA256      string
 }
+
+// UploadResult 表示上传用例的最终结果。
+//
+// Duplicate 为 true 时，Document 是该用户之前上传的相同内容；本次临时保存的
+// 物理文件已经被补偿删除。这个结果不是错误，上层可以向用户提示“已存在”。
+type UploadResult struct {
+	Document  documentdomain.Document
+	Duplicate bool
+}
+
+const uploadCleanupTimeout = 5 * time.Second
 
 // FileStorage 定义应用层保存文件时需要的最小能力。
 //
@@ -75,7 +87,7 @@ var (
 
 // UploadService 编排文件保存和文档元数据入库流程。
 type UploadService struct {
-	repository documentdomain.ScopedCreator
+	repository documentdomain.ScopedCreateOrGetter
 	storage    FileStorage
 }
 
@@ -83,7 +95,10 @@ type UploadService struct {
 //
 // repository 负责数据库元数据，storage 负责文件内容，
 // 两个依赖都通过构造函数传入。
-func NewUploadService(repository documentdomain.ScopedCreator, storage FileStorage) *UploadService {
+func NewUploadService(
+	repository documentdomain.ScopedCreateOrGetter,
+	storage FileStorage,
+) *UploadService {
 	return &UploadService{
 		repository: repository,
 		storage:    storage,
@@ -95,45 +110,81 @@ func (s *UploadService) Upload(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	input UploadInput,
-) (documentdomain.Document, error) {
+) (UploadResult, error) {
 	originalName := strings.TrimSpace(input.OriginalName)
 	if originalName == "" {
-		return documentdomain.Document{}, ErrOriginalNameRequired
+		return UploadResult{}, ErrOriginalNameRequired
 	}
 
 	if input.Content == nil {
-		return documentdomain.Document{}, ErrFileContentRequired
+		return UploadResult{}, ErrFileContentRequired
 	}
 
 	storedFile, err := s.storage.Save(ctx, originalName, input.Content)
 
 	if err != nil {
-		return documentdomain.Document{}, fmt.Errorf(
+		return UploadResult{}, fmt.Errorf(
 			"save uploaded file: %w",
 			err,
 		)
 	}
 
-	createdDocument, err := s.repository.Create(ctx, scope, documentdomain.CreateInput{
-		OriginalName: originalName,
-		StoragePath:  storedFile.StoragePath,
-		MIMEType:     storedFile.MIMEType,
-		SizeBytes:    storedFile.SizeBytes,
-		SHA256:       storedFile.SHA256,
-	})
+	createResult, err := s.repository.CreateOrGetBySHA256(
+		ctx,
+		scope,
+		documentdomain.CreateInput{
+			OriginalName: originalName,
+			StoragePath:  storedFile.StoragePath,
+			MIMEType:     storedFile.MIMEType,
+			SizeBytes:    storedFile.SizeBytes,
+			SHA256:       storedFile.SHA256,
+		},
+	)
 
 	if err != nil {
-		deleteErr := s.storage.Delete(ctx, storedFile.StoragePath)
+		deleteErr := s.deleteStoredFileForCleanup(ctx, storedFile.StoragePath)
 		if deleteErr != nil {
-			return documentdomain.Document{}, fmt.Errorf(
+			return UploadResult{}, fmt.Errorf(
 				"create document record: %w; delete stored file: %w",
 				err,
 				deleteErr,
 			)
 		}
 
-		return documentdomain.Document{}, fmt.Errorf("create document record: %w", err)
+		return UploadResult{}, fmt.Errorf("create document record: %w", err)
 	}
 
-	return createdDocument, nil
+	if !createResult.Created {
+		// Save 必须先完整读取文件才能得到可信 SHA-256，所以查重发生在保存后。
+		// 命中已有记录时删除本次新文件，确保“一个用户 + 一份内容”只留下
+		// 一条数据库记录和一个物理文件。
+		if err := s.deleteStoredFileForCleanup(ctx, storedFile.StoragePath); err != nil {
+			return UploadResult{}, fmt.Errorf(
+				"delete duplicate stored file: %w",
+				err,
+			)
+		}
+
+		return UploadResult{
+			Document:  createResult.Document,
+			Duplicate: true,
+		}, nil
+	}
+
+	return UploadResult{Document: createResult.Document}, nil
+}
+
+// deleteStoredFileForCleanup 使用独立的短生命周期执行补偿删除。
+// HTTP 请求可能在数据库返回前被取消；清理不能因此直接放弃，否则会遗留孤立文件。
+func (s *UploadService) deleteStoredFileForCleanup(
+	parent context.Context,
+	storagePath string,
+) error {
+	cleanupContext, cancel := context.WithTimeout(
+		context.WithoutCancel(parent),
+		uploadCleanupTimeout,
+	)
+	defer cancel()
+
+	return s.storage.Delete(cleanupContext, storagePath)
 }

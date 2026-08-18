@@ -2,9 +2,9 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -327,7 +327,7 @@ func createSearchTestDocument(
 	originalName string,
 	storagePath string,
 	mimeType string,
-	hashCharacter string,
+	hashSeed string,
 ) documentdomain.Document {
 	t.Helper()
 
@@ -342,7 +342,7 @@ func createSearchTestDocument(
 			),
 			MIMEType:  mimeType,
 			SizeBytes: 1024,
-			SHA256:    strings.Repeat(hashCharacter, 64),
+			SHA256:    fmt.Sprintf("%x", sha256.Sum256([]byte(hashSeed))),
 		},
 	)
 	if err != nil {

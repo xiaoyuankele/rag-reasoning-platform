@@ -519,7 +519,7 @@ func createSemanticSearchFixture(
 		name+".pdf",
 		"semantic/"+name+".pdf",
 		"application/pdf",
-		"a",
+		name,
 	)
 	setSearchTestDocumentStatus(t, ctx, pool, document.ID, documentdomain.StatusReady)
 	setSearchTestDocumentTitle(t, ctx, pool, document.ID, name+" semantic title")

@@ -12,20 +12,20 @@ import (
 )
 
 // fakeUploadRepository 是上传用例测试使用的内存假仓储。
-// 它不会访问 PostgreSQL，只记录应用服务传给 Create 的数据。
+// 它不会访问 PostgreSQL，只记录应用服务传给 CreateOrGetBySHA256 的数据。
 type fakeUploadRepository struct {
-	createFunc  func(context.Context, accessdomain.OwnerScope, documentdomain.CreateInput) (documentdomain.Document, error)
-	createCalls int
+	createOrGetFunc  func(context.Context, accessdomain.OwnerScope, documentdomain.CreateInput) (documentdomain.CreateOrGetResult, error)
+	createOrGetCalls int
 }
 
-func (f *fakeUploadRepository) Create(
+func (f *fakeUploadRepository) CreateOrGetBySHA256(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	input documentdomain.CreateInput,
-) (documentdomain.Document, error) {
-	f.createCalls++
+) (documentdomain.CreateOrGetResult, error) {
+	f.createOrGetCalls++
 
-	return f.createFunc(ctx, scope, input)
+	return f.createOrGetFunc(ctx, scope, input)
 }
 
 // fakeFileStorage 是 FileStorage 的测试实现。
@@ -116,11 +116,11 @@ func TestUploadServiceSavesFileAndCreatesDocument(t *testing.T) {
 	}
 
 	repository := &fakeUploadRepository{
-		createFunc: func(
+		createOrGetFunc: func(
 			_ context.Context,
 			scope accessdomain.OwnerScope,
 			input documentdomain.CreateInput,
-		) (documentdomain.Document, error) {
+		) (documentdomain.CreateOrGetResult, error) {
 			if scope.OwnerUserID() != testOwnerUserID {
 				t.Fatalf("repository scope owner = %d, want %d", scope.OwnerUserID(), testOwnerUserID)
 			}
@@ -140,13 +140,16 @@ func TestUploadServiceSavesFileAndCreatesDocument(t *testing.T) {
 				)
 			}
 
-			return expectedDocument, nil
+			return documentdomain.CreateOrGetResult{
+				Document: expectedDocument,
+				Created:  true,
+			}, nil
 		},
 	}
 
 	service := NewUploadService(repository, storage)
 
-	createdDocument, err := service.Upload(
+	result, err := service.Upload(
 		context.Background(),
 		testOwnerScope(t),
 		UploadInput{
@@ -158,12 +161,15 @@ func TestUploadServiceSavesFileAndCreatesDocument(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	if createdDocument != expectedDocument {
+	if result.Document != expectedDocument {
 		t.Fatalf(
 			"expected document %+v, got %+v",
 			expectedDocument,
-			createdDocument,
+			result.Document,
 		)
+	}
+	if result.Duplicate {
+		t.Fatal("expected a newly created upload, got Duplicate=true")
 	}
 
 	if storage.saveCalls != 1 {
@@ -174,10 +180,10 @@ func TestUploadServiceSavesFileAndCreatesDocument(t *testing.T) {
 		t.Fatalf("expected no Delete calls, got %d", storage.deleteCalls)
 	}
 
-	if repository.createCalls != 1 {
+	if repository.createOrGetCalls != 1 {
 		t.Fatalf(
-			"expected one repository Create call, got %d",
-			repository.createCalls,
+			"expected one repository CreateOrGetBySHA256 call, got %d",
+			repository.createOrGetCalls,
 		)
 	}
 }
@@ -218,12 +224,12 @@ func TestUploadServiceDeletesStoredFileWhenRepositoryFails(t *testing.T) {
 	}
 
 	repository := &fakeUploadRepository{
-		createFunc: func(
+		createOrGetFunc: func(
 			context.Context,
 			accessdomain.OwnerScope,
 			documentdomain.CreateInput,
-		) (documentdomain.Document, error) {
-			return documentdomain.Document{}, repositoryError
+		) (documentdomain.CreateOrGetResult, error) {
+			return documentdomain.CreateOrGetResult{}, repositoryError
 		},
 	}
 
@@ -246,10 +252,10 @@ func TestUploadServiceDeletesStoredFileWhenRepositoryFails(t *testing.T) {
 		t.Fatalf("expected one Save call, got %d", storage.saveCalls)
 	}
 
-	if repository.createCalls != 1 {
+	if repository.createOrGetCalls != 1 {
 		t.Fatalf(
-			"expected one repository Create call, got %d",
-			repository.createCalls,
+			"expected one repository CreateOrGetBySHA256 call, got %d",
+			repository.createOrGetCalls,
 		)
 	}
 
@@ -258,6 +264,56 @@ func TestUploadServiceDeletesStoredFileWhenRepositoryFails(t *testing.T) {
 			"expected one compensating Delete call, got %d",
 			storage.deleteCalls,
 		)
+	}
+}
+
+// TestUploadServiceCleansUpAfterRequestCancellation 验证请求上下文在数据库阶段
+// 被取消后，补偿删除仍会使用独立的短超时上下文执行，避免遗留孤立文件。
+func TestUploadServiceCleansUpAfterRequestCancellation(t *testing.T) {
+	repositoryError := errors.New("database operation canceled")
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
+
+	storage := &fakeFileStorage{
+		saveFunc: func(context.Context, string, io.Reader) (StoredFile, error) {
+			return StoredFile{
+				StoragePath: "documents/canceled-request.pdf",
+				MIMEType:    "application/pdf",
+				SizeBytes:   128,
+				SHA256:      strings.Repeat("9", 64),
+			}, nil
+		},
+		deleteFunc: func(cleanupContext context.Context, _ string) error {
+			if err := cleanupContext.Err(); err != nil {
+				t.Fatalf("cleanup context was already canceled: %v", err)
+			}
+			return nil
+		},
+	}
+	repository := &fakeUploadRepository{
+		createOrGetFunc: func(
+			context.Context,
+			accessdomain.OwnerScope,
+			documentdomain.CreateInput,
+		) (documentdomain.CreateOrGetResult, error) {
+			cancelRequest()
+			return documentdomain.CreateOrGetResult{}, repositoryError
+		},
+	}
+
+	_, err := NewUploadService(repository, storage).Upload(
+		requestContext,
+		testOwnerScope(t),
+		UploadInput{
+			OriginalName: "canceled-request.pdf",
+			Content:      strings.NewReader("%PDF-1.7"),
+		},
+	)
+	if !errors.Is(err, repositoryError) {
+		t.Fatalf("Upload() error = %v, want repository error", err)
+	}
+	if storage.deleteCalls != 1 {
+		t.Fatalf("Delete calls = %d, want 1", storage.deleteCalls)
 	}
 }
 
@@ -282,14 +338,14 @@ func TestUploadServiceStopsWhenFileSaveFails(t *testing.T) {
 	}
 
 	repository := &fakeUploadRepository{
-		createFunc: func(
+		createOrGetFunc: func(
 			context.Context,
 			accessdomain.OwnerScope,
 			documentdomain.CreateInput,
-		) (documentdomain.Document, error) {
-			t.Fatal("repository Create must not be called when Save fails")
+		) (documentdomain.CreateOrGetResult, error) {
+			t.Fatal("repository CreateOrGetBySHA256 must not be called when Save fails")
 
-			return documentdomain.Document{}, nil
+			return documentdomain.CreateOrGetResult{}, nil
 		},
 	}
 
@@ -316,10 +372,10 @@ func TestUploadServiceStopsWhenFileSaveFails(t *testing.T) {
 		t.Fatalf("expected no Delete calls, got %d", storage.deleteCalls)
 	}
 
-	if repository.createCalls != 0 {
+	if repository.createOrGetCalls != 0 {
 		t.Fatalf(
-			"expected no repository Create calls, got %d",
-			repository.createCalls,
+			"expected no repository CreateOrGetBySHA256 calls, got %d",
+			repository.createOrGetCalls,
 		)
 	}
 }
@@ -353,12 +409,12 @@ func TestUploadServicePreservesRepositoryAndDeleteErrors(t *testing.T) {
 	}
 
 	repository := &fakeUploadRepository{
-		createFunc: func(
+		createOrGetFunc: func(
 			context.Context,
 			accessdomain.OwnerScope,
 			documentdomain.CreateInput,
-		) (documentdomain.Document, error) {
-			return documentdomain.Document{}, repositoryError
+		) (documentdomain.CreateOrGetResult, error) {
+			return documentdomain.CreateOrGetResult{}, repositoryError
 		},
 	}
 
@@ -383,6 +439,118 @@ func TestUploadServicePreservesRepositoryAndDeleteErrors(t *testing.T) {
 
 	if storage.deleteCalls != 1 {
 		t.Fatalf("expected one Delete call, got %d", storage.deleteCalls)
+	}
+}
+
+// TestUploadServiceReturnsExistingDocumentAndDeletesDuplicateFile 验证命中同一用户
+// 的相同内容后，应用服务返回已有记录，并删除本次刚写入的多余物理文件。
+func TestUploadServiceReturnsExistingDocumentAndDeletesDuplicateFile(t *testing.T) {
+	storedFile := StoredFile{
+		StoragePath: "documents/new-random-name.pdf",
+		MIMEType:    "application/pdf",
+		SizeBytes:   128,
+		SHA256:      strings.Repeat("d", 64),
+	}
+	existingDocument := documentdomain.Document{
+		ID:           41,
+		OriginalName: "first-name.pdf",
+		StoragePath:  "documents/existing.pdf",
+		MIMEType:     storedFile.MIMEType,
+		SizeBytes:    storedFile.SizeBytes,
+		SHA256:       storedFile.SHA256,
+		Status:       documentdomain.StatusReady,
+	}
+
+	storage := &fakeFileStorage{
+		saveFunc: func(context.Context, string, io.Reader) (StoredFile, error) {
+			return storedFile, nil
+		},
+		deleteFunc: func(_ context.Context, storagePath string) error {
+			if storagePath != storedFile.StoragePath {
+				t.Fatalf("Delete path = %q, want %q", storagePath, storedFile.StoragePath)
+			}
+			return nil
+		},
+	}
+	repository := &fakeUploadRepository{
+		createOrGetFunc: func(
+			context.Context,
+			accessdomain.OwnerScope,
+			documentdomain.CreateInput,
+		) (documentdomain.CreateOrGetResult, error) {
+			return documentdomain.CreateOrGetResult{
+				Document: existingDocument,
+				Created:  false,
+			}, nil
+		},
+	}
+
+	result, err := NewUploadService(repository, storage).Upload(
+		context.Background(),
+		testOwnerScope(t),
+		UploadInput{
+			OriginalName: "renamed-copy.pdf",
+			Content:      strings.NewReader("%PDF-1.7"),
+		},
+	)
+	if err != nil {
+		t.Fatalf("Upload() error = %v, want nil", err)
+	}
+	if !result.Duplicate {
+		t.Fatal("Upload() Duplicate = false, want true")
+	}
+	if result.Document != existingDocument {
+		t.Fatalf("Upload() Document = %+v, want %+v", result.Document, existingDocument)
+	}
+	if storage.deleteCalls != 1 {
+		t.Fatalf("Delete calls = %d, want 1", storage.deleteCalls)
+	}
+}
+
+// TestUploadServiceReportsDuplicateCleanupFailure 验证数据库已识别重复、但新物理
+// 文件删除失败时不会假装成功，否则磁盘会静默残留孤立文件。
+func TestUploadServiceReportsDuplicateCleanupFailure(t *testing.T) {
+	deleteError := errors.New("duplicate file is locked")
+	storedFile := StoredFile{
+		StoragePath: "documents/duplicate.pdf",
+		MIMEType:    "application/pdf",
+		SizeBytes:   128,
+		SHA256:      strings.Repeat("e", 64),
+	}
+	storage := &fakeFileStorage{
+		saveFunc: func(context.Context, string, io.Reader) (StoredFile, error) {
+			return storedFile, nil
+		},
+		deleteFunc: func(context.Context, string) error {
+			return deleteError
+		},
+	}
+	repository := &fakeUploadRepository{
+		createOrGetFunc: func(
+			context.Context,
+			accessdomain.OwnerScope,
+			documentdomain.CreateInput,
+		) (documentdomain.CreateOrGetResult, error) {
+			return documentdomain.CreateOrGetResult{
+				Document: documentdomain.Document{ID: 42},
+				Created:  false,
+			}, nil
+		},
+	}
+
+	_, err := NewUploadService(repository, storage).Upload(
+		context.Background(),
+		testOwnerScope(t),
+		UploadInput{
+			OriginalName: "copy.pdf",
+			Content:      strings.NewReader("%PDF-1.7"),
+		},
+	)
+	if !errors.Is(err, deleteError) {
+		t.Fatalf("Upload() error = %v, want wrapped cleanup error", err)
+	}
+	if storage.deleteCalls != 1 {
+		t.Fatalf("Delete calls = %d, want 1", storage.deleteCalls)
 	}
 }
 
@@ -431,14 +599,14 @@ func TestUploadServiceRejectsInvalidInput(t *testing.T) {
 			}
 
 			repository := &fakeUploadRepository{
-				createFunc: func(
+				createOrGetFunc: func(
 					context.Context,
 					accessdomain.OwnerScope,
 					documentdomain.CreateInput,
-				) (documentdomain.Document, error) {
-					t.Fatal("repository Create must not be called for invalid input")
+				) (documentdomain.CreateOrGetResult, error) {
+					t.Fatal("repository CreateOrGetBySHA256 must not be called for invalid input")
 
-					return documentdomain.Document{}, nil
+					return documentdomain.CreateOrGetResult{}, nil
 				},
 			}
 
@@ -460,10 +628,10 @@ func TestUploadServiceRejectsInvalidInput(t *testing.T) {
 				)
 			}
 
-			if repository.createCalls != 0 {
+			if repository.createOrGetCalls != 0 {
 				t.Fatalf(
-					"expected no repository Create calls, got %d",
-					repository.createCalls,
+					"expected no repository CreateOrGetBySHA256 calls, got %d",
+					repository.createOrGetCalls,
 				)
 			}
 		})

@@ -201,9 +201,9 @@ PostgreSQL 文档仓储已实现 `Create`、`GetByID`、分页 `List` 和 `Delet
 
 `GET /documents/:id` 已接入 Gin、应用服务和 PostgreSQL 仓储。接口自动化测试已覆盖非法 ID、文档不存在、内部错误和查询成功，并通过真实 PostgreSQL 数据验证了 HTTP `200`、`404`、`400` 响应；响应不会暴露服务器内部的 `storage_path`。
 
-文档上传应用服务已实现文件保存与数据库记录创建的流程编排，并在数据库写入失败时执行文件补偿删除。本地文件存储支持 `.pdf`、`.md`、`.markdown` 和 `.txt` 白名单：PDF 校验 `%PDF-` 文件头，Markdown/TXT 以固定内存流式校验 UTF-8，`.markdown` 的物理扩展名统一保存为 `.md`。200 MiB 大小限制、流式写入、SHA-256 计算、临时文件清理、安全路径删除和上下文取消均已通过自动化测试验证。
+文档上传应用服务已实现文件保存、同一用户内按 SHA-256 内容去重和数据库记录创建的流程编排。首次上传保留新记录和物理文件；同一用户再次上传完全相同内容时返回已有记录并补偿删除本次新文件；不同用户仍保留各自的独立记录与文件。PostgreSQL 的 `(owner_user_id, sha256)` 唯一索引负责并发兜底，避免两个同时到达的上传请求绕过查重。数据库写入失败时同样执行文件补偿删除。本地文件存储支持 `.pdf`、`.md`、`.markdown` 和 `.txt` 白名单：PDF 校验 `%PDF-` 文件头，Markdown/TXT 以固定内存流式校验 UTF-8，`.markdown` 的物理扩展名统一保存为 `.md`。200 MiB 大小限制、流式写入、SHA-256 计算、临时文件清理、安全路径删除和上下文取消均已通过自动化测试验证。
 
-`POST /documents` 已使用 Gin 的流式 multipart 读取接入上传应用服务，并通过 `http.MaxBytesReader` 限制整个请求体。接口自动化测试已覆盖缺少文件、创建成功、应用错误映射和超大请求体；真实 HTTP 验证已确认 PDF、MD、MARKDOWN 和 TXT 均返回 `201` 及正确 MIME，数据库保存规范化物理扩展名，不支持的 DOCX 返回 `415 Unsupported Media Type`。测试记录和物理文件随后均通过删除接口清理。
+`POST /documents` 已使用 Gin 的流式 multipart 读取接入上传应用服务，并通过 `http.MaxBytesReader` 限制整个请求体。首次保存返回 `201 Created` 与 `duplicate: false`；同一用户的重复内容返回原文档、`200 OK` 与 `duplicate: true`，不会重复解析、切块或生成向量。接口自动化测试覆盖缺少文件、创建成功、重复命中、应用错误映射和超大请求体；真实 HTTP/PostgreSQL/本地文件系统集成测试确认重复上传后只有一条文档记录和一个物理文件。PDF、MD、MARKDOWN 和 TXT 均返回正确 MIME，数据库保存规范化物理扩展名，不支持的 DOCX 返回 `415 Unsupported Media Type`。
 
 `GET /documents` 已提供分页列表，默认 `page=1`、`page_size=20`，单页最多 100 条。接口自动化测试已覆盖默认值、自定义参数、非法输入、应用错误映射、内部字段隐藏和空数组响应；真实 HTTP 请求已验证空数据库下的 `200` 分页响应，以及非法页码和超大单页数量的 `400` 响应。
 

@@ -21,7 +21,7 @@ import (
 
 // fakeDocumentUploadService 是上传 Handler 测试使用的假应用服务。
 type fakeDocumentUploadService struct {
-	uploadFunc  func(context.Context, accessdomain.OwnerScope, applicationdocument.UploadInput) (documentdomain.Document, error)
+	uploadFunc  func(context.Context, accessdomain.OwnerScope, applicationdocument.UploadInput) (applicationdocument.UploadResult, error)
 	uploadCalls int
 }
 
@@ -29,7 +29,7 @@ func (f *fakeDocumentUploadService) Upload(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	input applicationdocument.UploadInput,
-) (documentdomain.Document, error) {
+) (applicationdocument.UploadResult, error) {
 	f.uploadCalls++
 
 	return f.uploadFunc(ctx, scope, input)
@@ -57,10 +57,10 @@ func TestDocumentUploadHandlerRejectsMissingFile(t *testing.T) {
 			context.Context,
 			accessdomain.OwnerScope,
 			applicationdocument.UploadInput,
-		) (documentdomain.Document, error) {
+		) (applicationdocument.UploadResult, error) {
 			t.Fatal("Upload must not be called when file field is missing")
 
-			return documentdomain.Document{}, nil
+			return applicationdocument.UploadResult{}, nil
 		},
 	}
 
@@ -128,7 +128,7 @@ func TestDocumentUploadHandlerReturnsCreatedDocument(t *testing.T) {
 			_ context.Context,
 			scope accessdomain.OwnerScope,
 			input applicationdocument.UploadInput,
-		) (documentdomain.Document, error) {
+		) (applicationdocument.UploadResult, error) {
 			if scope.OwnerUserID() != testAPIOwnerUserID {
 				t.Fatalf("Upload() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
 			}
@@ -153,7 +153,9 @@ func TestDocumentUploadHandlerReturnsCreatedDocument(t *testing.T) {
 				)
 			}
 
-			return expectedDocument, nil
+			return applicationdocument.UploadResult{
+				Document: expectedDocument,
+			}, nil
 		},
 	}
 
@@ -197,7 +199,7 @@ func TestDocumentUploadHandlerReturnsCreatedDocument(t *testing.T) {
 		)
 	}
 
-	var responseBody documentResponse
+	var responseBody documentUploadResponse
 	if err := json.Unmarshal(response.Body.Bytes(), &responseBody); err != nil {
 		t.Fatalf("decode response JSON: %v", err)
 	}
@@ -210,12 +212,69 @@ func TestDocumentUploadHandlerReturnsCreatedDocument(t *testing.T) {
 			responseBody,
 		)
 	}
+	if responseBody.Duplicate {
+		t.Fatal("expected duplicate=false for newly created document")
+	}
 
 	if service.uploadCalls != 1 {
 		t.Fatalf(
 			"expected one Upload call, got %d",
 			service.uploadCalls,
 		)
+	}
+}
+
+// TestDocumentUploadHandlerReturnsExistingDuplicate 验证相同内容不是请求错误：
+// Handler 返回已有文档、200 OK 和 duplicate=true，供前端显示明确提示。
+func TestDocumentUploadHandlerReturnsExistingDuplicate(t *testing.T) {
+	existingDocument := documentdomain.Document{
+		ID:           22,
+		OriginalName: "first-upload.pdf",
+		MIMEType:     "application/pdf",
+		SizeBytes:    16,
+		SHA256:       "existing-sha256",
+		Status:       documentdomain.StatusReady,
+	}
+	service := &fakeDocumentUploadService{
+		uploadFunc: func(
+			context.Context,
+			accessdomain.OwnerScope,
+			applicationdocument.UploadInput,
+		) (applicationdocument.UploadResult, error) {
+			return applicationdocument.UploadResult{
+				Document:  existingDocument,
+				Duplicate: true,
+			}, nil
+		},
+	}
+
+	var requestBody bytes.Buffer
+	multipartWriter := multipart.NewWriter(&requestBody)
+	fileWriter, err := multipartWriter.CreateFormFile("file", "renamed-copy.pdf")
+	if err != nil {
+		t.Fatalf("create multipart file field: %v", err)
+	}
+	if _, err := fileWriter.Write([]byte("%PDF-1.7\ncopy")); err != nil {
+		t.Fatalf("write multipart file content: %v", err)
+	}
+	if err := multipartWriter.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/documents", &requestBody)
+	request.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	response := httptest.NewRecorder()
+	newTestDocumentUploadRouter(service).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	var responseBody documentUploadResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &responseBody); err != nil {
+		t.Fatalf("decode response JSON: %v", err)
+	}
+	if !responseBody.Duplicate || responseBody.ID != existingDocument.ID {
+		t.Fatalf("response = %+v, want existing document with duplicate=true", responseBody)
 	}
 }
 
@@ -279,8 +338,8 @@ func TestDocumentUploadHandlerMapsApplicationErrors(t *testing.T) {
 					context.Context,
 					accessdomain.OwnerScope,
 					applicationdocument.UploadInput,
-				) (documentdomain.Document, error) {
-					return documentdomain.Document{}, fmt.Errorf(
+				) (applicationdocument.UploadResult, error) {
+					return applicationdocument.UploadResult{}, fmt.Errorf(
 						"upload document: %w",
 						test.serviceError,
 					)
@@ -350,18 +409,18 @@ func TestDocumentUploadHandlerRejectsOversizedRequestBody(t *testing.T) {
 			_ context.Context,
 			_ accessdomain.OwnerScope,
 			input applicationdocument.UploadInput,
-		) (documentdomain.Document, error) {
+		) (applicationdocument.UploadResult, error) {
 			// 必须持续读取 input.Content，MaxBytesReader 才会在越过上限时
 			// 返回 *http.MaxBytesError。仅仅收到 io.Reader 并不会触发限制。
 			if _, err := io.Copy(io.Discard, input.Content); err != nil {
-				return documentdomain.Document{}, fmt.Errorf(
+				return applicationdocument.UploadResult{}, fmt.Errorf(
 					"read uploaded content: %w",
 					err,
 				)
 			}
 
 			t.Fatal("expected reading oversized request body to fail")
-			return documentdomain.Document{}, nil
+			return applicationdocument.UploadResult{}, nil
 		},
 	}
 

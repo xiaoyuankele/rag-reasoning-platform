@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -122,6 +123,9 @@ func TestScopedDocumentRepositoryRejectsInvalidScopeBeforeDatabaseAccess(t *test
 	if _, err := repository.Create(ctx, invalidScope, documentdomain.CreateInput{}); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
 		t.Fatalf("Create(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
 	}
+	if _, err := repository.CreateOrGetBySHA256(ctx, invalidScope, documentdomain.CreateInput{}); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
+		t.Fatalf("CreateOrGetBySHA256(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
+	}
 	if _, err := repository.GetByID(ctx, invalidScope, 1); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
 		t.Fatalf("GetByID(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
 	}
@@ -130,6 +134,124 @@ func TestScopedDocumentRepositoryRejectsInvalidScopeBeforeDatabaseAccess(t *test
 	}
 	if err := repository.Delete(ctx, invalidScope, 1); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
 		t.Fatalf("Delete(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
+	}
+}
+
+// TestScopedDocumentRepositoryCreateOrGetBySHA256 验证同一用户内去重、
+// 不同用户隔离，以及并发上传时数据库唯一索引仍然只允许一条记录。
+func TestScopedDocumentRepositoryCreateOrGetBySHA256(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	repository := postgresrepository.NewScopedDocumentRepository(pool)
+
+	uniqueSuffix := time.Now().UnixNano()
+	ownerAID := insertScopedRepositoryUser(
+		t,
+		ctx,
+		pool,
+		fmt.Sprintf("dedup-owner-a-%d@example.com", uniqueSuffix),
+	)
+	ownerBID := insertScopedRepositoryUser(
+		t,
+		ctx,
+		pool,
+		fmt.Sprintf("dedup-owner-b-%d@example.com", uniqueSuffix),
+	)
+	ownerA, err := accessdomain.NewOwnerScope(ownerAID)
+	if err != nil {
+		t.Fatalf("create owner A scope: %v", err)
+	}
+	ownerB, err := accessdomain.NewOwnerScope(ownerBID)
+	if err != nil {
+		t.Fatalf("create owner B scope: %v", err)
+	}
+
+	const workers = 6
+	sharedHash := strings.Repeat("f", 64)
+	type concurrentResult struct {
+		result documentdomain.CreateOrGetResult
+		err    error
+	}
+	results := make(chan concurrentResult, workers)
+	for workerIndex := 0; workerIndex < workers; workerIndex++ {
+		go func(index int) {
+			result, err := repository.CreateOrGetBySHA256(
+				ctx,
+				ownerA,
+				documentdomain.CreateInput{
+					OriginalName: fmt.Sprintf("copy-%d.pdf", index),
+					StoragePath:  fmt.Sprintf("dedup-tests/copy-%d.pdf", index),
+					MIMEType:     "application/pdf",
+					SizeBytes:    1024,
+					SHA256:       sharedHash,
+				},
+			)
+			results <- concurrentResult{result: result, err: err}
+		}(workerIndex)
+	}
+
+	createdCount := 0
+	var sharedDocumentID int64
+	for resultIndex := 0; resultIndex < workers; resultIndex++ {
+		concurrentUpload := <-results
+		if concurrentUpload.err != nil {
+			t.Fatalf("concurrent CreateOrGetBySHA256() error = %v", concurrentUpload.err)
+		}
+		if concurrentUpload.result.Created {
+			createdCount++
+		}
+		if sharedDocumentID == 0 {
+			sharedDocumentID = concurrentUpload.result.Document.ID
+		}
+		if concurrentUpload.result.Document.ID != sharedDocumentID {
+			t.Fatalf(
+				"concurrent result document ID = %d, want shared ID %d",
+				concurrentUpload.result.Document.ID,
+				sharedDocumentID,
+			)
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("Created=true count = %d, want 1", createdCount)
+	}
+
+	var ownerACount int
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT COUNT(*) FROM documents WHERE owner_user_id = $1 AND sha256 = $2",
+		ownerAID,
+		sharedHash,
+	).Scan(&ownerACount); err != nil {
+		t.Fatalf("count owner A duplicate rows: %v", err)
+	}
+	if ownerACount != 1 {
+		t.Fatalf("owner A duplicate row count = %d, want 1", ownerACount)
+	}
+
+	otherOwnerResult, err := repository.CreateOrGetBySHA256(
+		ctx,
+		ownerB,
+		documentdomain.CreateInput{
+			OriginalName: "other-owner.pdf",
+			StoragePath:  "dedup-tests/other-owner.pdf",
+			MIMEType:     "application/pdf",
+			SizeBytes:    1024,
+			SHA256:       sharedHash,
+		},
+	)
+	if err != nil {
+		t.Fatalf("other owner CreateOrGetBySHA256() error = %v", err)
+	}
+	if !otherOwnerResult.Created {
+		t.Fatal("same content for another owner was incorrectly treated as duplicate")
+	}
+	if otherOwnerResult.Document.ID == sharedDocumentID {
+		t.Fatal("different owners unexpectedly share the same document record")
 	}
 }
 

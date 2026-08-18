@@ -2,10 +2,10 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -257,7 +257,7 @@ func createProcessingJobForFinalization(
 			),
 			MIMEType:  "application/pdf",
 			SizeBytes: 1024,
-			SHA256:    strings.Repeat("f", 64),
+			SHA256:    fmt.Sprintf("%x", sha256.Sum256([]byte(suffix))),
 		},
 	)
 	if err != nil {

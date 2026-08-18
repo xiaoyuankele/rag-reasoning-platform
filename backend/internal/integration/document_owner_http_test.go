@@ -167,12 +167,16 @@ func TestDocumentOwnerHTTPWithPostgreSQL(t *testing.T) {
 	var uploadedDocument struct {
 		ID           int64  `json:"id"`
 		OriginalName string `json:"original_name"`
+		Duplicate    bool   `json:"duplicate"`
 	}
 	if err := json.Unmarshal(uploadResponse.Body.Bytes(), &uploadedDocument); err != nil {
 		t.Fatalf("decode upload response: %v", err)
 	}
 	if uploadedDocument.ID <= 0 || uploadedDocument.OriginalName != "owner-a.md" {
 		t.Fatalf("unexpected upload response: %+v", uploadedDocument)
+	}
+	if uploadedDocument.Duplicate {
+		t.Fatal("first upload returned duplicate=true, want false")
 	}
 
 	var storedOwnerID int64
@@ -193,6 +197,59 @@ func TestDocumentOwnerHTTPWithPostgreSQL(t *testing.T) {
 	)
 	if _, err := os.Stat(absoluteStoragePath); err != nil {
 		t.Fatalf("uploaded physical file is not available: %v", err)
+	}
+
+	duplicateUploadResponse := performDocumentOwnerUpload(
+		t,
+		router,
+		ownerACookie,
+		"renamed-owner-a-copy.md",
+		"# Owner A\n\nOnly owner A may read this document.",
+	)
+	if duplicateUploadResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"duplicate upload status=%d want=%d body=%s",
+			duplicateUploadResponse.Code,
+			http.StatusOK,
+			duplicateUploadResponse.Body.String(),
+		)
+	}
+	var duplicateUpload struct {
+		ID           int64  `json:"id"`
+		OriginalName string `json:"original_name"`
+		Duplicate    bool   `json:"duplicate"`
+	}
+	if err := json.Unmarshal(duplicateUploadResponse.Body.Bytes(), &duplicateUpload); err != nil {
+		t.Fatalf("decode duplicate upload response: %v", err)
+	}
+	if !duplicateUpload.Duplicate ||
+		duplicateUpload.ID != uploadedDocument.ID ||
+		duplicateUpload.OriginalName != uploadedDocument.OriginalName {
+		t.Fatalf(
+			"duplicate upload response=%+v want existing document ID=%d",
+			duplicateUpload,
+			uploadedDocument.ID,
+		)
+	}
+
+	var ownerAContentRows int
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT COUNT(*) FROM documents WHERE owner_user_id = $1 AND sha256 = (SELECT sha256 FROM documents WHERE id = $2)",
+		ownerAID,
+		uploadedDocument.ID,
+	).Scan(&ownerAContentRows); err != nil {
+		t.Fatalf("count owner A duplicate content rows: %v", err)
+	}
+	if ownerAContentRows != 1 {
+		t.Fatalf("owner A duplicate content rows=%d want=1", ownerAContentRows)
+	}
+	storedFiles, err := os.ReadDir(filepath.Join(storageRoot, "documents"))
+	if err != nil {
+		t.Fatalf("read stored document directory: %v", err)
+	}
+	if len(storedFiles) != 1 {
+		t.Fatalf("stored physical file count=%d want=1 after duplicate upload", len(storedFiles))
 	}
 
 	ownerAList := performDocumentOwnerRequest(

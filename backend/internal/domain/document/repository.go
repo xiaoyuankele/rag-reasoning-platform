@@ -64,6 +64,26 @@ type ScopedCreator interface {
 	) (Document, error)
 }
 
+// CreateOrGetResult 表示按“所有者 + 内容哈希”保存文档的结果。
+//
+// Created 为 true 时，Document 是本次新建的记录；为 false 时，Document
+// 是同一用户之前已经保存的相同内容。领域层只描述这个稳定事实，不决定 HTTP
+// 应该返回 200 还是 201。
+type CreateOrGetResult struct {
+	Document Document
+	Created  bool
+}
+
+// ScopedCreateOrGetter 定义同一用户内原子查重并创建文档的仓储能力。
+// PostgreSQL 实现必须依靠唯一约束处理并发上传，不能只做“先查再插”。
+type ScopedCreateOrGetter interface {
+	CreateOrGetBySHA256(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		input CreateInput,
+	) (CreateOrGetResult, error)
+}
+
 // ScopedFinder 定义只能在可信所有者范围内按 ID 查询文档的仓储能力。
 // 文档不存在和属于其他用户都必须返回 ErrNotFound。
 type ScopedFinder interface {
@@ -95,6 +115,7 @@ type ScopedDeleter interface {
 // ScopedRepository 组合面向已认证个人用户的文档持久化能力。
 type ScopedRepository interface {
 	ScopedCreator
+	ScopedCreateOrGetter
 	ScopedFinder
 	ScopedLister
 	ScopedDeleter

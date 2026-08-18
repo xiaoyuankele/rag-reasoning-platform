@@ -484,6 +484,91 @@ func assertDocumentOwnerSchema(
 	if !hasOwnerListIndex {
 		t.Fatal("documents owner list index was not created")
 	}
+
+	var hasOwnerHashUniqueIndex bool
+	if err := pool.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_indexes
+				WHERE schemaname = current_schema()
+				  AND tablename = 'documents'
+				  AND indexname = 'uq_documents_owner_sha256'
+				  AND indexdef LIKE 'CREATE UNIQUE INDEX%'
+			)
+		`,
+	).Scan(&hasOwnerHashUniqueIndex); err != nil {
+		t.Fatalf("query document owner/hash unique index: %v", err)
+	}
+	if !hasOwnerHashUniqueIndex {
+		t.Fatal("documents owner/hash unique index was not created")
+	}
+
+	// 同一内容只在同一所有者内部去重；不同用户仍拥有独立记录。
+	var firstOwnerID int64
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT id FROM users WHERE email = 'owner@example.com'",
+	).Scan(&firstOwnerID); err != nil {
+		t.Fatalf("query first document owner: %v", err)
+	}
+	var secondOwnerID int64
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT id FROM users WHERE phone_e164 = '+8613800000000'",
+	).Scan(&secondOwnerID); err != nil {
+		t.Fatalf("query second document owner: %v", err)
+	}
+
+	const sharedHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	if _, err := pool.Exec(
+		ctx,
+		`
+			INSERT INTO documents (
+				owner_user_id, original_name, storage_path,
+				mime_type, size_bytes, sha256
+			)
+			VALUES ($1, 'first.pdf', 'migration-tests/first.pdf',
+				'application/pdf', 1, $2)
+		`,
+		firstOwnerID,
+		sharedHash,
+	); err != nil {
+		t.Fatalf("insert first owner/hash document: %v", err)
+	}
+
+	if _, err := pool.Exec(
+		ctx,
+		`
+			INSERT INTO documents (
+				owner_user_id, original_name, storage_path,
+				mime_type, size_bytes, sha256
+			)
+			VALUES ($1, 'duplicate.pdf', 'migration-tests/duplicate.pdf',
+				'application/pdf', 1, $2)
+		`,
+		firstOwnerID,
+		sharedHash,
+	); err == nil {
+		t.Fatal("database accepted duplicate content for the same document owner")
+	}
+
+	if _, err := pool.Exec(
+		ctx,
+		`
+			INSERT INTO documents (
+				owner_user_id, original_name, storage_path,
+				mime_type, size_bytes, sha256
+			)
+			VALUES ($1, 'other-owner.pdf', 'migration-tests/other-owner.pdf',
+				'application/pdf', 1, $2)
+		`,
+		secondOwnerID,
+		sharedHash,
+	); err != nil {
+		t.Fatalf("database rejected same content for another owner: %v", err)
+	}
 }
 
 // assertAuthenticationSchema 对 P6-B1 的身份表执行真实 PostgreSQL 约束测试。

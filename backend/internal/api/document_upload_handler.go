@@ -10,7 +10,6 @@ import (
 
 	applicationdocument "rag-reasoning-platform/backend/internal/application/document"
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
-	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
 // multipartOverheadAllowanceBytes 为 multipart 边界和请求头预留空间。
@@ -24,7 +23,14 @@ type documentUploadService interface {
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
 		input applicationdocument.UploadInput,
-	) (documentdomain.Document, error)
+	) (applicationdocument.UploadResult, error)
+}
+
+// documentUploadResponse 在通用文档响应上增加本次是否命中重复内容。
+// 嵌入 documentResponse 会把文档字段平铺到同一层 JSON，保持原接口兼容。
+type documentUploadResponse struct {
+	documentResponse
+	Duplicate bool `json:"duplicate"`
 }
 
 // DocumentUploadHandler 负责接收文档上传 HTTP 请求。
@@ -111,7 +117,7 @@ func (h *DocumentUploadHandler) Upload(c *gin.Context) {
 		// Upload 会在返回前同步读取 part，因此可以在方法结束时关闭。
 		defer part.Close()
 
-		createdDocument, err := h.service.Upload(
+		uploadResult, err := h.service.Upload(
 			c.Request.Context(),
 			scope,
 			applicationdocument.UploadInput{
@@ -161,10 +167,15 @@ func (h *DocumentUploadHandler) Upload(c *gin.Context) {
 			return
 		}
 
-		c.JSON(
-			http.StatusCreated,
-			newDocumentResponse(createdDocument),
-		)
+		statusCode := http.StatusCreated
+		if uploadResult.Duplicate {
+			statusCode = http.StatusOK
+		}
+
+		c.JSON(statusCode, documentUploadResponse{
+			documentResponse: newDocumentResponse(uploadResult.Document),
+			Duplicate:        uploadResult.Duplicate,
+		})
 		return
 	}
 }

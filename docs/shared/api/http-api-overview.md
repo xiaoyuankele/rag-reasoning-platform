@@ -1,6 +1,6 @@
 # HTTP API 总览
 
-> 更新时间：2026-08-17。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
+> 更新时间：2026-08-18。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
 > Handler 测试和后续 OpenAPI 文件为最终校验依据。
 
 ## 1. 当前访问边界
@@ -18,7 +18,7 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | 方法 | 路径 | 主要输入 | 成功状态 | 用途 | 前端定位 |
 |---|---|---|---|---|---|
 | `GET` | `/health` | 无 | `200` | 检查后端是否存活 | 系统状态/开发验收 |
-| `POST` | `/documents` | Session Cookie；`multipart/form-data` 的 `file` | `201` | 上传并绑定当前用户 | 用户功能；已隔离 |
+| `POST` | `/documents` | Session Cookie；`multipart/form-data` 的 `file` | 新建 `201`；同用户重复 `200` | 上传、绑定当前用户并按内容去重 | 用户功能；已隔离 |
 | `GET` | `/documents` | Session Cookie；`page`、`page_size` | `200` | 分页获取当前用户文档 | 用户功能；已隔离 |
 | `GET` | `/documents/:id` | Session Cookie；路径参数 `id` | `200` | 获取当前用户文档详情 | 用户功能；已隔离 |
 | `GET` | `/documents/:id/chunks` | Session Cookie；路径参数 `id`，可选 `page`、`page_size` | `200` | 查看当前用户 ready 文档的文本块 | 用户功能；已隔离 |
@@ -88,6 +88,10 @@ P6 路由保护边界：
   最长 128 字符的同名请求头，也可以省略并由后端生成；
 - 前端展示“请求失败”时可以同时保留响应中的 `X-Request-ID`，供后端在结构化日志中定位同一次请求；
 - 成功响应使用稳定的 JSON 字段；`204 No Content` 没有响应体；
+- `POST /documents` 使用文件内容的 SHA-256 在当前用户范围内查重。首次上传返回 `201` 和
+  `duplicate: false`；同一用户再次上传完全相同的字节内容时返回原有文档的 `200` 响应和
+  `duplicate: true`。此时 `id`、`original_name` 和状态均来自第一次上传，前端应提示“该内容已存在”
+  并导航或刷新原记录，而不是当作失败；不同用户上传相同内容仍各自得到 `201` 和独立文档；
 - 可预期的客户端输入错误返回 `4xx`，响应一般为 `{"error":"安全提示"}`；
 - 内部错误详情只记录在后端，不直接暴露给前端；
 - 前端必须依据 HTTP 状态码处理分支，不能依赖后端日志文本；

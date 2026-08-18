@@ -76,6 +76,131 @@ func (r *ScopedDocumentRepository) Create(
 	return savedDocument, nil
 }
 
+// CreateOrGetBySHA256 在指定所有者范围内原子创建文档或返回已有副本。
+//
+// INSERT ... ON CONFLICT 由数据库唯一索引解决并发竞争：即使两个请求同时上传
+// 相同内容，也只有一个请求能够创建记录。极少数情况下，如果冲突记录正好被
+// 另一个事务删除，方法会进行有界重试，避免返回一个已经消失的文档。
+func (r *ScopedDocumentRepository) CreateOrGetBySHA256(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	input documentdomain.CreateInput,
+) (documentdomain.CreateOrGetResult, error) {
+	if !scope.IsValid() {
+		return documentdomain.CreateOrGetResult{}, accessdomain.ErrInvalidOwnerScope
+	}
+
+	const maximumAttempts = 3
+	for attempt := 0; attempt < maximumAttempts; attempt++ {
+		createdDocument, err := r.insertUnlessOwnerHashExists(ctx, scope, input)
+		if err == nil {
+			return documentdomain.CreateOrGetResult{
+				Document: createdDocument,
+				Created:  true,
+			}, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return documentdomain.CreateOrGetResult{}, fmt.Errorf(
+				"create scoped document unless duplicate: %w",
+				err,
+			)
+		}
+
+		existingDocument, err := r.getByOwnerAndSHA256(ctx, scope, input.SHA256)
+		if err == nil {
+			return documentdomain.CreateOrGetResult{
+				Document: existingDocument,
+				Created:  false,
+			}, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return documentdomain.CreateOrGetResult{}, fmt.Errorf(
+				"get duplicate scoped document: %w",
+				err,
+			)
+		}
+	}
+
+	return documentdomain.CreateOrGetResult{}, errors.New(
+		"create or get scoped document: conflicting document disappeared during retry",
+	)
+}
+
+func (r *ScopedDocumentRepository) insertUnlessOwnerHashExists(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	input documentdomain.CreateInput,
+) (documentdomain.Document, error) {
+	const query = `
+		INSERT INTO documents (
+			owner_user_id,
+			original_name,
+			storage_path,
+			mime_type,
+			size_bytes,
+			sha256
+		)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (owner_user_id, sha256) DO NOTHING
+		RETURNING
+			id,
+			owner_user_id,
+			title,
+			original_name,
+			storage_path,
+			mime_type,
+			size_bytes,
+			sha256,
+			status,
+			error_message,
+			created_at,
+			updated_at
+	`
+
+	return scanScopedDocument(r.pool.QueryRow(
+		ctx,
+		query,
+		scope.OwnerUserID(),
+		input.OriginalName,
+		input.StoragePath,
+		input.MIMEType,
+		input.SizeBytes,
+		input.SHA256,
+	))
+}
+
+func (r *ScopedDocumentRepository) getByOwnerAndSHA256(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	sha256 string,
+) (documentdomain.Document, error) {
+	const query = `
+		SELECT
+			id,
+			owner_user_id,
+			title,
+			original_name,
+			storage_path,
+			mime_type,
+			size_bytes,
+			sha256,
+			status,
+			error_message,
+			created_at,
+			updated_at
+		FROM documents
+		WHERE owner_user_id = $1
+		  AND sha256 = $2
+	`
+
+	return scanScopedDocument(r.pool.QueryRow(
+		ctx,
+		query,
+		scope.OwnerUserID(),
+		sha256,
+	))
+}
+
 // GetByID 只查询同时匹配文档 ID 和 OwnerScope 的记录。
 func (r *ScopedDocumentRepository) GetByID(
 	ctx context.Context,
