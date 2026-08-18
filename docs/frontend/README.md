@@ -22,7 +22,8 @@
 4. [P6 个人用户域与私有数据闭环](../shared/architecture/personal-user-domain.md)；
 5. [工程化、个人用户与团队演进路线](../shared/architecture/product-evolution-roadmap.md)；
 6. [P6 个人用户认证前端交接](architecture/p6-authentication-handoff.md)；
-7. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
+7. [F2 文档上传去重联调交接](architecture/f2-document-upload-integration-handoff.md)；
+8. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
 
 ## 文档边界
 
