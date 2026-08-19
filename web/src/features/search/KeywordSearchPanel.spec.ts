@@ -87,6 +87,7 @@ describe('KeywordSearchPanel', () => {
     expect(wrapper.text()).toContain('Bridge vibration study')
     expect(wrapper.text()).toContain('第 3–4 页')
     expect(wrapper.text()).toContain('共 11 个文本块')
+    expect(wrapper.get('mark').text()).toBe('bridge')
     wrapper.unmount()
   })
 
@@ -148,6 +149,26 @@ describe('KeywordSearchPanel', () => {
 
     expect(searchKeywordsMock).toHaveBeenCalledTimes(2)
     expect(wrapper.text()).toContain('Bridge vibration study')
+    wrapper.unmount()
+  })
+
+  it('明确区分后端零结果与连接失败', async () => {
+    searchKeywordsMock.mockResolvedValue({
+      query: 'maglev vibration',
+      results: [],
+      pagination: {
+        page: 1,
+        pageSize: 10,
+        total: 0,
+        totalPages: 0,
+      },
+    })
+    const { wrapper } = await mountPanel('/search?q=maglev%20vibration')
+
+    expect(searchKeywordsMock).toHaveBeenCalledOnce()
+    expect(wrapper.text()).toContain('后端检索已完成')
+    expect(wrapper.text()).toContain('连续字面片段匹配')
+    expect(wrapper.text()).not.toContain('检索没有完成')
     wrapper.unmount()
   })
 })

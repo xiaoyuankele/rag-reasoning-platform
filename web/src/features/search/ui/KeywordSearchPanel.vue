@@ -138,7 +138,7 @@ watch(() => [route.query.q, route.query.document_id, route.query.page], runSearc
           placeholder="例如：磁悬浮振动"
           aria-describedby="query-help"
         />
-        <small id="query-help">使用后端字面匹配，不调用远程模型。</small>
+        <small id="query-help">使用后端连续字面匹配；多个词不会自动拆分，不调用远程模型。</small>
       </div>
 
       <button class="primary-button" type="submit" :disabled="isLoading">
@@ -170,8 +170,10 @@ watch(() => [route.query.q, route.query.document_id, route.query.page], runSearc
     </div>
 
     <div v-else-if="state === 'empty'" class="state-card state-card--quiet">
-      <strong>没有找到匹配的文本块</strong>
-      <p>可以缩短关键词、检查文档是否已经解析完成，或切换到全部文档范围。</p>
+      <strong>后端检索已完成，没有找到匹配的文本块</strong>
+      <p>
+        当前按连续字面片段匹配。可以缩短关键词（例如把“磁悬浮振动”改为“振动”）、检查文档是否已经解析完成，或切换到全部文档范围。
+      </p>
     </div>
 
     <div v-else-if="state === 'success' && resultPage" class="search-results">
@@ -185,7 +187,7 @@ watch(() => [route.query.q, route.query.document_id, route.query.page], runSearc
 
       <ol>
         <li v-for="hit in resultPage.results" :key="hit.chunkId">
-          <KeywordSearchResultCard :hit="hit" />
+          <KeywordSearchResultCard :hit="hit" :query="resultPage.query" />
         </li>
       </ol>
 

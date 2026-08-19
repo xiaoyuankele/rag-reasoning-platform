@@ -4,7 +4,8 @@
 > 同用户内容去重前端切片；F2-B 已实现详情、解析任务创建与轮询、chunks 分页和删除二次确认，
 > 批量导入解析队列也已复用现有单文档接口完成；自动化门禁已通过，真实上传、解析和删除已由用户验证正常，
 > 真实多文件批次、chunks 分页和刷新恢复仍待专项验收。
-> F2-C 第一阶段“单篇 / 全部文档”共享检索范围选择器已经接入，F3 关键词检索不再要求手填文档 ID；
+> F2-C 第一阶段“单篇 / 全部文档”共享检索范围选择器已经接入，F3 关键词检索不再要求手填文档 ID，
+> 并已完成真实后端结果联调、零命中辨识和文本块关键词安全高亮；
 > P6 前端第一批认证基础、公共页面和受保护应用外壳已经实现，并通过真实 Go 后端、PostgreSQL、Mailpit、
 > Vite `/api` 代理和浏览器表单纵向联调。
 > Vue 3 + TypeScript + Vite、
@@ -29,8 +30,12 @@
 8. [F2-B 文档操作闭环](architecture/f2b-document-lifecycle.md)；
 9. [F2 批量导入与解析队列](architecture/f2-batch-import-queue.md)；
 10. [F2-C 单篇 / 全部文档检索范围选择器](architecture/f2c-document-scope-picker.md)；
-11. [用户可选向量化与文档编辑前端交接](architecture/document-vectorization-editing-handoff.md)；
-12. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
+11. [F3 关键词检索结果高亮](architecture/f3-keyword-result-highlighting.md)；
+12. [F3 多关键词与位置范围检索设计](architecture/f3-multi-keyword-search-design.md)；
+13. [F3 检索对 Chunk 质量的依赖](architecture/f3-chunk-quality-dependency.md)；
+14. [F3 文档解析器替换与并行评估](architecture/f3-document-parser-package-evaluation.md)；
+15. [用户可选向量化与文档编辑前端交接](architecture/document-vectorization-editing-handoff.md)；
+16. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
 
 ## 文档边界
 

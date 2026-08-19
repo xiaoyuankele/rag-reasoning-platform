@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { KeywordSearchHit } from '../../../entities/search-result/model/search-result'
+import { highlightKeyword } from '../model/highlight-keyword'
 
 const props = defineProps<{
   hit: KeywordSearchHit
+  query: string
 }>()
 
 const documentLabel = computed(() => props.hit.title?.trim() || props.hit.originalName)
+const contentSegments = computed(() => highlightKeyword(props.hit.content, props.query))
 
 const pageLabel = computed(() => {
   const { pageStart, pageEnd } = props.hit
@@ -27,7 +30,12 @@ const pageLabel = computed(() => {
       <span class="mime-badge">{{ hit.mimeType }}</span>
     </header>
 
-    <p class="result-content">{{ hit.content }}</p>
+    <p class="result-content">
+      <template v-for="(segment, index) in contentSegments" :key="index">
+        <mark v-if="segment.highlighted">{{ segment.text }}</mark>
+        <template v-else>{{ segment.text }}</template>
+      </template>
+    </p>
 
     <footer>
       <span>{{ pageLabel }}</span>
@@ -79,6 +87,15 @@ header p {
   font-size: 14px;
   line-height: 1.8;
   white-space: pre-wrap;
+}
+
+mark {
+  padding: 1px 2px;
+  border-radius: 3px;
+  background: var(--color-highlight);
+  color: inherit;
+  font-weight: 650;
+  box-decoration-break: clone;
 }
 
 footer {
