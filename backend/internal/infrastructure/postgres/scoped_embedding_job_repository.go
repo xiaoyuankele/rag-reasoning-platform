@@ -19,8 +19,9 @@ type ScopedEmbeddingJobRepository struct {
 	pool *pgxpool.Pool
 }
 
-var _ embeddingdomain.ScopedJobCreator = (*ScopedEmbeddingJobRepository)(nil)
+var _ embeddingdomain.ScopedJobRequester = (*ScopedEmbeddingJobRepository)(nil)
 var _ embeddingdomain.ScopedJobFinder = (*ScopedEmbeddingJobRepository)(nil)
+var _ embeddingdomain.ScopedJobCanceler = (*ScopedEmbeddingJobRepository)(nil)
 
 // NewScopedEmbeddingJobRepository 创建带文档所有者边界的向量任务仓储。
 func NewScopedEmbeddingJobRepository(
@@ -29,29 +30,126 @@ func NewScopedEmbeddingJobRepository(
 	return &ScopedEmbeddingJobRepository{pool: pool}
 }
 
-// CreateEmbeddingJob 只在文档属于当前 OwnerScope 时创建 queued 任务。
-// 文档的 ready 状态由 Application 校验；本方法负责归属与写入的原子边界。
-func (r *ScopedEmbeddingJobRepository) CreateEmbeddingJob(
+// RequestEmbeddingJob 原子保存当前用户的向量化意图。
+//
+// 事务先锁定 document 行，再根据最新状态决定初始任务状态：ready 对应 queued，
+// 其余合法状态对应 waiting_document。解析完成事务也锁定同一 document 行，
+// 因而并发发生时后执行的一方一定能观察到前一方已经提交的状态。
+func (r *ScopedEmbeddingJobRepository) RequestEmbeddingJob(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	documentID int64,
 	modelName string,
 	dimensions int,
-) (embeddingdomain.Job, error) {
+) (embeddingdomain.JobRequestResult, error) {
 	if !scope.IsValid() {
-		return embeddingdomain.Job{}, accessdomain.ErrInvalidOwnerScope
+		return embeddingdomain.JobRequestResult{}, accessdomain.ErrInvalidOwnerScope
 	}
 
-	const query = `
-		INSERT INTO embedding_jobs (
-			document_id,
-			model_name,
-			dimensions
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+			"begin scoped embedding request transaction: %w",
+			err,
 		)
-		SELECT id, $3, $4
+	}
+	defer func() {
+		_ = transaction.Rollback(context.Background())
+	}()
+
+	const lockDocumentQuery = `
+		SELECT status
 		FROM documents
 		WHERE id = $1
 		  AND owner_user_id = $2
+		FOR UPDATE
+	`
+
+	var documentStatus documentdomain.Status
+	err = transaction.QueryRow(
+		ctx,
+		lockDocumentQuery,
+		documentID,
+		scope.OwnerUserID(),
+	).Scan(&documentStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return embeddingdomain.JobRequestResult{}, documentdomain.ErrNotFound
+	}
+	if err != nil {
+		return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+			"lock document before requesting embedding job: %w",
+			err,
+		)
+	}
+	if !documentStatus.IsValid() {
+		return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+			"request embedding job for invalid document status %q",
+			documentStatus,
+		)
+	}
+
+	// 同一个 document 行锁让并发申请按顺序执行。先返回已经存在的活动任务，
+	// 可以让重复点击成为幂等查询，而不是向 Handler 抛出唯一约束冲突。
+	findActiveJob := func() (embeddingdomain.Job, error) {
+		const query = `
+			SELECT
+				id,
+				document_id,
+				model_name,
+				dimensions,
+				status,
+				attempt_count,
+				error_message,
+				next_attempt_at,
+				prompt_tokens,
+				total_tokens,
+				created_at,
+				updated_at,
+				started_at,
+				completed_at
+			FROM embedding_jobs
+			WHERE document_id = $1
+			  AND status IN ('waiting_document', 'queued', 'processing')
+			ORDER BY id DESC
+			LIMIT 1
+		`
+		return scanEmbeddingJob(transaction.QueryRow(ctx, query, documentID))
+	}
+
+	existingJob, err := findActiveJob()
+	if err == nil {
+		if err := transaction.Commit(ctx); err != nil {
+			return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+				"commit existing scoped embedding request: %w",
+				err,
+			)
+		}
+		return embeddingdomain.JobRequestResult{
+			Job:     existingJob,
+			Created: false,
+		}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+			"find active scoped embedding job: %w",
+			err,
+		)
+	}
+
+	initialStatus := embeddingdomain.JobStatusWaitingDocument
+	if documentStatus == documentdomain.StatusReady {
+		initialStatus = embeddingdomain.JobStatusQueued
+	}
+
+	const insertJobQuery = `
+		INSERT INTO embedding_jobs (
+			document_id,
+			model_name,
+			dimensions,
+			status
+		)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT DO NOTHING
 		RETURNING
 			id,
 			document_id,
@@ -70,28 +168,55 @@ func (r *ScopedEmbeddingJobRepository) CreateEmbeddingJob(
 	`
 
 	createdJob, err := scanEmbeddingJob(
-		r.pool.QueryRow(
+		transaction.QueryRow(
 			ctx,
-			query,
+			insertJobQuery,
 			documentID,
-			scope.OwnerUserID(),
 			modelName,
 			dimensions,
+			initialStatus,
 		),
 	)
-	if errors.Is(err, pgx.ErrNoRows) || isForeignKeyViolation(err) {
-		return embeddingdomain.Job{}, documentdomain.ErrNotFound
+	if errors.Is(err, pgx.ErrNoRows) {
+		// 唯一索引仍是最终并发保护。若有其他系统级写入者没有遵循
+		// document 行锁，冲突后也返回它创建的活动任务。
+		existingJob, err = findActiveJob()
+		if err != nil {
+			return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+				"find concurrently created embedding job: %w",
+				err,
+			)
+		}
+		if err := transaction.Commit(ctx); err != nil {
+			return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+				"commit concurrent scoped embedding request: %w",
+				err,
+			)
+		}
+		return embeddingdomain.JobRequestResult{
+			Job:     existingJob,
+			Created: false,
+		}, nil
 	}
-	if isConstraintViolation(err, "uq_embedding_jobs_active") {
-		return embeddingdomain.Job{}, embeddingdomain.ErrActiveJobExists
+	if isForeignKeyViolation(err) {
+		return embeddingdomain.JobRequestResult{}, documentdomain.ErrNotFound
 	}
 	if err != nil {
-		return embeddingdomain.Job{}, fmt.Errorf(
-			"create scoped embedding job: %w",
+		return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+			"request scoped embedding job: %w",
 			err,
 		)
 	}
-	return createdJob, nil
+	if err := transaction.Commit(ctx); err != nil {
+		return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+			"commit scoped embedding request: %w",
+			err,
+		)
+	}
+	return embeddingdomain.JobRequestResult{
+		Job:     createdJob,
+		Created: true,
+	}, nil
 }
 
 // GetEmbeddingJobByID 通过任务与文档 JOIN 强制校验任务所属用户。
@@ -140,4 +265,154 @@ func (r *ScopedEmbeddingJobRepository) GetEmbeddingJobByID(
 		)
 	}
 	return foundJob, nil
+}
+
+// CancelEmbeddingJob 在所有者边界内原子取消 waiting_document 或 queued 任务。
+//
+// 事务先锁 document，再锁 embedding_job，与申请任务时的加锁顺序一致。
+// 这样 Worker 领取任务、重复申请和取消并发发生时，最终只会提交一个合法状态。
+func (r *ScopedEmbeddingJobRepository) CancelEmbeddingJob(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	jobID int64,
+) (embeddingdomain.Job, error) {
+	if !scope.IsValid() {
+		return embeddingdomain.Job{}, accessdomain.ErrInvalidOwnerScope
+	}
+
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf("begin scoped embedding cancellation: %w", err)
+	}
+	defer func() {
+		_ = transaction.Rollback(context.Background())
+	}()
+
+	const findDocumentQuery = `
+		SELECT job.document_id
+		FROM embedding_jobs AS job
+		JOIN documents AS source_document
+		  ON source_document.id = job.document_id
+		WHERE job.id = $1
+		  AND source_document.owner_user_id = $2
+	`
+	var documentID int64
+	err = transaction.QueryRow(
+		ctx,
+		findDocumentQuery,
+		jobID,
+		scope.OwnerUserID(),
+	).Scan(&documentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return embeddingdomain.Job{}, embeddingdomain.ErrJobNotFound
+	}
+	if err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf("find scoped embedding job before cancellation: %w", err)
+	}
+
+	const lockDocumentQuery = `
+		SELECT id
+		FROM documents
+		WHERE id = $1
+		  AND owner_user_id = $2
+		FOR UPDATE
+	`
+	var lockedDocumentID int64
+	err = transaction.QueryRow(
+		ctx,
+		lockDocumentQuery,
+		documentID,
+		scope.OwnerUserID(),
+	).Scan(&lockedDocumentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return embeddingdomain.Job{}, embeddingdomain.ErrJobNotFound
+	}
+	if err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf("lock document before embedding cancellation: %w", err)
+	}
+
+	const lockJobQuery = `
+		SELECT
+			id,
+			document_id,
+			model_name,
+			dimensions,
+			status,
+			attempt_count,
+			error_message,
+			next_attempt_at,
+			prompt_tokens,
+			total_tokens,
+			created_at,
+			updated_at,
+			started_at,
+			completed_at
+		FROM embedding_jobs
+		WHERE id = $1
+		  AND document_id = $2
+		FOR UPDATE
+	`
+	lockedJob, err := scanEmbeddingJob(
+		transaction.QueryRow(ctx, lockJobQuery, jobID, lockedDocumentID),
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return embeddingdomain.Job{}, embeddingdomain.ErrJobNotFound
+	}
+	if err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf("lock embedding job before cancellation: %w", err)
+	}
+
+	switch lockedJob.Status {
+	case embeddingdomain.JobStatusCanceled:
+		if err := transaction.Commit(ctx); err != nil {
+			return embeddingdomain.Job{}, fmt.Errorf("commit repeated embedding cancellation: %w", err)
+		}
+		return lockedJob, nil
+	case embeddingdomain.JobStatusProcessing:
+		return embeddingdomain.Job{}, embeddingdomain.ErrJobProcessingCannotCancel
+	case embeddingdomain.JobStatusSucceeded, embeddingdomain.JobStatusFailed:
+		return embeddingdomain.Job{}, embeddingdomain.ErrJobTerminalCannotCancel
+	case embeddingdomain.JobStatusWaitingDocument, embeddingdomain.JobStatusQueued:
+		// 继续执行下面的状态更新。
+	default:
+		return embeddingdomain.Job{}, fmt.Errorf("cancel embedding job with invalid status %q", lockedJob.Status)
+	}
+
+	const cancelJobQuery = `
+		UPDATE embedding_jobs
+		SET
+			status = 'canceled',
+			error_message = NULL,
+			updated_at = CURRENT_TIMESTAMP,
+			started_at = NULL,
+			completed_at = CURRENT_TIMESTAMP,
+			prompt_tokens = NULL,
+			total_tokens = NULL
+		WHERE id = $1
+		RETURNING
+			id,
+			document_id,
+			model_name,
+			dimensions,
+			status,
+			attempt_count,
+			error_message,
+			next_attempt_at,
+			prompt_tokens,
+			total_tokens,
+			created_at,
+			updated_at,
+			started_at,
+			completed_at
+	`
+	canceledJob, err := scanEmbeddingJob(
+		transaction.QueryRow(ctx, cancelJobQuery, jobID),
+	)
+	if err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf("cancel scoped embedding job: %w", err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf("commit scoped embedding cancellation: %w", err)
+	}
+	return canceledJob, nil
 }

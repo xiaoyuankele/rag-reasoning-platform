@@ -18,7 +18,7 @@ import (
 )
 
 type fakeEmbeddingQueueService struct {
-	queueFunc  func(context.Context, accessdomain.OwnerScope, int64) (embeddingdomain.Job, error)
+	queueFunc  func(context.Context, accessdomain.OwnerScope, int64) (embeddingdomain.JobRequestResult, error)
 	queueCalls int
 }
 
@@ -26,7 +26,7 @@ func (f *fakeEmbeddingQueueService) Queue(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	documentID int64,
-) (embeddingdomain.Job, error) {
+) (embeddingdomain.JobRequestResult, error) {
 	f.queueCalls++
 	return f.queueFunc(ctx, scope, documentID)
 }
@@ -55,9 +55,9 @@ func TestDocumentEmbeddingHandlerRejectsInvalidID(t *testing.T) {
 					context.Context,
 					accessdomain.OwnerScope,
 					int64,
-				) (embeddingdomain.Job, error) {
+				) (embeddingdomain.JobRequestResult, error) {
 					t.Fatal("Queue() must not be called for invalid ID")
-					return embeddingdomain.Job{}, nil
+					return embeddingdomain.JobRequestResult{}, nil
 				},
 			}
 			router := newTestEmbeddingRouter(service)
@@ -99,18 +99,6 @@ func TestDocumentEmbeddingHandlerMapsServiceErrors(t *testing.T) {
 			message:    "document not found",
 		},
 		{
-			name:       "document not ready",
-			serviceErr: embeddingapplication.ErrDocumentNotReady,
-			statusCode: http.StatusConflict,
-			message:    "document is not ready for embedding",
-		},
-		{
-			name:       "active embedding job",
-			serviceErr: embeddingdomain.ErrActiveJobExists,
-			statusCode: http.StatusConflict,
-			message:    "document embedding is already queued",
-		},
-		{
 			name:       "internal error",
 			serviceErr: errors.New("database unavailable"),
 			statusCode: http.StatusInternalServerError,
@@ -125,14 +113,14 @@ func TestDocumentEmbeddingHandlerMapsServiceErrors(t *testing.T) {
 					_ context.Context,
 					scope accessdomain.OwnerScope,
 					documentID int64,
-				) (embeddingdomain.Job, error) {
+				) (embeddingdomain.JobRequestResult, error) {
 					if scope.OwnerUserID() != testAPIOwnerUserID {
 						t.Fatalf("Queue() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
 					}
 					if documentID != 7 {
 						t.Fatalf("Queue() documentID = %d, want 7", documentID)
 					}
-					return embeddingdomain.Job{}, testCase.serviceErr
+					return embeddingdomain.JobRequestResult{}, testCase.serviceErr
 				},
 			}
 			router := newTestEmbeddingRouter(service)
@@ -158,13 +146,13 @@ func TestDocumentEmbeddingHandlerMapsServiceErrors(t *testing.T) {
 	}
 }
 
-func TestDocumentEmbeddingHandlerReturnsAcceptedJob(t *testing.T) {
+func TestDocumentEmbeddingHandlerReturnsRequestedJob(t *testing.T) {
 	expectedJob := embeddingdomain.Job{
 		ID:           17,
 		DocumentID:   7,
 		ModelName:    "text-embedding-3-small",
 		Dimensions:   1536,
-		Status:       embeddingdomain.JobStatusQueued,
+		Status:       embeddingdomain.JobStatusWaitingDocument,
 		AttemptCount: 0,
 		CreatedAt: time.Date(
 			2026,
@@ -177,53 +165,49 @@ func TestDocumentEmbeddingHandlerReturnsAcceptedJob(t *testing.T) {
 			time.UTC,
 		),
 	}
-	service := &fakeEmbeddingQueueService{
-		queueFunc: func(
-			_ context.Context,
-			scope accessdomain.OwnerScope,
-			documentID int64,
-		) (embeddingdomain.Job, error) {
-			if scope.OwnerUserID() != testAPIOwnerUserID {
-				t.Fatalf("Queue() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+	testCases := []struct {
+		name       string
+		created    bool
+		statusCode int
+	}{
+		{name: "new job", created: true, statusCode: http.StatusAccepted},
+		{name: "existing active job", created: false, statusCode: http.StatusOK},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &fakeEmbeddingQueueService{
+				queueFunc: func(
+					_ context.Context,
+					scope accessdomain.OwnerScope,
+					documentID int64,
+				) (embeddingdomain.JobRequestResult, error) {
+					if scope.OwnerUserID() != testAPIOwnerUserID {
+						t.Fatalf("Queue() scope owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+					}
+					if documentID != expectedJob.DocumentID {
+						t.Fatalf("Queue() documentID = %d, want %d", documentID, expectedJob.DocumentID)
+					}
+					return embeddingdomain.JobRequestResult{Job: expectedJob, Created: testCase.created}, nil
+				},
 			}
-			if documentID != expectedJob.DocumentID {
-				t.Fatalf(
-					"Queue() documentID = %d, want %d",
-					documentID,
-					expectedJob.DocumentID,
-				)
+			router := newTestEmbeddingRouter(service)
+			request := httptest.NewRequest(http.MethodPost, "/documents/7/embeddings", nil)
+			response := httptest.NewRecorder()
+
+			router.ServeHTTP(response, request)
+
+			if response.Code != testCase.statusCode {
+				t.Fatalf("status = %d, want %d", response.Code, testCase.statusCode)
 			}
-			return expectedJob, nil
-		},
-	}
-	router := newTestEmbeddingRouter(service)
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/documents/7/embeddings",
-		nil,
-	)
-	response := httptest.NewRecorder()
-
-	router.ServeHTTP(response, request)
-
-	if response.Code != http.StatusAccepted {
-		t.Fatalf(
-			"status = %d, want %d",
-			response.Code,
-			http.StatusAccepted,
-		)
-	}
-
-	var actualResponse embeddingJobResponse
-	if err := json.Unmarshal(response.Body.Bytes(), &actualResponse); err != nil {
-		t.Fatalf("decode response JSON: %v", err)
-	}
-	expectedResponse := newEmbeddingJobResponse(expectedJob)
-	if actualResponse != expectedResponse {
-		t.Fatalf(
-			"response = %+v, want %+v",
-			actualResponse,
-			expectedResponse,
-		)
+			var actualResponse embeddingJobResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &actualResponse); err != nil {
+				t.Fatalf("decode response JSON: %v", err)
+			}
+			expectedResponse := newEmbeddingJobResponse(expectedJob)
+			if actualResponse != expectedResponse {
+				t.Fatalf("response = %+v, want %+v", actualResponse, expectedResponse)
+			}
+		})
 	}
 }

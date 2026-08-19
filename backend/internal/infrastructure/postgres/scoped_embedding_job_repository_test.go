@@ -60,8 +60,15 @@ func TestScopedEmbeddingJobRepositoryEnforcesOwnerBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create owner B document: %v", err)
 	}
+	if _, err := pool.Exec(
+		ctx,
+		"UPDATE documents SET status = 'ready' WHERE id = $1",
+		ownerADocument.ID,
+	); err != nil {
+		t.Fatalf("mark owner A document ready: %v", err)
+	}
 
-	createdJob, err := jobs.CreateEmbeddingJob(
+	createdResult, err := jobs.RequestEmbeddingJob(
 		ctx,
 		ownerA,
 		ownerADocument.ID,
@@ -69,29 +76,40 @@ func TestScopedEmbeddingJobRepositoryEnforcesOwnerBoundary(t *testing.T) {
 		1536,
 	)
 	if err != nil {
-		t.Fatalf("CreateEmbeddingJob(owner A) error = %v", err)
+		t.Fatalf("RequestEmbeddingJob(owner A) error = %v", err)
 	}
+	if !createdResult.Created {
+		t.Fatal("RequestEmbeddingJob(owner A) Created = false, want true")
+	}
+	createdJob := createdResult.Job
 	if createdJob.DocumentID != ownerADocument.ID ||
 		createdJob.ModelName != "test-embedding-model" ||
 		createdJob.Dimensions != 1536 ||
 		createdJob.Status != embeddingdomain.JobStatusQueued {
-		t.Fatalf("CreateEmbeddingJob(owner A) = %+v, want configured queued job", createdJob)
+		t.Fatalf("RequestEmbeddingJob(owner A) = %+v, want configured queued job", createdJob)
 	}
 
-	if _, err := jobs.CreateEmbeddingJob(
+	if _, err := jobs.RequestEmbeddingJob(
 		ctx, ownerB, ownerADocument.ID, "test-embedding-model", 1536,
 	); !errors.Is(err, documentdomain.ErrNotFound) {
-		t.Fatalf("CreateEmbeddingJob(owner B, owner A document) error = %v, want ErrNotFound", err)
+		t.Fatalf("RequestEmbeddingJob(owner B, owner A document) error = %v, want ErrNotFound", err)
 	}
-	if _, err := jobs.CreateEmbeddingJob(
+	if _, err := jobs.RequestEmbeddingJob(
 		ctx, ownerA, ownerBDocument.ID, "test-embedding-model", 1536,
 	); !errors.Is(err, documentdomain.ErrNotFound) {
-		t.Fatalf("CreateEmbeddingJob(owner A, owner B document) error = %v, want ErrNotFound", err)
+		t.Fatalf("RequestEmbeddingJob(owner A, owner B document) error = %v, want ErrNotFound", err)
 	}
-	if _, err := jobs.CreateEmbeddingJob(
+	duplicateResult, err := jobs.RequestEmbeddingJob(
 		ctx, ownerA, ownerADocument.ID, "another-model", 768,
-	); !errors.Is(err, embeddingdomain.ErrActiveJobExists) {
-		t.Fatalf("CreateEmbeddingJob(duplicate) error = %v, want ErrActiveJobExists", err)
+	)
+	if err != nil {
+		t.Fatalf("RequestEmbeddingJob(duplicate) error = %v, want nil", err)
+	}
+	if duplicateResult.Created {
+		t.Fatal("RequestEmbeddingJob(duplicate) Created = true, want false")
+	}
+	if duplicateResult.Job.ID != createdJob.ID {
+		t.Fatalf("RequestEmbeddingJob(duplicate) job ID = %d, want %d", duplicateResult.Job.ID, createdJob.ID)
 	}
 
 	foundJob, err := jobs.GetEmbeddingJobByID(ctx, ownerA, createdJob.ID)
@@ -114,10 +132,10 @@ func TestScopedEmbeddingJobRepositoryRejectsInvalidScope(t *testing.T) {
 	ctx := context.Background()
 	repository := postgresrepository.NewScopedEmbeddingJobRepository(nil)
 
-	if _, err := repository.CreateEmbeddingJob(
+	if _, err := repository.RequestEmbeddingJob(
 		ctx, invalidScope, 1, "test-model", 1536,
 	); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
-		t.Fatalf("CreateEmbeddingJob(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
+		t.Fatalf("RequestEmbeddingJob(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
 	}
 	if _, err := repository.GetEmbeddingJobByID(
 		ctx,

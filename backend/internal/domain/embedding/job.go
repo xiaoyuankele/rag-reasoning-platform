@@ -22,25 +22,37 @@ var (
 
 	// ErrJobNotProcessing 表示任务不存在或已经不处于 processing，不能被当前 Worker 收尾。
 	ErrJobNotProcessing = errors.New("embedding job is not processing")
+
+	// ErrJobProcessingCannotCancel 表示任务已经被 Worker 领取，不能再由用户取消。
+	ErrJobProcessingCannotCancel = errors.New("processing embedding job cannot be canceled")
+
+	// ErrJobTerminalCannotCancel 表示成功或失败的历史任务已经结束，不能取消。
+	ErrJobTerminalCannotCancel = errors.New("terminal embedding job cannot be canceled")
 )
 
 // JobStatus 是向量任务的生命周期状态。
 type JobStatus string
 
 const (
-	JobStatusQueued     JobStatus = "queued"
-	JobStatusProcessing JobStatus = "processing"
-	JobStatusSucceeded  JobStatus = "succeeded"
-	JobStatusFailed     JobStatus = "failed"
+	// JobStatusWaitingDocument 表示用户已经申请向量化，但文档文本块尚未就绪。
+	// 解析成功事务会把该状态原子转换为 queued，Worker 不会提前领取它。
+	JobStatusWaitingDocument JobStatus = "waiting_document"
+	JobStatusQueued          JobStatus = "queued"
+	JobStatusProcessing      JobStatus = "processing"
+	JobStatusSucceeded       JobStatus = "succeeded"
+	JobStatusFailed          JobStatus = "failed"
+	JobStatusCanceled        JobStatus = "canceled"
 )
 
 // IsValid 判断任务状态是否由当前系统支持。
 func (s JobStatus) IsValid() bool {
 	switch s {
-	case JobStatusQueued,
+	case JobStatusWaitingDocument,
+		JobStatusQueued,
 		JobStatusProcessing,
 		JobStatusSucceeded,
-		JobStatusFailed:
+		JobStatusFailed,
+		JobStatusCanceled:
 		return true
 	default:
 		return false
@@ -68,6 +80,13 @@ type Job struct {
 	CompletedAt   *time.Time
 }
 
+// JobRequestResult 表示一次向量化申请的持久化结果。
+// Created=true 表示本次创建了新任务；false 表示返回同一文档已有的活动任务。
+type JobRequestResult struct {
+	Job     Job
+	Created bool
+}
+
 // JobCreator 定义创建向量任务所需的最小持久化能力。
 type JobCreator interface {
 	CreateEmbeddingJob(
@@ -86,22 +105,36 @@ type JobFinder interface {
 	GetEmbeddingJobByID(ctx context.Context, jobID int64) (Job, error)
 }
 
-// ScopedJobCreator 定义只能为当前所有者的文档创建向量任务的能力。
-// 文档不存在和属于其他用户都必须返回 document.ErrNotFound。
-type ScopedJobCreator interface {
-	CreateEmbeddingJob(
+// ScopedJobRequester 定义为当前所有者的文档持久化向量化意图的能力。
+//
+// 实现必须与文档状态建立原子边界：ready 文档创建 queued 任务，尚未完成
+// 文本处理的文档创建 waiting_document 任务。文档不存在和属于其他用户
+// 都必须返回 document.ErrNotFound。
+type ScopedJobRequester interface {
+	RequestEmbeddingJob(
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
 		documentID int64,
 		modelName string,
 		dimensions int,
-	) (Job, error)
+	) (JobRequestResult, error)
 }
 
 // ScopedJobFinder 定义只能查询当前所有者文档所关联向量任务的能力。
 // 任务不存在和属于其他用户都必须返回 ErrJobNotFound。
 type ScopedJobFinder interface {
 	GetEmbeddingJobByID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		jobID int64,
+	) (Job, error)
+}
+
+// ScopedJobCanceler 定义在所有者边界内取消向量任务的能力。
+// waiting_document 和 queued 可以取消；canceled 重复取消保持幂等；
+// processing、succeeded 和 failed 必须返回对应的领域错误。
+type ScopedJobCanceler interface {
+	CancelEmbeddingJob(
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
 		jobID int64,

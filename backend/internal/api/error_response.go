@@ -12,6 +12,11 @@ import (
 const (
 	errorCodeInvalidDocumentID              = "invalid_document_id"
 	errorCodeDocumentNotFound               = "document_not_found"
+	errorCodeInvalidEmbeddingJobID          = "invalid_embedding_job_id"
+	errorCodeEmbeddingJobNotFound           = "embedding_job_not_found"
+	errorCodeEmbeddingJobProcessing         = "embedding_job_processing"
+	errorCodeEmbeddingJobTerminal           = "embedding_job_terminal"
+	errorCodeInvalidEmbeddingBatch          = "invalid_embedding_batch"
 	errorCodeInvalidProcessingJobID         = "invalid_processing_job_id"
 	errorCodeProcessingJobNotFound          = "processing_job_not_found"
 	errorCodeInvalidVerificationRequest     = "invalid_verification_request"

@@ -13,6 +13,7 @@ import (
 
 	"rag-reasoning-platform/backend/internal/config"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
+	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	postgresrepository "rag-reasoning-platform/backend/internal/infrastructure/postgres"
 	"rag-reasoning-platform/backend/migrations"
@@ -89,6 +90,28 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			createdDocument.ID,
 		)
 
+		// 用户可以在解析尚未结束时先表达“完成后向量化”的意图。
+		// 此时任务必须等待，不能被 Embedding Worker 提前领取。
+		embeddingJobs := postgresrepository.NewScopedEmbeddingJobRepository(pool)
+		waitingEmbeddingResult, err := embeddingJobs.RequestEmbeddingJob(
+			ctx,
+			documentRepository.scope,
+			createdDocument.ID,
+			"test-embedding-model",
+			8,
+		)
+		if err != nil {
+			t.Fatalf("request waiting embedding job: %v", err)
+		}
+		waitingEmbeddingJob := waitingEmbeddingResult.Job
+		if waitingEmbeddingJob.Status != embeddingdomain.JobStatusWaitingDocument {
+			t.Fatalf(
+				"embedding job status before parsing success = %q, want %q",
+				waitingEmbeddingJob.Status,
+				embeddingdomain.JobStatusWaitingDocument,
+			)
+		}
+
 		if err := jobRepository.MarkProcessingJobSucceeded(
 			ctx,
 			createdJob.ID,
@@ -112,7 +135,23 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			&detectedTitle,
 		)
 
-		err := jobRepository.MarkProcessingJobSucceeded(
+		activatedEmbeddingJob, err := embeddingJobs.GetEmbeddingJobByID(
+			ctx,
+			documentRepository.scope,
+			waitingEmbeddingJob.ID,
+		)
+		if err != nil {
+			t.Fatalf("get activated embedding job: %v", err)
+		}
+		if activatedEmbeddingJob.Status != embeddingdomain.JobStatusQueued {
+			t.Fatalf(
+				"embedding job status after parsing success = %q, want %q",
+				activatedEmbeddingJob.Status,
+				embeddingdomain.JobStatusQueued,
+			)
+		}
+
+		err = jobRepository.MarkProcessingJobSucceeded(
 			ctx,
 			createdJob.ID,
 			documentdomain.ProcessingCompletion{
@@ -190,6 +229,26 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			createdDocument.ID,
 		)
 
+		embeddingJobs := postgresrepository.NewScopedEmbeddingJobRepository(pool)
+		waitingEmbeddingResult, err := embeddingJobs.RequestEmbeddingJob(
+			ctx,
+			documentRepository.scope,
+			createdDocument.ID,
+			"test-embedding-model",
+			8,
+		)
+		if err != nil {
+			t.Fatalf("request waiting embedding job: %v", err)
+		}
+		waitingEmbeddingJob := waitingEmbeddingResult.Job
+		if waitingEmbeddingJob.Status != embeddingdomain.JobStatusWaitingDocument {
+			t.Fatalf(
+				"embedding job status before parsing failure = %q, want %q",
+				waitingEmbeddingJob.Status,
+				embeddingdomain.JobStatusWaitingDocument,
+			)
+		}
+
 		safeErrorMessage := "document processing failed"
 		if err := jobRepository.MarkProcessingJobFailed(
 			ctx,
@@ -212,7 +271,23 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			nil,
 		)
 
-		err := jobRepository.MarkProcessingJobFailed(
+		stillWaitingJob, err := embeddingJobs.GetEmbeddingJobByID(
+			ctx,
+			documentRepository.scope,
+			waitingEmbeddingJob.ID,
+		)
+		if err != nil {
+			t.Fatalf("get embedding job after parsing failure: %v", err)
+		}
+		if stillWaitingJob.Status != embeddingdomain.JobStatusWaitingDocument {
+			t.Fatalf(
+				"embedding job status after parsing failure = %q, want %q",
+				stillWaitingJob.Status,
+				embeddingdomain.JobStatusWaitingDocument,
+			)
+		}
+
+		err = jobRepository.MarkProcessingJobFailed(
 			ctx,
 			createdJob.ID,
 			safeErrorMessage,

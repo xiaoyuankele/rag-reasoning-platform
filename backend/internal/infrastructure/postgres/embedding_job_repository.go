@@ -58,7 +58,7 @@ func (r *EmbeddingJobRepository) CreateEmbeddingJob(
 			completed_at
 	`
 
-	createdJob, err := scanEmbeddingJob( //没有写注释
+	createdJob, err := scanEmbeddingJob(
 		r.pool.QueryRow(
 			ctx,
 			query,

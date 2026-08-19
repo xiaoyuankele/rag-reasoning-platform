@@ -291,12 +291,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		scopedProcessingJobRepository,
 	)
 	embeddingQueueService := embeddingapplication.NewQueueService(
-		scopedDocumentRepository,
 		scopedEmbeddingJobRepository,
 		embeddingConfig.ModelName,
 		embeddingConfig.Dimensions,
 	)
 	embeddingJobQueryService := embeddingapplication.NewJobQueryService(
+		scopedEmbeddingJobRepository,
+	)
+	embeddingJobCancelService := embeddingapplication.NewCancelService(
 		scopedEmbeddingJobRepository,
 	)
 	documentWorker := documentapplication.NewWorker(
@@ -570,8 +572,16 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentEmbeddingHandler := api.NewDocumentEmbeddingHandler(
 		embeddingQueueService,
 	)
+	documentEmbeddingBatchHandler := api.NewDocumentEmbeddingBatchHandler(
+		embeddingQueueService,
+		logger,
+	)
 	embeddingJobHandler := api.NewEmbeddingJobHandler(
 		embeddingJobQueryService,
+	)
+	embeddingJobCancelHandler := api.NewEmbeddingJobCancelHandler(
+		embeddingJobCancelService,
+		logger,
 	)
 	var semanticSearchHandler *api.SemanticSearchHandler
 	if embeddingConfig.SemanticSearchEnabled {
@@ -633,7 +643,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentProcessingHandler.RegisterRoutes(protectedRoutes)
 	processingJobHandler.RegisterRoutes(protectedRoutes)
 	documentEmbeddingHandler.RegisterRoutes(protectedRoutes)
+	documentEmbeddingBatchHandler.RegisterRoutes(protectedRoutes)
 	embeddingJobHandler.RegisterRoutes(protectedRoutes)
+	embeddingJobCancelHandler.RegisterRoutes(protectedRoutes)
 	documentSearchHandler.RegisterRoutes(protectedRoutes)
 	if semanticSearchHandler != nil {
 		semanticSearchHandler.RegisterRoutes(protectedRoutes)

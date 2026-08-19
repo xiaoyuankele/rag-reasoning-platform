@@ -387,6 +387,64 @@ func TestEmbeddingWorkerPreservesPartialUsageBeforeLaterBatchFailure(t *testing.
 	}
 }
 
+func TestEmbeddingWorkerFailsWholeDocumentWhenLaterChunkVectorIsInvalid(t *testing.T) {
+	job := embeddingdomain.Job{
+		ID: 29, DocumentID: 33, ModelName: "test-model", Dimensions: 2,
+		Status: embeddingdomain.JobStatusProcessing, AttemptCount: 1,
+	}
+	jobs := &fakeEmbeddingJobWorkerRepository{
+		claimFunc:   func(context.Context) (embeddingdomain.Job, error) { return job, nil },
+		succeedFunc: failOnEmbeddingSuccess(t),
+		requeueFunc: func(context.Context, int64, time.Time, string) error {
+			t.Fatal("invalid vector response must not be requeued")
+			return nil
+		},
+		failFunc: func(_ context.Context, jobID int64, errorMessage string) error {
+			if jobID != job.ID || errorMessage != safeEmbeddingFailureMessage {
+				t.Fatalf("MarkEmbeddingJobFailed() received job=%d message=%q", jobID, errorMessage)
+			}
+			return nil
+		},
+	}
+	chunks := &fakeEmbeddingChunkLister{
+		listFunc: func(context.Context, int64) ([]documentdomain.TextChunk, error) {
+			return []documentdomain.TextChunk{
+				{ID: 401, DocumentID: job.DocumentID, Index: 0, Content: "valid chunk"},
+				{ID: 402, DocumentID: job.DocumentID, Index: 1, Content: "invalid chunk"},
+			}, nil
+		},
+	}
+	embedder := &fakeEmbedder{
+		embedFunc: func(_ context.Context, request embeddingdomain.EmbedRequest) (embeddingdomain.EmbedResult, error) {
+			if request.Inputs[0] == "valid chunk" {
+				return embeddingdomain.EmbedResult{Vectors: [][]float32{{1, 1}}}, nil
+			}
+			// 第二个 chunk 返回错误维度。第一批结果仍只存在于内存，
+			// 不会调用成功收尾，也就不会向数据库提交任何新向量。
+			return embeddingdomain.EmbedResult{Vectors: [][]float32{{2}}}, nil
+		},
+	}
+	worker := newTestEmbeddingWorker(
+		t,
+		jobs,
+		chunks,
+		embedder,
+		1,
+		time.Now,
+		newRecordingJobEventObserver(),
+	)
+
+	handled, err := worker.RunOnce(context.Background())
+
+	if !handled {
+		t.Fatal("RunOnce() handled = false, want true")
+	}
+	if !errors.Is(err, embeddingdomain.ErrInvalidEmbeddingResponse) {
+		t.Fatalf("RunOnce() error = %v, want ErrInvalidEmbeddingResponse", err)
+	}
+	assertEmbeddingFinalizationCalls(t, jobs, 0, 0, 1)
+}
+
 func TestEmbeddingWorkerReportsUnfinishedWhenRequeueFails(t *testing.T) {
 	providerError := embeddingdomain.ErrEmbeddingRateLimited
 	requeueError := errors.New("database unavailable")

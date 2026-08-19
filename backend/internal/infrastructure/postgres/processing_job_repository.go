@@ -466,6 +466,31 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		)
 	}
 
+	// 文档解析成功后，在同一事务中激活用户预先保存的向量化意图。
+	// 失败收尾不能激活任务，因为此时还没有可供 Worker 使用的正式 chunks。
+	if documentStatus == document.StatusReady {
+		const activateWaitingEmbeddingJobsQuery = `
+			UPDATE embedding_jobs
+			SET
+				status = 'queued',
+				next_attempt_at = CURRENT_TIMESTAMP,
+				updated_at = CURRENT_TIMESTAMP,
+				error_message = NULL
+			WHERE document_id = $1
+			  AND status = 'waiting_document'
+		`
+		if _, err := transaction.Exec(
+			ctx,
+			activateWaitingEmbeddingJobsQuery,
+			documentID,
+		); err != nil {
+			return fmt.Errorf(
+				"activate waiting embedding jobs: %w",
+				err,
+			)
+		}
+	}
+
 	if err := transaction.Commit(ctx); err != nil {
 		return fmt.Errorf(
 			"commit finalized processing job: %w",

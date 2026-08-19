@@ -8,10 +8,12 @@ func TestJobStatusIsValid(t *testing.T) {
 		status JobStatus
 		valid  bool
 	}{
+		{name: "waiting document", status: JobStatusWaitingDocument, valid: true},
 		{name: "queued", status: JobStatusQueued, valid: true},
 		{name: "processing", status: JobStatusProcessing, valid: true},
 		{name: "succeeded", status: JobStatusSucceeded, valid: true},
 		{name: "failed", status: JobStatusFailed, valid: true},
+		{name: "canceled", status: JobStatusCanceled, valid: true},
 		{name: "empty", status: JobStatus(""), valid: false},
 		{name: "unknown", status: JobStatus("unknown"), valid: false},
 	}

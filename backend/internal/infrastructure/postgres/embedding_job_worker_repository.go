@@ -56,7 +56,7 @@ func (r *EmbeddingJobRepository) ClaimNextEmbeddingJob(
 	transaction, err := r.pool.Begin(ctx)
 	if err != nil {
 		return embeddingdomain.Job{}, fmt.Errorf(
-			"begin claim embeddin g job transaction: %w",
+			"begin claim embedding job transaction: %w",
 			err,
 		)
 	}

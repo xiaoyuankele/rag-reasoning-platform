@@ -21,10 +21,10 @@ type embeddingQueueService interface {
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
 		documentID int64,
-	) (embeddingdomain.Job, error)
+	) (embeddingdomain.JobRequestResult, error)
 }
 
-// DocumentEmbeddingHandler 负责手动创建文档向量任务的 HTTP 边界。
+// DocumentEmbeddingHandler 负责申请文档向量化的 HTTP 边界。
 type DocumentEmbeddingHandler struct {
 	service embeddingQueueService
 }
@@ -36,12 +36,12 @@ func NewDocumentEmbeddingHandler(
 	return &DocumentEmbeddingHandler{service: service}
 }
 
-// RegisterRoutes 注册手动创建向量任务的路由。
+// RegisterRoutes 注册申请向量化的路由。
 func (h *DocumentEmbeddingHandler) RegisterRoutes(router gin.IRoutes) {
 	router.POST("/documents/:id/embeddings", h.Queue)
 }
 
-// embeddingJobResponse 是创建任务后返回给客户端的 JSON 契约。
+// embeddingJobResponse 是保存向量化意图后返回给客户端的 JSON 契约。
 type embeddingJobResponse struct {
 	ID            int64                     `json:"id"`
 	DocumentID    int64                     `json:"document_id"`
@@ -94,7 +94,7 @@ func (h *DocumentEmbeddingHandler) Queue(c *gin.Context) {
 		return
 	}
 
-	job, err := h.service.Queue(c.Request.Context(), scope, documentID)
+	result, err := h.service.Queue(c.Request.Context(), scope, documentID)
 	if errors.Is(err, embeddingapplication.ErrInvalidDocumentID) {
 		c.JSON(http.StatusBadRequest, errorResponse{
 			Error: "document ID must be a positive integer",
@@ -107,18 +107,6 @@ func (h *DocumentEmbeddingHandler) Queue(c *gin.Context) {
 		})
 		return
 	}
-	if errors.Is(err, embeddingapplication.ErrDocumentNotReady) {
-		c.JSON(http.StatusConflict, errorResponse{
-			Error: "document is not ready for embedding",
-		})
-		return
-	}
-	if errors.Is(err, embeddingdomain.ErrActiveJobExists) {
-		c.JSON(http.StatusConflict, errorResponse{
-			Error: "document embedding is already queued",
-		})
-		return
-	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errorResponse{
 			Error: "internal server error",
@@ -126,5 +114,9 @@ func (h *DocumentEmbeddingHandler) Queue(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusAccepted, newEmbeddingJobResponse(job))
+	statusCode := http.StatusAccepted
+	if !result.Created {
+		statusCode = http.StatusOK
+	}
+	c.JSON(statusCode, newEmbeddingJobResponse(result.Job))
 }
