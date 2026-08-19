@@ -18,6 +18,7 @@
 - [多能力检索编排路线](architecture/search-orchestration-roadmap.md)
 - [概念词典与多语言检索设想](architecture/concept-retrieval-roadmap.md)
 - [P6 个人用户域后端交接](architecture/personal-user-backend-handoff.md)
+- [向量任务并发、版本与 Redis 演进交接](architecture/document-vectorization-concurrency-handoff.md)
 - [文档文本块浏览接口](architecture/document-chunk-browsing.md)
 - [运行路径与配置契约](development/runtime-path-configuration.md)
 - [日志与请求追踪规范](development/logging-observability.md)

@@ -1,0 +1,193 @@
+# 前端交接：用户可选向量化与文档编辑
+
+> 状态：2026-08-19 部分可实施。后端提交 `c4696bc` 已提供单份/批量向量申请、任务查询和取消；
+> 原文件读取、按 document 恢复任务和 Markdown 保存接口仍未实现。跨端决策以
+> [文档向量化、在线编辑、并发与缓存设计复盘](../../shared/architecture/document-vectorization-editing-concurrency-review.md)
+> 为准。
+
+## 1. 前端目标与非目标
+
+下一阶段在现有上传、解析、chunks 和删除闭环上增加：
+
+- 本批次不向量化、选中文档向量化、本批次全部向量化；
+- 文档解析状态和向量状态的独立展示；
+- 刷新后恢复向量任务；
+- PDF 受保护打开和可选 annotation；
+- Markdown 内容查看、编辑、本地草稿和版本冲突处理。
+
+第一版不实现多人实时协同编辑，不引入 CRDT/OT，不把 Redis 状态当作页面真相，也不在后端契约冻结前通过
+前端轮询猜测任务 ID。
+
+## 2. 与当前 F2 的衔接
+
+当前 [F2 批量导入与解析队列](f2-batch-import-queue.md) 明确不包含批量向量化。本设计作为后续增量：
+
+```text
+DocumentBatchImportPanel
+  → 继续负责有限并发上传与解析
+  → 记录本批次成功得到的 document IDs
+  → 根据用户选择调用 POST /embedding-jobs/batch
+  → 单项向量失败不回滚已经成功的上传和解析
+```
+
+前端不能把“全部向量化”解释成同时在浏览器直接调用多个模型。它只提交持久任务意图，实际并发由后端 Worker、
+用户配额和全局背压控制。
+
+## 3. 交互与状态展示
+
+批量上传区建议提供本批次选项：
+
+```text
+向量化方式
+○ 暂不向量化
+○ 只向量化选中文档
+○ 本批次成功文档全部向量化
+```
+
+文档列表或详情需要同时展示两套状态：
+
+| 解析状态 | 向量状态 | 用户看到的说明 | 可用操作 |
+| --- | --- | --- | --- |
+| uploaded | none | 等待解析，尚未申请向量化 | 开始解析、申请向量化 |
+| processing | waiting_document | 解析中，解析成功后进入向量队列 | 取消向量意图 |
+| ready | none | 文本可浏览，尚未向量化 | 向量化 |
+| ready | queued | 已进入向量队列 | 取消 |
+| ready | processing | 正在向量化 | 查看进度；第一版不可强制取消 |
+| ready | succeeded | 当前版本向量已就绪 | 进入语义检索/问答 |
+| ready | failed | 向量化失败 | 查看安全错误、重试 |
+| failed | waiting_document | 解析失败，向量任务等待前置条件 | 重试解析或取消向量意图 |
+| 任意现存解析状态 | canceled | 用户已经取消当前向量任务 | 需要时重新申请向量化 |
+
+页面不得仅凭解析 `ready` 开放语义问答；必须由后端提供的当前 revision 向量就绪事实决定。
+
+## 4. 建议前端分层
+
+```text
+entities/
+├─ document/                  文档、解析状态、currentRevision
+├─ embedding-job/             向量任务状态与 DTO
+└─ document-revision/         可编辑内容版本
+
+features/documents/
+├─ api/
+│  ├─ embedding-job-api       单个、批量、取消、恢复
+│  └─ document-content-api    Range/ETag 读取和带版本保存
+├─ model/
+│  ├─ use-embedding-job       轮询、终态、卸载清理
+│  ├─ use-batch-vectorization 批量逐项结果和重试
+│  ├─ use-document-content    内容加载和 revision
+│  └─ use-local-draft         IndexedDB 草稿
+└─ ui/
+   ├─ VectorizationControls
+   ├─ PdfViewer
+   └─ MarkdownEditor
+```
+
+API 层继续把响应先作为 `unknown` 校验，不允许 UI 直接解释 snake_case 或英文错误文本。页面只保存选择 ID，
+任务、内容和草稿编排留在 feature model。
+
+## 5. 批量向量化前端规则
+
+- 只提交上传成功且属于当前会话的 document IDs；服务端仍必须重新校验 OwnerScope；
+- 遵守后端单批上限，前端可以更保守，但不能把客户端限制当安全边界；
+- 响应逐项使用 `created`、`already_active`、`not_found` 或 `failed`；成功项中的 `job.status` 再区分
+  `waiting_document`、`queued` 或当时已有的 `processing`；当前没有 `already_succeeded` 结果；
+- 整批请求失败与单项拒绝分开表达；已成功项不能因其他项失败而回滚为本地失败；
+- 重复点击保持可重试，不能为了避免重复而只依赖按钮 disabled；
+- `429` 展示用户配额或频率提示并遵守 `Retry-After`；`503` 表示系统暂时饱和；
+- 取消调用 `POST /embedding-jobs/:id/cancel`。成功和重复取消返回 `200`；收到 `409` 时重新查询任务，
+  说明 Worker 已经领取或任务已经终结，不在客户端强行改为 canceled。
+
+## 6. PDF 打开与缓存
+
+PDF 内容必须通过受保护接口或受控短期地址读取。若后端支持 Range，Viewer 应按需加载，不把大文件转换成完整
+Base64 放进 Pinia 或普通响应缓存。
+
+缓存响应只接受私有策略：
+
+```text
+ETag: "文档内容哈希或 revision"
+Cache-Control: private, no-cache
+```
+
+高度敏感文档如果后端返回 `private, no-store`，前端不得绕过。退出登录时清理内存中的 Blob URL、选中文档和
+请求缓存；浏览器自身已经持久化的私有缓存由响应策略控制。
+
+PDF annotation 与原文件分离。纯批注成功后更新 annotation 查询，不自行把 chunks 或 embeddings 标记为过期。
+
+## 7. Markdown 编辑、草稿与冲突
+
+编辑器内存是当前输入状态；IndexedDB 只用于崩溃和刷新恢复；服务端 revision 才是正式内容。
+
+建议草稿键：
+
+```text
+draft:{userId}:{documentId}:{baseRevision}
+```
+
+草稿至少保存 `content`、`baseRevision` 和本地更新时间。禁止只按 document ID 保存，否则同一浏览器切换账户时可能
+读到其他账户草稿。退出后可以清理当前账户草稿，也可以保留但必须继续按用户隔离；产品需在实现时冻结其中一种。
+
+自动保存采用防抖，不逐字符请求：
+
+```text
+用户输入
+  → 立即更新编辑器内存
+  → 约 1～3 秒无输入后写 IndexedDB
+  → 明确自动保存周期或用户点击保存后写服务端
+```
+
+服务端保存请求携带 `base_revision` 或 `If-Match`。收到版本冲突时：
+
+1. 保留本地草稿，绝不能清空；
+2. 拉取服务端最新版本；
+3. 展示“查看最新、复制本地内容、手动合并”等选择；
+4. 未实现可靠合并前，不提供无提示强制覆盖。
+
+保存成功后用响应中的新 revision 更新基线、清理对应旧草稿，并失效文档详情、内容、chunks 和向量就绪查询。
+
+## 8. 前端请求缓存边界
+
+适合缓存：文档列表、详情、当前任务状态和带 revision 的只读内容响应。缓存键至少包含资源 ID 和 revision；
+认证状态从已登录变为未登录时清空全部用户业务查询。
+
+不适合作为普通请求缓存：
+
+- 编辑器尚未保存的唯一草稿；
+- 完整 PDF Base64；
+- Worker 进度的唯一事实；
+- 权限判断结果的长期副本；
+- 未带 revision 的 Markdown 渲染结果。
+
+如果后续接入 Redis Pub/Sub + SSE/WebSocket，推送只负责提示“某资源已变化”，前端仍按 job ID 或 document ID
+重新读取服务端最终状态；断线时自动退回当前轮询机制。
+
+## 9. 后端已冻结与仍待冻结的契约
+
+提交 `c4696bc` 已冻结：
+
+1. 单份申请的 `202/200` 幂等语义；
+2. 批量请求 `POST /embedding-jobs/batch`、最多 100 个 ID 和逐项结果；
+3. `waiting_document/canceled` 正式状态；
+4. `POST /embedding-jobs/:id/cancel` 的允许状态、`409` 和稳定错误 code。
+
+前端开发期间仍需避免猜测以下计划契约：
+
+1. 按 document ID 恢复当前/最近向量任务的接口；
+2. PDF/MD 内容读取的 MIME、Range、ETag 与缓存头；
+3. Markdown revision DTO、保存成功和冲突响应；
+4. 内容变化后 chunks/embeddings 的 stale 表达；
+5. 用户默认向量偏好是否属于本阶段。
+
+## 10. 前端验收矩阵
+
+- 手动、选中和本批次全部三种向量选择路径；
+- 重复点击、批量重复 ID、单项失败和整批网络失败；
+- waiting → queued → processing → terminal 的刷新恢复；
+- 取消与 Worker 领取竞态返回后的界面重新同步；
+- 两个用户不能在列表、任务、PDF 内容、IndexedDB 草稿和请求缓存中串数据；
+- PDF 大文件不进入 Pinia/Base64，Range 失败有安全降级；
+- Markdown 刷新恢复草稿、保存成功、网络失败和 409/412 版本冲突；
+- 新 revision 后旧 chunks/embedding 状态不再显示为当前可用；
+- `401` 清理 Auth Store 和用户业务缓存，`429/503` 有明确背压提示；
+- 默认自动化不调用真实 Embedding、Generation 或远程存储。

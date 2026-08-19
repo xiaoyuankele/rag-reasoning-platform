@@ -21,6 +21,8 @@ docs/
 - 后端与 AI 架构：[后端正式文档](backend/README.md)
 - 前端开发准备：[前端正式文档](frontend/README.md)
 - 后端认证完成后的前端起点：[P6 个人用户认证前端交接](frontend/architecture/p6-authentication-handoff.md)
+- 后续文档能力与并发演进：
+  [文档向量化、在线编辑、并发与缓存设计复盘](shared/architecture/document-vectorization-editing-concurrency-review.md)
 
 ## 维护规则
 

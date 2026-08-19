@@ -28,7 +28,8 @@
 7. [F2 文档上传去重联调交接](architecture/f2-document-upload-integration-handoff.md)；
 8. [F2-B 文档操作闭环](architecture/f2b-document-lifecycle.md)；
 9. [F2 批量导入与解析队列](architecture/f2-batch-import-queue.md)；
-10. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
+10. [用户可选向量化与文档编辑前端交接](architecture/document-vectorization-editing-handoff.md)；
+11. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
 
 ## 文档边界
 

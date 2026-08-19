@@ -162,3 +162,11 @@ Auth DTO/API
 [P6 个人用户域与私有数据闭环](../../shared/architecture/personal-user-domain.md) 和
 [产品演进路线](../../shared/architecture/product-evolution-roadmap.md)。可直接执行的字段、状态机、错误映射和
 验收清单见 [P6 个人用户认证前端交接](p6-authentication-handoff.md)。
+
+### 7.3 F2 后续候选：用户可选向量化与文档编辑（计划中）
+
+后端已经交付单份申请、批量申请、任务查询和等待/排队取消契约；前端可在 F2-B 和批量导入验收完成后接入
+“单份/选中/本批次全部向量化”。按 document 恢复任务、PDF 私有打开、Markdown revision 编辑与 IndexedDB
+草稿仍需后续后端能力。该阶段不把解析 `ready` 当作 AI-ready，不在前端直接并发调用模型，也不提前依赖 Redis。
+具体状态映射、缓存边界、后端依赖和验收矩阵见
+[用户可选向量化与文档编辑前端交接](document-vectorization-editing-handoff.md)。

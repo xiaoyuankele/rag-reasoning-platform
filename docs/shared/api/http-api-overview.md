@@ -1,12 +1,12 @@
 # HTTP API 总览
 
-> 更新时间：2026-08-18。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
+> 更新时间：2026-08-19。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
 > Handler 测试和后续 OpenAPI 文件为最终校验依据。
 
 ## 1. 当前访问边界
 
 当前 API 是个人版、单工作区接口。验证码、注册、登录、密码重置、Session、当前用户和退出已经实现；文档增删查、
-解析任务创建、processing job 查询、chunks 浏览、向量任务创建/查询、关键词检索、语义检索和问答均已接入
+解析任务创建、processing job 查询、chunks 浏览、向量任务申请/批量/查询/取消、关键词检索、语义检索和问答均已接入
 Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成显式认领，数据库也已通过 `NOT NULL`
 禁止再次产生无主文档；后端双用户数据隔离发布验收已经通过。公开互联网部署仍需配套 HTTPS、真实邮件渠道、
 反向代理与生产环境安全配置。
@@ -26,8 +26,10 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `POST` | `/documents/:id/process` | Session Cookie；路径参数 `id` | `202` | 为当前用户文档创建异步解析任务 | 用户功能；已隔离 |
 | `GET` | `/processing-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的解析任务状态 | 用户功能；已隔离/轮询 |
 | `GET` | `/search` | Session Cookie；`q`、可选 `document_id`、`page`、`page_size` | `200` | 检索当前用户文档的文本块 | 用户功能；已隔离 |
-| `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | `202` | 为当前用户文档手动创建向量任务 | 已隔离；首版 UI 不直接暴露 |
+| `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | 新建 `202`；活动任务已存在 `200` | 保存当前用户的向量化意图 | 用户功能；已隔离/幂等 |
+| `POST` | `/embedding-jobs/batch` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 对多份文档逐项创建或复用向量任务 | 用户功能；已隔离/逐项结果 |
 | `GET` | `/embedding-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的向量任务状态、重试和 Token 信息 | 用户功能；已隔离/轮询 |
+| `POST` | `/embedding-jobs/:id/cancel` | Session Cookie；路径参数 `id` | `200` | 取消 waiting/queued 向量任务 | 用户功能；processing/终态返回 `409` |
 | `POST` | `/semantic-search` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k` | `200` | 在当前用户文档中进行语义检索 | 用户功能；已隔离，受功能开关控制 |
 | `POST` | `/answers` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200` | 基于当前用户来源生成回答 | 用户功能；已隔离，受功能开关控制 |
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册或密码重置验证码挑战 | 认证功能；`purpose` 为 `register` 或 `password_reset` |
@@ -107,6 +109,20 @@ P6 路由保护边界：
 
 F2-B 当前接口已经可以支持页面内详情、解析轮询、chunks 和删除；刷新后按文档恢复 queued 任务、处理中删除语义和
 部分稳定错误 code 仍需对齐，见 [F2-B 前后端待对齐事项](f2b-frontend-backend-alignment.md)。
+
+用户可选向量化的第一批后端契约已经在提交 `c4696bc` 交付：
+
+- `POST /documents/:id/embeddings`：首次创建返回 `202`；存在活动任务时幂等返回原任务和真实状态，状态码为 `200`；
+- `POST /embedding-jobs/batch`：请求体为 `{"document_ids":[1,2]}`，上限 100 个 ID，去重后逐项返回
+  `created`、`already_active`、`not_found` 或 `failed`；
+- `GET /embedding-jobs/:id`：查询当前用户文档关联的向量任务；
+- `POST /embedding-jobs/:id/cancel`：允许取消 `waiting_document` 和 `queued`；重复取消幂等返回 `200`；
+  `processing`、`succeeded` 和 `failed` 返回 `409`；
+- 正式向量状态包含 `waiting_document`、`queued`、`processing`、`succeeded`、`failed` 和 `canceled`。
+
+PDF/Markdown 原内容读取、Markdown revision 保存、任务按 document 恢复、用户配额和 Redis 演进仍属于计划能力，
+当前不能按候选路径调用。跨端决策见
+[文档向量化、在线编辑、并发与缓存设计复盘](../architecture/document-vectorization-editing-concurrency-review.md)。
 
 当请求字段、响应 DTO、状态码或错误语义变化时：
 
