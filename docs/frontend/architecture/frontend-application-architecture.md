@@ -35,7 +35,7 @@ PostgreSQL / Python / 远程模型
 | HTTP Client | Axios 封装 | 已安装并接入健康、认证、文档与检索接口 | 统一基础地址、超时、错误转换和请求配置 |
 | 组件库 | Element Plus 选择性使用 | 已确认原则，尚未安装 | 使用成熟交互组件但不接管整体视觉 |
 | 样式 | CSS Variables + Scoped CSS | 已接入设计令牌、基础样式与响应式应用外壳 | 保留 CSS 基础并支持统一设计令牌 |
-| 单元/组件测试 | Vitest + Vue Test Utils | 已安装并接入，16 个测试文件、47 个测试通过 | 与 Vite/Vue 集成，验证用户可观察行为 |
+| 单元/组件测试 | Vitest + Vue Test Utils | 已安装并接入，19 个测试文件、60 个测试通过 | 与 Vite/Vue 集成，验证用户可观察行为 |
 | 端到端测试 | Playwright | F5 候选，尚未安装 | 验证跨页面与真实 HTTP 主流程 |
 | 代码规范 | ESLint + Prettier | 已安装并接入，检查通过 | 保持团队式静态检查和格式一致性 |
 
@@ -87,13 +87,16 @@ app → pages → features → entities → shared
 |---|---|---|
 | 单个组件 | 组件本地状态 | 弹窗开关、输入框、按钮 loading |
 | 单个功能流程 | feature composable/use case | 上传、任务轮询、单次搜索 |
-| 跨页面共享 | Pinia | P6 当前认证用户、当前文档范围、后端能力状态、用户界面偏好 |
+| 跨页面共享 | Pinia | P6 当前认证用户、后端能力状态、用户界面偏好 |
 | 可恢复 URL 状态 | Vue Router query/params | 搜索词、页码、文档 ID |
 
 单次搜索结果、临时上传进度和局部错误默认不进入全局 Store。
 
 关键词检索已经按此规则实现：`q`、`document_id` 和 `page` 保存在 Router query 中，
-单次请求的加载、结果、空状态和错误保存在 `features/search` composable 中，不进入 Pinia。
+单次请求的加载、结果、空状态和错误保存在 `features/search` composable 中，不进入 Pinia。F2-C 通过共享
+`DocumentScope` 把缺省 ID 映射为“全部文档”、单个 ID 映射为“指定单篇”；范围选择器分页读取当前用户文档并只展示
+解析 `ready` 项。页面层负责组合文档选择与检索，具体边界见
+[F2-C 单篇 / 全部文档检索范围选择器](f2c-document-scope-picker.md)。
 
 ## 5. HTTP 与契约边界
 
@@ -154,7 +157,7 @@ Element Plus 只用于弹窗、分页、选择器、消息等行为成熟的组�
 ```
 
 - Vite 负责转换和构建，类型检查必须由 `vue-tsc` 单独执行；
-- Vitest 验证状态转换、错误转换和纯逻辑；当前 16 个测试文件、47 个测试通过；
+- Vitest 验证状态转换、错误转换和纯逻辑；当前 19 个测试文件、60 个测试通过；
 - Vue Test Utils 验证组件渲染和用户交互；
 - Playwright 在 F5 验证上传、处理、搜索和问答主流程；
 - 测试优先断言用户可观察结果，不依赖组件内部实现细节。

@@ -65,10 +65,9 @@ beforeEach(() => {
 describe('KeywordSearchPanel', () => {
   it('提交关键词后同步 URL 并展示来源结果', async () => {
     searchKeywordsMock.mockResolvedValue(firstPage)
-    const { router, wrapper } = await mountPanel()
+    const { router, wrapper } = await mountPanel('/search?document_id=7')
 
     await wrapper.get('#keyword-query').setValue('bridge')
-    await wrapper.get('#document-id').setValue('7')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
@@ -88,6 +87,30 @@ describe('KeywordSearchPanel', () => {
     expect(wrapper.text()).toContain('Bridge vibration study')
     expect(wrapper.text()).toContain('第 3–4 页')
     expect(wrapper.text()).toContain('共 11 个文本块')
+    wrapper.unmount()
+  })
+
+  it('全部文档范围不向接口发送 documentId', async () => {
+    searchKeywordsMock.mockResolvedValue(firstPage)
+    const { wrapper } = await mountPanel('/search?q=bridge')
+
+    expect(searchKeywordsMock).toHaveBeenCalledWith(
+      {
+        query: 'bridge',
+        documentId: undefined,
+        page: 1,
+        pageSize: 10,
+      },
+      expect.any(AbortSignal),
+    )
+    wrapper.unmount()
+  })
+
+  it('无效 URL 范围不会发送检索请求', async () => {
+    const { wrapper } = await mountPanel('/search?q=bridge&document_id=abc')
+
+    expect(searchKeywordsMock).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('URL 中的文档范围无效')
     wrapper.unmount()
   })
 

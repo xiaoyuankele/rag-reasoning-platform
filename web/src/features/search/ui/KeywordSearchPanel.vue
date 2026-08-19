@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter, type LocationQueryValue } from 'vue-router'
+import {
+  documentIdFromScope,
+  parseDocumentScopeQuery,
+} from '../../../entities/document/model/document-scope'
 import { useKeywordSearch } from '../model/use-keyword-search'
 import KeywordSearchResultCard from './KeywordSearchResultCard.vue'
 
@@ -8,7 +12,6 @@ const pageSize = 10
 const route = useRoute()
 const router = useRouter()
 const queryInput = ref('')
-const documentIdInput = ref('')
 const formError = ref('')
 const { errorMessage, isLoading, reset, resultPage, search, state } = useKeywordSearch()
 
@@ -37,7 +40,7 @@ function currentPageFromRoute(): number {
   return readPositiveInteger(readQueryValue(route.query.page)) ?? 1
 }
 
-function validateForm(): { query: string; documentId?: number } | null {
+function validateForm(): string | null {
   const query = queryInput.value.trim()
   if (!query) {
     formError.value = '请输入要检索的关键词。'
@@ -48,25 +51,12 @@ function validateForm(): { query: string; documentId?: number } | null {
     return null
   }
 
-  const rawDocumentId = documentIdInput.value.trim()
-  if (!rawDocumentId) {
-    formError.value = ''
-    return { query }
-  }
-
-  const documentId = readPositiveInteger(rawDocumentId)
-  if (documentId === null) {
-    formError.value = '文档 ID 必须是正整数。'
-    return null
-  }
-
   formError.value = ''
-  return { query, documentId }
+  return query
 }
 
 function runSearchFromRoute(): void {
   queryInput.value = readQueryValue(route.query.q)
-  documentIdInput.value = readQueryValue(route.query.document_id)
   formError.value = ''
 
   const query = queryInput.value.trim()
@@ -75,35 +65,36 @@ function runSearchFromRoute(): void {
     return
   }
 
-  const rawDocumentId = documentIdInput.value.trim()
-  let documentId: number | undefined
-  if (rawDocumentId) {
-    const parsedDocumentId = readPositiveInteger(rawDocumentId)
-    if (parsedDocumentId === null) {
-      formError.value = 'URL 中的文档 ID 无效，请重新输入。'
-      reset()
-      return
-    }
-    documentId = parsedDocumentId
+  const parsedScope = parseDocumentScopeQuery(route.query.document_id)
+  if (!parsedScope.isValid) {
+    formError.value = 'URL 中的文档范围无效，请重新选择。'
+    reset()
+    return
   }
 
   void search({
     query,
-    documentId,
+    documentId: documentIdFromScope(parsedScope.scope),
     page: currentPageFromRoute(),
     pageSize,
   })
 }
 
 function submitSearch(): void {
-  const criteria = validateForm()
-  if (!criteria) return
+  const query = validateForm()
+  if (!query) return
+
+  const parsedScope = parseDocumentScopeQuery(route.query.document_id)
+  if (!parsedScope.isValid) {
+    formError.value = '请先选择有效的文档范围。'
+    return
+  }
 
   const target = router.resolve({
     name: 'search',
     query: {
-      q: criteria.query,
-      document_id: criteria.documentId?.toString(),
+      q: query,
+      document_id: documentIdFromScope(parsedScope.scope)?.toString(),
     },
   })
 
@@ -150,18 +141,6 @@ watch(() => [route.query.q, route.query.document_id, route.query.page], runSearc
         <small id="query-help">使用后端字面匹配，不调用远程模型。</small>
       </div>
 
-      <div class="document-field">
-        <label for="document-id">文档 ID <span>可选</span></label>
-        <input
-          id="document-id"
-          v-model="documentIdInput"
-          name="document_id"
-          type="text"
-          inputmode="numeric"
-          placeholder="全部文档"
-        />
-      </div>
-
       <button class="primary-button" type="submit" :disabled="isLoading">
         {{ isLoading ? '检索中' : '开始检索' }}
       </button>
@@ -192,7 +171,7 @@ watch(() => [route.query.q, route.query.document_id, route.query.page], runSearc
 
     <div v-else-if="state === 'empty'" class="state-card state-card--quiet">
       <strong>没有找到匹配的文本块</strong>
-      <p>可以缩短关键词、检查文档是否已经解析完成，或移除文档 ID 后搜索全部资料。</p>
+      <p>可以缩短关键词、检查文档是否已经解析完成，或切换到全部文档范围。</p>
     </div>
 
     <div v-else-if="state === 'success' && resultPage" class="search-results">
@@ -242,7 +221,7 @@ watch(() => [route.query.q, route.query.document_id, route.query.page], runSearc
 
 .search-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(150px, 210px) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: 14px;
   padding: 20px;
@@ -251,8 +230,7 @@ watch(() => [route.query.q, route.query.document_id, route.query.page], runSearc
   background: var(--color-surface-subtle);
 }
 
-.query-field,
-.document-field {
+.query-field {
   display: grid;
   gap: 8px;
 }

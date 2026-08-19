@@ -1,0 +1,74 @@
+# F2-C 单篇 / 全部文档检索范围选择器
+
+> 状态：2026-08-19 已完成前端实现、自动化门禁和真实登录态页面验收；任意多篇文档子集仍需后端
+> `document_ids` 契约，不在本切片中模拟。
+
+## 1. 用户问题与当前契约
+
+原关键词检索页要求用户手动填写数字文档 ID。后端 `GET /search` 的现有范围语义是：
+
+- 不提供 `document_id`：检索当前账户全部满足条件的文档；
+- 提供一个正整数 `document_id`：只检索该文档；
+- 暂不支持任意选择若干文档组成子集。
+
+本切片把该契约转换成“全部可检索文档 / 指定单篇文档”的可见选择器，不修改后端接口。
+
+## 2. 分层与数据流
+
+```text
+SearchPage
+├─ DocumentScopePicker
+│  └─ useDocumentScopeOptions
+│     └─ GET /documents?page=N&page_size=100
+└─ KeywordSearchPanel
+   └─ GET /search?q=...&document_id?=...&page=...
+```
+
+- `entities/document/model/document-scope` 定义 `all | single` 稳定业务模型，负责 Router query 转换；
+- `useDocumentScopeOptions` 读取当前用户文档分页，并只输出解析状态为 `ready` 的文档；
+- `DocumentScopePicker` 负责加载、成功、无可用文档、失败、失效选项和重试界面；
+- `SearchPage` 组合文档与检索功能，通过 URL 连接二者；
+- `KeywordSearchPanel` 只处理关键词、分页和结果，不再接受用户手填数字 ID。
+
+页面层组合避免 `features/search` 随意依赖 `features/documents`；共享范围模型位于 document entity，未来可以被
+语义检索和问答页面复用。
+
+## 3. URL 与状态规则
+
+```text
+全部文档：/search?q=bridge
+单篇文档：/search?q=bridge&document_id=42
+```
+
+- 关键词、范围和页码仍可通过刷新、前进/后退恢复；
+- 切换范围保留关键词，清除旧页码并从第 1 页重新检索；
+- 无效 `document_id` 不发送搜索请求，要求用户重新选择；
+- URL 中的正整数文档已经删除或不再 ready 时，保留失效范围说明，并提供“一键使用全部文档”；
+- 列表加载失败不阻塞“全部文档”检索，因为该范围不需要加载文档 ID。
+
+## 4. 文档选项加载边界
+
+当前 `GET /documents` 没有状态筛选或轻量 options 接口。前端使用后端允许的最大 `page_size=100` 逐页读取，集中
+过滤 `ready`，并按文档 ID 去重。该策略适合当前个人工作台规模，但不是无限规模方案。
+
+当文档数量明显增长时，后端应提供带状态、关键字和游标/分页的选择接口；前端不应长期一次读取整个大型文档库。
+
+## 5. 多篇范围的演进
+
+前端不能为每个选中文档分别发送搜索请求再合并。全局排序、分页、总数、去重和部分失败必须由后端统一处理。
+后端以后冻结 `document_ids` 后，可以在不破坏当前模型的前提下增加：
+
+```text
+{ kind: "selected", documentIds: [1, 3, 5] }
+```
+
+文档数量进一步增加、范围需要长期复用时，优先演进为持久化 Collection，而不是让 URL 持续增长。
+
+## 6. 验证结果
+
+- 类型检查、ESLint、Prettier 和生产构建通过；
+- 19 个测试文件、60 个测试全部通过；
+- 自动化覆盖 query 映射、无效 ID、跨分页 ready 过滤、错误重试、失效文档、范围切换和自动重新检索；
+- 真实登录态确认手填 ID 已移除、全部范围空态正常、1280px 无横向溢出且控制台无 warning/error；
+- 真实页面发现并修复“无 ready 文档时失效单篇范围缺少恢复按钮”的展示优先级问题；
+- 本轮只调用免费关键词检索与文档列表，不触发语义模型或问答。
