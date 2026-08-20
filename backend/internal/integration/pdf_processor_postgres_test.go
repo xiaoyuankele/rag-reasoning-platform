@@ -231,10 +231,12 @@ func TestPDFProcessorHandlesTwoDocumentsConcurrently(t *testing.T) {
 
 	repositoryRoot := integrationRepositoryRoot(t)
 	aiRoot := filepath.Join(repositoryRoot, "ai")
-	storage, err := filestorage.NewLocalStorage(t.TempDir(), 5*1024*1024)
-	if err != nil {
-		t.Fatalf("create concurrent Python test storage: %v", err)
-	}
+	storage, documents := prepareConcurrentPDFDocuments(
+		t,
+		ctx,
+		pythonExecutable,
+		aiRoot,
+	)
 	processor, err := pythonprocessor.NewProcessor(
 		storage,
 		pythonExecutable,
@@ -244,6 +246,64 @@ func TestPDFProcessorHandlesTwoDocumentsConcurrently(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("create concurrent Python processor: %v", err)
+	}
+	assertProcessesDocumentsConcurrently(t, ctx, processor, documents)
+}
+
+// TestPDFProcessPoolHandlesTwoDocumentsConcurrently 验证两个真实常驻 Python
+// 槽位可以同时接收 Go Worker 请求，并各自返回完整且不串包的 chunks。
+func TestPDFProcessPoolHandlesTwoDocumentsConcurrently(t *testing.T) {
+	if os.Getenv("RUN_PYTHON_TESTS") != "1" {
+		t.Skip("set RUN_PYTHON_TESTS=1 to run Go/Python process pool tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pythonExecutable := os.Getenv("PYTHON_EXECUTABLE")
+	if pythonExecutable == "" {
+		pythonExecutable = "python"
+	}
+	repositoryRoot := integrationRepositoryRoot(t)
+	aiRoot := filepath.Join(repositoryRoot, "ai")
+	storage, documents := prepareConcurrentPDFDocuments(
+		t,
+		ctx,
+		pythonExecutable,
+		aiRoot,
+	)
+	processPool, err := pythonprocessor.NewProcessPool(
+		storage,
+		pythonExecutable,
+		filepath.Join(aiRoot, "src"),
+		5*1024*1024,
+		10,
+		2,
+		20,
+	)
+	if err != nil {
+		t.Fatalf("create concurrent Python process pool: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := processPool.Close(); err != nil {
+			t.Errorf("close concurrent Python process pool: %v", err)
+		}
+	})
+
+	assertProcessesDocumentsConcurrently(t, ctx, processPool, documents)
+}
+
+func prepareConcurrentPDFDocuments(
+	t *testing.T,
+	ctx context.Context,
+	pythonExecutable string,
+	aiRoot string,
+) (*filestorage.LocalStorage, []documentdomain.Document) {
+	t.Helper()
+
+	storage, err := filestorage.NewLocalStorage(t.TempDir(), 5*1024*1024)
+	if err != nil {
+		t.Fatalf("create concurrent Python test storage: %v", err)
 	}
 
 	documents := make([]documentdomain.Document, 0, 2)
@@ -280,6 +340,17 @@ func TestPDFProcessorHandlesTwoDocumentsConcurrently(t *testing.T) {
 			Status:       documentdomain.StatusProcessing,
 		})
 	}
+
+	return storage, documents
+}
+
+func assertProcessesDocumentsConcurrently(
+	t *testing.T,
+	ctx context.Context,
+	processor documentapplication.DocumentProcessor,
+	documents []documentdomain.Document,
+) {
+	t.Helper()
 
 	type processingResult struct {
 		documentID int64

@@ -17,7 +17,7 @@
 - 简洁的 Vue Web 工作台
 - 核心接口与任务状态测试
 
-项目强调低资源占用：文件流式处理、worker 默认单并发且可配置为有界并发、Python 按需启动、AI 能力可关闭且失败可降级。
+项目强调低资源占用：文件流式处理、worker 默认单并发且可配置为有界并发、Python 可选择按任务启动或通过有界进程池复用、AI 能力可关闭且失败可降级。
 
 ## 技术架构
 
@@ -30,7 +30,7 @@
 
 ### Go 与 Python 如何协作
 
-Markdown/TXT 首先由 Go 直接处理，不需要启动 Python。对于 PDF、DOCX 等复杂格式，第一阶段不让 Python 作为常驻服务运行：Go 创建后台任务后按需启动 Python 子进程，双方通过标准输入、标准输出和 JSON 交换数据。Go 负责超时、错误处理、状态更新和结果入库，Python 完成计算后退出并释放内存。
+Markdown/TXT 首先由 Go 直接处理，不需要启动 Python。对于 PDF、DOCX 等复杂格式，Go 创建后台任务后调用 Python 子进程，双方通过 UTF-8 标准输入、标准输出和版本化 JSON 交换数据。默认 `oneshot` 模式仍是一份文档一个进程的稳定降级路径；可选 `pool` 模式使用 JSON Lines 让固定数量的 Python 进程连续处理多份文档，并在达到回收上限、超时、崩溃或协议异常后重建。Go 负责超时、进程生命周期、错误处理、状态更新和结果入库，Python 不访问 PostgreSQL。
 
 当功能和负载证明有独立部署的需要时，再考虑把 Python 改造成 HTTP AI 服务。普通文档管理和关键词检索不依赖 AI 服务，Python 或模型不可用时，Go 后端仍应提供基础能力。
 
@@ -225,13 +225,13 @@ Worker Application 已定义可替换的文档处理器端口，并实现单次�
 
 本地文件存储已经提供安全 `Open` 能力，能够校验存储路径、保留文件系统错误并在读取过程中响应 context 取消。Go 原生 `TextProcessor` 支持 `text/markdown` 和 `text/plain`，会流式读取 UTF-8 字符、折叠连续空白、去除 BOM，并按每块最多 1000 个 Unicode 字符生成从 0 开始的稳定文本块。自动化测试已覆盖格式拒绝、打开失败、空文本、非法 UTF-8、context 取消、成功与失败关闭，以及真实 LocalStorage 跨层组合。
 
-固定大小 Worker Pool 已经实现连续领取、空队列等待、错误上报和 context 取消；默认并发为 1，可通过 `DOCUMENT_WORKER_CONCURRENCY` 配置为 1～4，并发 2 已通过两个不同任务的 PostgreSQL 收尾和两个一次性 Python 子进程测试。HTTP 服务使用标准库 `http.Server` 响应退出信号和执行限时优雅关闭；真实 HTTP、PostgreSQL 与本地文件链路已经验证 Markdown 文档能够自动处理为统一文本块。Worker 使用独立子 context 限制单份文档的处理时间，默认超时为 5 分钟，并在超时后使用仍有效的父 context 将任务安全标记为失败。
+固定大小 Worker Pool 已经实现连续领取、空队列等待、错误上报和 context 取消；默认并发为 1，可通过 `DOCUMENT_WORKER_CONCURRENCY` 配置为 1～4。Python Process Pool 也已实现固定槽位租借、进程复用、单进程处理数量上限、超时杀进程、崩溃替换、输出边界和 shutdown；默认仍使用 `oneshot`，显式配置 `pool` 后才启用。两个不同任务的 PostgreSQL 收尾、两个一次性 Python 子进程以及两个常驻 Python 槽位均已完成并发验收。HTTP 服务使用标准库 `http.Server` 响应退出信号和执行限时优雅关闭；真实 HTTP、PostgreSQL 与本地文件链路已经验证 Markdown 文档能够自动处理为统一文本块。Worker 使用独立子 context 限制单份文档的处理时间，默认超时为 5 分钟，并在超时后使用仍有效的父 context 将任务安全标记为失败。
 
 服务启动时会在 Worker 运行前恢复上一次异常退出遗留的 `processing` 任务，并在同一 PostgreSQL 事务内把任务和关联文档标记为 `failed`。真实启动测试已验证恢复数量、双表状态一致性、安全错误信息和第二次启动的幂等性。当前恢复策略建立在单实例 Worker 约束上；未来扩展为多实例时需要使用 lease/heartbeat 判断任务是否真正失联。
 
 `ProcessorDispatcher` 已作为统一处理器入口接入 Worker，根据数据库中的可信 MIME 类型选择具体实现。`text/markdown` 和 `text/plain` 路由到 Go `TextProcessor`，`application/pdf` 路由到生产 `PythonProcessor`；尚未注册的格式会返回可判断的错误，而不会误用其他处理器。未来增加 DOCX、OCR 或替换 PDF 解析器时，可以继续添加或替换适配器，Worker 的任务领取、超时、文本块保存和状态收尾流程不需要修改。
 
-Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义版本化请求、成功响应、失败响应、稳定错误码、示例和进程通信规则。Go 基础设施层已经实现安全绝对路径解析、请求构造、UTF-8 JSON 编码、严格响应解码、文本块不变量校验、结构化 Python 失败错误、子进程超时取消和 stdout/stderr 输出上限。生产 `PythonProcessor` 已注册到 `application/pdf`，自动化测试覆盖成功、结构化失败、非法响应、进程崩溃、超时与输出超限。Python 内部已经按 domain、application、contracts、entrypoints 和 infrastructure 完成轻量分层；pypdf 与简单文本切分器通过 application 定义的 Protocol 接入，不向核心层暴露第三方框架对象。Python PDF 处理能够识别伪造或损坏文件、密码要求、提取权限限制、OCR 需求以及文件和页数超限，并能对普通数字 PDF 逐页提取、规范化、页内分块和返回物理页码。真实英文文献已生成 126 个带页码文本块，真实中文文献已生成 42 个带页码文本块；二者均通过 HTTP 上传、Worker 异步处理、PostgreSQL 入库和 `ready` 状态验收。连字、页眉页脚、双栏和表格阅读顺序等质量改进留在 PDF-4 阶段。
+Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义版本化请求、成功响应、失败响应、稳定错误码、示例和进程通信规则。Go 基础设施层已经实现安全绝对路径解析、请求构造、UTF-8 JSON 编码、严格响应解码、文本块不变量校验、结构化 Python 失败错误、子进程超时取消和 stdout/stderr 输出上限；同一份 v1 消息结构既支持 oneshot，也支持一行请求对应一行响应的 JSON Lines 常驻传输。生产 `PythonProcessor` 和 `ProcessPool` 都满足相同的 Application 处理器端口，自动化测试覆盖复用、主动回收、非法响应、进程崩溃替换、超时取消与输出超限。Python 内部已经按 domain、application、contracts、entrypoints 和 infrastructure 完成轻量分层；pypdf 与简单文本切分器通过 application 定义的 Protocol 接入，不向核心层暴露第三方框架对象。Python PDF 处理能够识别伪造或损坏文件、密码要求、提取权限限制、OCR 需求以及文件和页数超限，并能对普通数字 PDF 逐页提取、规范化、页内分块和返回物理页码。真实英文文献已生成 126 个带页码文本块，真实中文文献已生成 42 个带页码文本块；二者均通过 HTTP 上传、Worker 异步处理、PostgreSQL 入库和 `ready` 状态验收。连字、页眉页脚、双栏和表格阅读顺序等质量改进留在 PDF-4 阶段。
 
 `GET /search` 已实现以统一文本块为结果单位的关键词检索，并在 P6/B5.2 接入 Session 与 OwnerScope。Handler 接收 `q`、可选 `document_id`、`page` 和 `page_size` 查询参数，Application 负责业务校验、分页换算与总页数计算，PostgreSQL 仓储在 `text_chunks` 与 `documents` 之间执行关联查询；count 与 data 两条 SQL 都同时限定当前用户和 `ready` 状态。跨文档搜索只表示当前用户的全部文档，其他用户即使指定真实 `document_id` 也只得到正常 `200` 空结果。HTTP 响应包含命中文本、文献标题、原始文件名、物理页码和分页元数据。Repository 使用 `ILIKE` 保持中英文大小写不敏感的字面子串语义，并转义 `%`、`_` 与反斜杠；第 6 号迁移通过 `pg_trgm + GIN` 加速数万文本块规模下的稀有子串查询。第一版采用确定性排序：较新文档优先，同一文档内按照 `chunk_index` 原文顺序返回，不把时间顺序包装成相关性评分。自动化测试覆盖成功、空结果、默认分页、文档过滤、特殊字符、非法参数、应用错误映射和双用户相同关键词隔离。
 
@@ -391,10 +391,16 @@ Go 后端当前支持以下环境变量：
 | `STORAGE_ROOT` | `storage` | 本地文档存储根目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `STORAGE_HOST_PATH` | `./storage` | Compose 挂载的宿主机文件目录；恢复验收后可无覆盖切换到新目录 |
 | `STORAGE_MAX_FILE_SIZE_BYTES` | `209715200` | 单个上传文件允许的最大字节数，即 200 MiB |
+| `WORKER_POLL_INTERVAL` | `2s` | 文档 Worker 在空队列或单轮错误后的轮询间隔 |
+| `WORKER_PROCESSING_TIMEOUT` | `5m` | 单份文档从处理器调用到任务收尾的最大时间 |
+| `DOCUMENT_WORKER_CONCURRENCY` | `1` | 同一实例的文档 Worker 数，允许 1～4；默认 1 可安全降级 |
 | `PYTHON_EXECUTABLE` | `python` | Go 启动复杂文档处理子进程时使用的 Python 可执行程序 |
 | `PYTHON_SOURCE_ROOT` | `ai/src` | 包含 `rag_ai` 包的 Python 源码目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `PYTHON_PDF_MAX_FILE_SIZE_BYTES` | `52428800` | PDF 解析文件上限，即 50 MiB；独立于上传上限 |
 | `PYTHON_PDF_MAX_PAGES` | `500` | 单份 PDF 允许解析的最大页数 |
+| `PYTHON_PROCESS_MODE` | `oneshot` | `oneshot` 每任务一个进程；`pool` 启用可复用常驻进程 |
+| `PYTHON_PROCESS_POOL_SIZE` | `2` | pool 模式的 Python 槽位数，允许 1～4且不能小于文档 Worker 数 |
+| `PYTHON_PROCESS_MAX_DOCUMENTS` | `20` | 单个常驻 Python 进程处理多少份文档后主动回收 |
 | `EMBEDDING_WORKER_ENABLED` | `false` | 是否启动远程 Embedding Worker；默认关闭以避免意外费用 |
 | `SEMANTIC_SEARCH_ENABLED` | `false` | 是否注册在线语义检索接口；启用后每次检索会调用远程 Embedding API |
 | `EMBEDDING_PROVIDER` | `dashscope` | 当前远程提供方，可选 `dashscope` 或 `openai` |

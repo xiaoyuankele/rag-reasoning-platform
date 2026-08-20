@@ -247,17 +247,57 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("create local file storage: %w", err)
 	}
-	// 必须先确认 LocalStorage 创建成功，再把它交给 TextProcessor。
-	pythonDocumentProcessor, err := pythonprocessor.NewProcessor(
-		localFileStorage,
-		pythonConfig.Executable,
-		pythonConfig.SourceRoot,
-		pythonConfig.PDFMaxFileSizeBytes,
-		pythonConfig.PDFMaxPages,
-	)
-	if err != nil {
-		return fmt.Errorf("create Python document processor: %w", err)
+	// 必须先确认 LocalStorage 创建成功，再组装 Python 文档处理器。
+	// oneshot 和 pool 都满足同一个 Application 端口，模式差异只留在组合根
+	// 与 Infrastructure；业务服务和 Worker 不感知子进程是否被复用。
+	var pythonDocumentProcessor documentapplication.DocumentProcessor
+	closePythonDocumentProcessor := func() error { return nil }
+	switch pythonConfig.ProcessMode {
+	case config.PythonProcessModeOneShot:
+		processor, err := pythonprocessor.NewProcessor(
+			localFileStorage,
+			pythonConfig.Executable,
+			pythonConfig.SourceRoot,
+			pythonConfig.PDFMaxFileSizeBytes,
+			pythonConfig.PDFMaxPages,
+		)
+		if err != nil {
+			return fmt.Errorf("create oneshot Python document processor: %w", err)
+		}
+		pythonDocumentProcessor = processor
+
+	case config.PythonProcessModePool:
+		// 第一版不允许 Go Worker 多于 Python 槽位，否则多领出的任务会显示
+		// processing 却只是在进程池门口等待，扭曲排队和处理耗时指标。
+		if pythonConfig.ProcessPoolSize < workerConfig.DocumentConcurrency {
+			return fmt.Errorf(
+				"Python process pool size %d must be at least document worker concurrency %d",
+				pythonConfig.ProcessPoolSize,
+				workerConfig.DocumentConcurrency,
+			)
+		}
+		processPool, err := pythonprocessor.NewProcessPool(
+			localFileStorage,
+			pythonConfig.Executable,
+			pythonConfig.SourceRoot,
+			pythonConfig.PDFMaxFileSizeBytes,
+			pythonConfig.PDFMaxPages,
+			pythonConfig.ProcessPoolSize,
+			pythonConfig.ProcessMaxDocuments,
+		)
+		if err != nil {
+			return fmt.Errorf("create pooled Python document processor: %w", err)
+		}
+		pythonDocumentProcessor = processPool
+		closePythonDocumentProcessor = processPool.Close
 	}
+	logger.Info(
+		"Configured Python document processor",
+		"event", "python_document_processor_configured",
+		"mode", pythonConfig.ProcessMode,
+		"pool_size", pythonConfig.ProcessPoolSize,
+		"max_documents_per_process", pythonConfig.ProcessMaxDocuments,
+	)
 	textProcessor := documentapplication.NewTextProcessor(localFileStorage)
 	processorDispatcher, err := documentapplication.NewProcessorDispatcher(
 		map[string]documentapplication.DocumentProcessor{
@@ -563,6 +603,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	defer func() {
 		cancelWorker()
 		workerGroup.Wait()
+		if err := closePythonDocumentProcessor(); err != nil {
+			logger.Error(
+				"Close Python document processor",
+				"event", "python_document_processor_close_failed",
+				"error", err,
+			)
+		}
 	}()
 
 	// Handler 负责把 HTTP 请求转换成应用服务调用。

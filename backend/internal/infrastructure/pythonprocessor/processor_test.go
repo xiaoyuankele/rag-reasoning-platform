@@ -43,13 +43,19 @@ func TestPythonProcessorHelperProcess(t *testing.T) {
 		return
 	}
 
+	mode := os.Getenv("PYTHON_PROCESSOR_HELPER_MODE")
+	if strings.HasPrefix(mode, "stream_") {
+		runPythonProcessorStreamHelper(mode)
+		os.Exit(0)
+	}
+
 	var request processRequest
 	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
 		fmt.Fprintf(os.Stderr, "decode helper request: %v", err)
 		os.Exit(2)
 	}
 
-	switch os.Getenv("PYTHON_PROCESSOR_HELPER_MODE") {
+	switch mode {
 	case "success":
 		writeHelperResponse(processResponse{
 			ContractVersion: contractVersionV1,
@@ -106,6 +112,43 @@ func TestPythonProcessorHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func runPythonProcessorStreamHelper(mode string) {
+	decoder := json.NewDecoder(os.Stdin)
+	for {
+		var request processRequest
+		if err := decoder.Decode(&request); errors.Is(err, io.EOF) {
+			return
+		} else if err != nil {
+			fmt.Fprintf(os.Stderr, "decode stream helper request: %v", err)
+			os.Exit(2)
+		}
+
+		switch mode {
+		case "stream_success":
+			writeHelperResponse(processResponse{
+				ContractVersion: contractVersionV1,
+				RequestID:       request.RequestID,
+				Status:          processStatusSucceeded,
+				Chunks: []processChunk{
+					{Index: 0, Content: request.Document.OriginalName},
+				},
+			})
+		case "stream_crash":
+			_, _ = io.WriteString(os.Stderr, "stream helper process crashed")
+			os.Exit(7)
+		case "stream_wait":
+			time.Sleep(30 * time.Second)
+		case "stream_invalid_response":
+			_, _ = io.WriteString(os.Stdout, "not-json\n")
+		case "stream_large_stdout":
+			_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 4096)+"\n")
+		default:
+			_, _ = io.WriteString(os.Stderr, "unknown stream helper mode")
+			os.Exit(3)
+		}
+	}
+}
+
 func writeHelperResponse(response processResponse) {
 	if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
 		fmt.Fprintf(os.Stderr, "encode helper response: %v", err)
@@ -147,6 +190,50 @@ func newTestProcessor(
 	}
 
 	return processor, resolver
+}
+
+func newTestProcessPool(
+	t *testing.T,
+	mode string,
+	poolSize int,
+	maxDocuments int,
+) (*ProcessPool, *fakeStoredFilePathResolver) {
+	t.Helper()
+
+	sourcePath := filepath.Join(t.TempDir(), "document.pdf")
+	resolver := &fakeStoredFilePathResolver{absolutePath: sourcePath}
+	pool, err := NewProcessPool(
+		resolver,
+		os.Args[0],
+		t.TempDir(),
+		50*1024*1024,
+		500,
+		poolSize,
+		maxDocuments,
+	)
+	if err != nil {
+		t.Fatalf("NewProcessPool() error = %v, want nil", err)
+	}
+
+	for _, worker := range pool.workers {
+		worker.newCommand = newStreamHelperCommandFactory(mode)
+	}
+	return pool, resolver
+}
+
+func newStreamHelperCommandFactory(mode string) streamCommandFactory {
+	return func() *exec.Cmd {
+		command := exec.Command(
+			os.Args[0],
+			"-test.run=^TestPythonProcessorHelperProcess$",
+		)
+		command.Env = append(
+			os.Environ(),
+			helperProcessEnvironment+"=1",
+			"PYTHON_PROCESSOR_HELPER_MODE="+mode,
+		)
+		return command
+	}
 }
 
 func testDocument() documentdomain.Document {

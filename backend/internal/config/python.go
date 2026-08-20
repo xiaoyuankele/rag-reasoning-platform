@@ -12,8 +12,19 @@ const (
 	defaultPythonSourceRoot          = "ai/src"
 	defaultPythonPDFMaxFileSizeBytes = 50 * 1024 * 1024
 	defaultPythonPDFMaxPages         = 500
+	defaultPythonProcessMode         = PythonProcessModeOneShot
+	defaultPythonProcessPoolSize     = 2
+	defaultPythonProcessMaxDocuments = 20
 	maximumPythonPDFMaxFileSizeBytes = 1024 * 1024 * 1024
 	maximumPythonPDFMaxPages         = 10000
+	maximumPythonProcessPoolSize     = 4
+	maximumPythonProcessMaxDocuments = 10000
+
+	// PythonProcessModeOneShot 表示每份复杂文档启动一个独立 Python 进程。
+	PythonProcessModeOneShot = "oneshot"
+
+	// PythonProcessModePool 表示通过固定大小进程池复用 Python 进程。
+	PythonProcessModePool = "pool"
 )
 
 // PythonConfig 保存 Go 启动 Python 文档处理子进程所需的配置。
@@ -22,6 +33,9 @@ type PythonConfig struct {
 	SourceRoot          string
 	PDFMaxFileSizeBytes int64
 	PDFMaxPages         int
+	ProcessMode         string
+	ProcessPoolSize     int
+	ProcessMaxDocuments int
 }
 
 // LoadPython 从环境变量读取 Python 子进程配置。
@@ -71,11 +85,53 @@ func LoadPython(appRoot string) (PythonConfig, error) {
 		)
 	}
 
+	processMode := strings.ToLower(strings.TrimSpace(
+		os.Getenv("PYTHON_PROCESS_MODE"),
+	))
+	if processMode == "" {
+		processMode = defaultPythonProcessMode
+	}
+	if processMode != PythonProcessModeOneShot &&
+		processMode != PythonProcessModePool {
+		return PythonConfig{}, fmt.Errorf(
+			"PYTHON_PROCESS_MODE must be %q or %q",
+			PythonProcessModeOneShot,
+			PythonProcessModePool,
+		)
+	}
+
+	processPoolSize, err := loadPositiveBoundedInt(
+		"PYTHON_PROCESS_POOL_SIZE",
+		defaultPythonProcessPoolSize,
+		maximumPythonProcessPoolSize,
+	)
+	if err != nil {
+		return PythonConfig{}, fmt.Errorf(
+			"load Python process pool size: %w",
+			err,
+		)
+	}
+
+	processMaxDocuments, err := loadPositiveBoundedInt(
+		"PYTHON_PROCESS_MAX_DOCUMENTS",
+		defaultPythonProcessMaxDocuments,
+		maximumPythonProcessMaxDocuments,
+	)
+	if err != nil {
+		return PythonConfig{}, fmt.Errorf(
+			"load Python process recycle limit: %w",
+			err,
+		)
+	}
+
 	return PythonConfig{
 		Executable:          executable,
 		SourceRoot:          resolvedSourceRoot,
 		PDFMaxFileSizeBytes: maxFileSizeBytes,
 		PDFMaxPages:         maxPages,
+		ProcessMode:         processMode,
+		ProcessPoolSize:     processPoolSize,
+		ProcessMaxDocuments: processMaxDocuments,
 	}, nil
 }
 

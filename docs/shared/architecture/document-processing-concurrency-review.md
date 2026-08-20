@@ -1,7 +1,7 @@
 # 文档处理并发与 Python 进程复用交接
 
-> 状态：2026-08-20 第一版处理指标和固定大小 Go Worker Pool 已实现，尚未实现 Python 进程池。
-> 当前支持同一后端实例内 1～4 个 Go Worker，默认仍为 1；每份文档仍启动一次 Python CLI。
+> 状态：2026-08-20 第一版处理指标、固定大小 Go Worker Pool 和可降级 Python Process Pool 均已实现。
+> 当前支持同一后端实例内 1～4 个 Go Worker；Python 默认使用 oneshot，也可显式切换为 1～4 个常驻槽位。
 
 ## 1. 为什么现在记录这项设计
 
@@ -18,7 +18,7 @@ HTTP 上传
   → 文档进入 ready/failed
 ```
 
-但目前每份任务都会独立启动一个 Python 进程，处理完后退出。单并发时这种方式有利于故障隔离和内存回收；进入并发后，会重复承担解释器启动、依赖导入、进程创建、内存占用和调度切换成本。
+基线批次使用每任务独立 Python 进程：处理完成后退出。单并发时这种方式有利于故障隔离和内存回收；进入并发后，会重复承担解释器启动、依赖导入、进程创建、内存占用和调度切换成本。现在已保留该模式用于降级，并增加有界常驻进程池用于后续对照压测。
 
 这不是立即拆微服务的理由。当前更适合先把“有界并发”和“处理器生命周期”抽象出来，再按指标逐步替换执行器。
 
@@ -45,7 +45,7 @@ HTTP 上传
 
 ## 3. 当前实现边界
 
-后端当前通过 `PythonProcessor` 创建 `exec.CommandContext`，一次进程只处理一条 JSON 请求，随后退出。Python CLI 在入口处组装 `pypdf` 和文本分块器，读取一条 stdin 请求并输出一条响应。
+后端提供两种实现相同 Application 端口的基础设施适配器：`PythonProcessor` 通过 `exec.CommandContext` 为一份文档启动一次进程；`ProcessPool` 通过固定槽位复用 stream CLI。Python CLI 在入口处只组装一次 `pypdf` 和文本分块器，stream 模式逐行读取请求并逐行刷新响应。
 
 现有边界必须继续保留：
 
@@ -81,22 +81,24 @@ Go Document Worker Pool（先从 2 个开始）
 
 ### 4.2 第二阶段：固定大小的 Python 进程池
 
+> 已完成：默认池大小 2、允许 1～4；单进程默认处理 20 份文档后回收，oneshot 保持默认降级路径。
+
 ```text
 Go Document Worker Pool
     ↓
-PythonProcessPool（先配置 2 个长驻进程）
+PythonProcessPool（先配置 2 个常驻进程）
     ├─ Python Worker 1：处理一份 → 等待下一份
     └─ Python Worker 2：处理一份 → 等待下一份
 ```
 
 每个 Python Worker 一次只处理一份文档，完成后复用。这样可以减少反复创建解释器和导入依赖的开销，同时保留进程级隔离。
 
-进程池必须具备：
+当前进程池已经具备：
 
 - 单任务超时和取消；
 - 单进程异常退出后的定向重启；
 - 处理达到上限后的主动回收，控制潜在内存增长；
-- 忙闲状态和进程健康状态；
+- 有界槽位租借和进程惰性启动；
 - stdout/stderr 协议边界保护；
 - 进程崩溃后任务可安全重试或进入失败终态。
 
@@ -112,21 +114,22 @@ API/任务服务 → 任务队列 → Python Processing Service → 共享对象
 
 ## 5. Go/Python 协议演进
 
-当前 v1 协议是：
+当前 v1 消息契约支持两种传输模式：
 
 ```text
-启动进程 → 一条 JSON 请求 → 一条 JSON 响应 → 进程退出
+oneshot：启动进程 → 一条 JSON 请求 → 一条 JSON 响应 → 进程退出
+stream：启动进程 → 一行请求 → 一行响应 → 等待下一行
 ```
 
-常驻进程需要协议 v2，至少包含：
+现有 v1 已经包含常驻传输所需的关键字段：
 
 - `request_id`：关联 Go 任务和 Python 响应；
-- `document_id`：日志和错误定位；
-- `protocol_version`：避免新旧进程混用；
+- `document.id`：关联文档并辅助后端诊断；
+- `contract_version`：避免不兼容消息结构混用；
 - `status/code/retryable`：结构化失败；
-- 处理阶段或耗时字段：支持性能诊断。
+- `chunks/metadata`：承载统一文本块和可选文档标题。
 
-请求边界必须使用明确的 framing。首选长度前缀；如果采用 JSON Lines，必须保证每条响应严格单行序列化并增加协议错位测试。不能依赖“读取到 EOF”判断一条请求结束，因为常驻进程不会关闭 stdin。
+第一版选择 JSON Lines 作为 framing：每条请求和响应严格单行 UTF-8 JSON，正文换行由 JSON 转义，Python 每次响应后立即 flush。Go 逐行读取并继续使用 v1 严格解码、请求 ID 对齐和 stdout 上限。stream 模式不依赖 EOF 判断单条消息，EOF 只表示 Go 主动关闭常驻进程。由于消息字段没有改变，本阶段无需仅为传输方式改名为 v2；未来真正增加或改变字段语义时再升级契约版本。
 
 协议升级时，Application 和 Domain 不应知道 stdin、进程池或 HTTP 细节；替换点应集中在基础设施层的文档处理器实现。
 
@@ -147,7 +150,8 @@ API/任务服务 → 任务队列 → Python Processing Service → 共享对象
 # 已实现，默认 1 可随时回退到稳定单并发模式。
 DOCUMENT_WORKER_CONCURRENCY=2
 
-# 以下仍为 Python 进程池计划字段，尚未实现。
+# 默认 oneshot；验证时显式改为 pool。
+PYTHON_PROCESS_MODE=oneshot
 PYTHON_PROCESS_POOL_SIZE=2
 PYTHON_PROCESS_MAX_DOCUMENTS=20
 ```
@@ -159,8 +163,8 @@ PYTHON_PROCESS_MAX_DOCUMENTS=20
 1. 已完成第一版必要指标：`queue_wait_ms`、`processor_ms`、`total_ms`、文件大小、chunk 数、状态和错误分类；结构化日志与 `document_jobs` 同时保留数据。
 2. 已完成固定大小 Worker Pool：配置默认 1、上限 4，并发数 2 已通过领取、执行和 shutdown 测试。
 3. 区分“任务已收尾的业务失败”和“领取/数据库等基础设施错误”，避免业务失败统一触发 2 秒轮询退避。
-4. 在阶段耗时明确后，再决定是否使用批量 chunk 写入或 Python 进程池。
-5. Python 进程池稳定后，再加入进程回收、崩溃替换和长时间运行测试。
+4. 已完成 Python Process Pool：JSON Lines、惰性启动、固定槽位、超时取消、崩溃替换、20 份文档回收和输出上限均有测试。
+5. 下一步使用同一批真实文献对比 oneshot 与 pool 的吞吐量、排队时间、CPU 和内存，再决定是否默认启用 pool；长时间浸泡测试仍待执行。
 6. 多实例部署前增加 `worker_id`、`lease_expires_at` 和心跳；不能直接复用当前单实例启动恢复逻辑。
 
 ### 并发验收重点
@@ -242,7 +246,8 @@ finalize_ms
 - 不把解析和向量化重新耦合；
 - 不用 Redis 作为文档任务最终状态来源；
 - 不在单实例租约、共享存储和恢复规则未完成前直接做多实例 Worker；
-- 不把进程池计划字段当作当前已存在的 HTTP 接口字段。
+- 不把进程池部署字段暴露为前端 HTTP 参数；
+- 不在真实对照压测前把 `pool` 改成生产默认模式。
 
 ## 10. 相关文档
 

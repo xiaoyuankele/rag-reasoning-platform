@@ -69,6 +69,94 @@ type StoredFilePathResolver interface {
 // 替换成当前 Go 测试进程，稳定模拟成功、崩溃、超时和超限等情况。
 type commandFactory func(ctx context.Context) *exec.Cmd
 
+// pythonRuntime 保存已经校验并解析完成的 Python 运行时位置。
+// oneshot Processor 和常驻进程池共享它，避免两种模式产生不同的 PYTHONPATH。
+type pythonRuntime struct {
+	executable string
+	sourceRoot string
+}
+
+func newPythonRuntime(
+	pythonExecutable string,
+	pythonSourceRoot string,
+) (pythonRuntime, error) {
+	pythonExecutable = strings.TrimSpace(pythonExecutable)
+	if pythonExecutable == "" {
+		return pythonRuntime{}, ErrPythonExecutableRequired
+	}
+	resolvedPythonExecutable, err := exec.LookPath(pythonExecutable)
+	if err != nil {
+		return pythonRuntime{}, fmt.Errorf(
+			"find Python executable %q: %w",
+			pythonExecutable,
+			err,
+		)
+	}
+
+	pythonSourceRoot = strings.TrimSpace(pythonSourceRoot)
+	if pythonSourceRoot == "" {
+		return pythonRuntime{}, ErrPythonSourceRootRequired
+	}
+	absolutePythonSourceRoot, err := filepath.Abs(pythonSourceRoot)
+	if err != nil {
+		return pythonRuntime{}, fmt.Errorf(
+			"resolve Python source root: %w",
+			err,
+		)
+	}
+
+	pythonSourceInfo, err := os.Stat(absolutePythonSourceRoot)
+	if err != nil {
+		return pythonRuntime{}, fmt.Errorf(
+			"inspect Python source root: %w",
+			err,
+		)
+	}
+	if !pythonSourceInfo.IsDir() {
+		return pythonRuntime{}, fmt.Errorf(
+			"%w: %q is not a directory",
+			ErrPythonSourceRootRequired,
+			absolutePythonSourceRoot,
+		)
+	}
+
+	return pythonRuntime{
+		executable: resolvedPythonExecutable,
+		sourceRoot: absolutePythonSourceRoot,
+	}, nil
+}
+
+func (r pythonRuntime) environment() []string {
+	pythonPath := r.sourceRoot
+	if existingPythonPath := os.Getenv("PYTHONPATH"); existingPythonPath != "" {
+		pythonPath += string(os.PathListSeparator) + existingPythonPath
+	}
+
+	return append(os.Environ(), "PYTHONPATH="+pythonPath)
+}
+
+func (r pythonRuntime) newOneShotCommand(ctx context.Context) *exec.Cmd {
+	command := exec.CommandContext(
+		ctx,
+		r.executable,
+		"-m",
+		pythonProcessorModule,
+	)
+	command.Env = r.environment()
+	return command
+}
+
+func (r pythonRuntime) newStreamCommand() *exec.Cmd {
+	command := exec.Command(
+		r.executable,
+		"-m",
+		pythonProcessorModule,
+		"--stream",
+	)
+	command.Env = r.environment()
+	return command
+}
+
 // Processor 通过一次性 Python 子进程处理 PDF、DOCX 等复杂文档。
 type Processor struct {
 	paths              StoredFilePathResolver
@@ -97,45 +185,9 @@ func NewProcessor(
 		return nil, ErrSourcePathResolverRequired
 	}
 
-	pythonExecutable = strings.TrimSpace(pythonExecutable)
-	if pythonExecutable == "" {
-		return nil, ErrPythonExecutableRequired
-	}
-	resolvedPythonExecutable, err := exec.LookPath(pythonExecutable)
+	runtime, err := newPythonRuntime(pythonExecutable, pythonSourceRoot)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"find Python executable %q: %w",
-			pythonExecutable,
-			err,
-		)
-	}
-
-	pythonSourceRoot = strings.TrimSpace(pythonSourceRoot)
-	if pythonSourceRoot == "" {
-		return nil, ErrPythonSourceRootRequired
-	}
-
-	absolutePythonSourceRoot, err := filepath.Abs(pythonSourceRoot)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"resolve Python source root: %w",
-			err,
-		)
-	}
-
-	pythonSourceInfo, err := os.Stat(absolutePythonSourceRoot)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"inspect Python source root: %w",
-			err,
-		)
-	}
-	if !pythonSourceInfo.IsDir() {
-		return nil, fmt.Errorf(
-			"%w: %q is not a directory",
-			ErrPythonSourceRootRequired,
-			absolutePythonSourceRoot,
-		)
+		return nil, err
 	}
 	if maxPDFFileBytes < 1 || maxPDFFileBytes > maxPDFFileBytesMaximum {
 		return nil, fmt.Errorf(
@@ -152,29 +204,9 @@ func NewProcessor(
 		)
 	}
 
-	newCommand := func(ctx context.Context) *exec.Cmd {
-		command := exec.CommandContext(
-			ctx,
-			resolvedPythonExecutable,
-			"-m",
-			pythonProcessorModule,
-		)
-
-		pythonPath := absolutePythonSourceRoot
-		if existingPythonPath := os.Getenv("PYTHONPATH"); existingPythonPath != "" {
-			pythonPath += string(os.PathListSeparator) + existingPythonPath
-		}
-		command.Env = append(
-			os.Environ(),
-			"PYTHONPATH="+pythonPath,
-		)
-
-		return command
-	}
-
 	return &Processor{
 		paths:              paths,
-		newCommand:         newCommand,
+		newCommand:         runtime.newOneShotCommand,
 		maxChunkCharacters: defaultMaxChunkCharacters,
 		maxPDFFileBytes:    maxPDFFileBytes,
 		maxPDFPages:        maxPDFPages,
@@ -195,19 +227,10 @@ func (p *Processor) Process(
 		return documentapplication.ProcessingResult{}, err
 	}
 
-	sourcePath, err := p.paths.ResolveAbsolutePath(document.StoragePath)
-	if err != nil {
-		return documentapplication.ProcessingResult{}, fmt.Errorf(
-			"resolve Python processing source path: %w",
-			err,
-		)
-	}
-
-	requestID := nextRequestID(document.ID)
-	request, err := newProcessRequest(
-		requestID,
+	request, err := prepareProcessRequest(
+		ctx,
+		p.paths,
 		document,
-		sourcePath,
 		p.maxChunkCharacters,
 		p.maxPDFFileBytes,
 		p.maxPDFPages,
@@ -270,7 +293,7 @@ func (p *Processor) Process(
 	result, err := decodeProcessResponse(
 		ctx,
 		stdout.Reader(),
-		requestID,
+		request.RequestID,
 	)
 	if err != nil {
 		return documentapplication.ProcessingResult{}, fmt.Errorf(
@@ -281,6 +304,36 @@ func (p *Processor) Process(
 	}
 
 	return result, nil
+}
+
+func prepareProcessRequest(
+	ctx context.Context,
+	paths StoredFilePathResolver,
+	document documentdomain.Document,
+	maxChunkCharacters int,
+	maxPDFFileBytes int64,
+	maxPDFPages int,
+) (processRequest, error) {
+	if err := ctx.Err(); err != nil {
+		return processRequest{}, err
+	}
+
+	sourcePath, err := paths.ResolveAbsolutePath(document.StoragePath)
+	if err != nil {
+		return processRequest{}, fmt.Errorf(
+			"resolve Python processing source path: %w",
+			err,
+		)
+	}
+
+	return newProcessRequest(
+		nextRequestID(document.ID),
+		document,
+		sourcePath,
+		maxChunkCharacters,
+		maxPDFFileBytes,
+		maxPDFPages,
+	)
 }
 
 // nextRequestID 生成进程内唯一的关联 ID。

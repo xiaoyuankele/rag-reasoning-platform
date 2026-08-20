@@ -116,3 +116,78 @@ func TestPythonCLIContractRoundTrip(t *testing.T) {
 		t.Fatalf("result chunks = %+v, want empty", result.Chunks)
 	}
 }
+
+// TestPythonProcessPoolReusesRealCLI 真实启动 stream CLI，并用同一个进程
+// 连续处理两条请求。两条结构化业务失败都必须正确关联 request_id，且进程
+// 启动次数保持为 1，证明 Go/Python JSON Lines 边界可以跨请求复用。
+func TestPythonProcessPoolReusesRealCLI(t *testing.T) {
+	if os.Getenv("RUN_PYTHON_TESTS") != "1" {
+		t.Skip("set RUN_PYTHON_TESTS=1 to run Go/Python process pool tests")
+	}
+
+	pythonExecutable := os.Getenv("PYTHON_EXECUTABLE")
+	if pythonExecutable == "" {
+		pythonExecutable = "python"
+	}
+	if _, err := exec.LookPath(pythonExecutable); err != nil {
+		t.Fatalf("find Python executable %q: %v", pythonExecutable, err)
+	}
+
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve integration test file path")
+	}
+	repositoryRoot := filepath.Clean(
+		filepath.Join(filepath.Dir(currentFile), "..", "..", "..", ".."),
+	)
+	pythonSourceRoot := filepath.Join(repositoryRoot, "ai", "src")
+	sourcePath := filepath.Join(t.TempDir(), "invalid.pdf")
+	if err := os.WriteFile(sourcePath, []byte("not a real PDF"), 0o600); err != nil {
+		t.Fatalf("write invalid PDF: %v", err)
+	}
+
+	resolver := &fakeStoredFilePathResolver{absolutePath: sourcePath}
+	pool, err := NewProcessPool(
+		resolver,
+		pythonExecutable,
+		pythonSourceRoot,
+		50*1024*1024,
+		500,
+		1,
+		20,
+	)
+	if err != nil {
+		t.Fatalf("NewProcessPool() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := pool.Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	})
+
+	for documentID := int64(1); documentID <= 2; documentID++ {
+		_, err := pool.Process(
+			context.Background(),
+			documentdomain.Document{
+				ID:           documentID,
+				OriginalName: "invalid.pdf",
+				StoragePath:  "documents/invalid.pdf",
+				MIMEType:     "application/pdf",
+			},
+		)
+		var failure *ProcessingFailureError
+		if !errors.As(err, &failure) {
+			t.Fatalf("Process(%d) error = %v, want structured failure", documentID, err)
+		}
+		if failure.Code != "invalid_content" {
+			t.Fatalf("Process(%d) failure code = %q", documentID, failure.Code)
+		}
+	}
+
+	if starts := pool.workers[0].starts; starts != 1 {
+		t.Fatalf("real Python process starts = %d, want 1", starts)
+	}
+	if processed := pool.workers[0].processed; processed != 2 {
+		t.Fatalf("real Python process document count = %d, want 2", processed)
+	}
+}
