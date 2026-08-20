@@ -8,14 +8,17 @@ import (
 )
 
 const (
-	defaultWorkerPollInterval      = 2 * time.Second
-	defaultWorkerProcessingTimeout = 5 * time.Minute
+	defaultWorkerPollInterval        = 2 * time.Second
+	defaultWorkerProcessingTimeout   = 5 * time.Minute
+	defaultDocumentWorkerConcurrency = 1
+	maximumDocumentWorkerConcurrency = 4
 )
 
 // WorkerConfig 保存后台 Worker 的运行配置。
 type WorkerConfig struct {
-	PollInterval      time.Duration
-	ProcessingTimeout time.Duration
+	PollInterval        time.Duration
+	ProcessingTimeout   time.Duration
+	DocumentConcurrency int
 }
 
 // LoadWorker 从环境变量读取并校验 Worker 配置。
@@ -42,9 +45,22 @@ func LoadWorker() (WorkerConfig, error) {
 		)
 	}
 
+	documentConcurrency, err := loadPositiveBoundedInt(
+		"DOCUMENT_WORKER_CONCURRENCY",
+		defaultDocumentWorkerConcurrency,
+		maximumDocumentWorkerConcurrency,
+	)
+	if err != nil {
+		return WorkerConfig{}, fmt.Errorf(
+			"load document worker concurrency: %w",
+			err,
+		)
+	}
+
 	return WorkerConfig{
-		PollInterval:      pollInterval,
-		ProcessingTimeout: processingTimeout,
+		PollInterval:        pollInterval,
+		ProcessingTimeout:   processingTimeout,
+		DocumentConcurrency: documentConcurrency,
 	}, nil
 }
 

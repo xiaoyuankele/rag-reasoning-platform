@@ -180,7 +180,7 @@ Protocol 插入用例。未来加入 OCR、DOCX 或 LangChain 时优先增加适
 - Worker 单文档超时：沿用 5 分钟；
 - Python stdout：32 MiB；
 - Python stderr：1 MiB；
-- Worker 并发数：1；
+- Worker 并发数：默认 1，可通过 `DOCUMENT_WORKER_CONCURRENCY` 配置为 1～4；并发 2 已完成基础验收；
 - 逐页提取和分块，不在 Python 中长期保留所有页面布局对象。
 
 这些值应进入配置并经过测试，而不是散落在解析函数中。完成真实样本测量后再调整。
@@ -200,7 +200,7 @@ pypdf 官方说明某些大型解压内容流可能消耗远高于文件体积�
   → 有真实扩缩容需求后再拆独立 Python 服务
 ```
 
-第一阶段只在同一后端实例内增加有界 Go Worker，不改变 HTTP 接口和任务状态语义。第二阶段才把 Python CLI 升级为可处理多条请求的常驻协议，并为单进程超时、崩溃替换、主动回收和协议 framing 增加测试。多实例前必须补充任务租约、心跳和共享文件存储，不能直接复制当前单实例启动恢复逻辑。
+第一阶段已经在同一后端实例内增加有界 Go Worker，不改变 HTTP 接口和任务状态语义。默认并发仍为 1，切换为 2 时每个任务继续使用独立 Python 子进程；`FOR UPDATE SKIP LOCKED` 保证两个 Worker 不重复领取同一任务。第二阶段才把 Python CLI 升级为可处理多条请求的常驻协议，并为单进程超时、崩溃替换、主动回收和协议 framing 增加测试。多实例前必须补充任务租约、心跳和共享文件存储，不能直接复制当前单实例启动恢复逻辑。
 
 详细的跨端配置、协议、前端状态和验收约束见[文档处理并发与 Python 进程复用交接](../../shared/architecture/document-processing-concurrency-review.md)。
 

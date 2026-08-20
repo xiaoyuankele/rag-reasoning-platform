@@ -324,6 +324,18 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("create document worker loop: %w", err)
 	}
+	documentWorkerPool, err := documentapplication.NewWorkerPool(
+		documentWorkerLoop,
+		workerConfig.DocumentConcurrency,
+	)
+	if err != nil {
+		return fmt.Errorf("create document worker pool: %w", err)
+	}
+	logger.Info(
+		"Document worker pool configured",
+		"event", "document_worker_pool_configured",
+		"concurrency", workerConfig.DocumentConcurrency,
+	)
 
 	// Worker、公开语义检索和问答内部检索都依赖 Embedder。只要任一能力开启，
 	// 就创建一个无状态客户端并复用；三者都关闭时不创建远程客户端。
@@ -533,17 +545,17 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// WaitGroup 记录仍未退出的 Worker goroutine 数量。
 	var workerGroup sync.WaitGroup
-	startWorkerLoop := func(loop *documentapplication.WorkerLoop) {
+	startBackgroundWorker := func(runWorker func(context.Context)) {
 		workerGroup.Add(1)
 		go func() {
 			defer workerGroup.Done()
-			loop.Run(workerContext)
+			runWorker(workerContext)
 		}()
 	}
 
-	startWorkerLoop(documentWorkerLoop)
+	startBackgroundWorker(documentWorkerPool.Run)
 	if embeddingWorkerLoop != nil {
-		startWorkerLoop(embeddingWorkerLoop)
+		startBackgroundWorker(embeddingWorkerLoop.Run)
 	}
 
 	// defer 在 run 返回前执行。

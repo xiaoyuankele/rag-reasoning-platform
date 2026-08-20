@@ -2,6 +2,7 @@ package document
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,6 +52,7 @@ func TestProcessingJobQueueWaitFallsBackAndRejectsInvalidTime(t *testing.T) {
 // recordingProcessingJobEventObserver 是 Worker 测试使用的 Fake 观察器。
 // 它不写真实日志，只按发生顺序保存事件，供测试核对生命周期。
 type recordingProcessingJobEventObserver struct {
+	mutex  sync.Mutex
 	events []ProcessingJobEvent
 }
 
@@ -65,6 +67,8 @@ func (o *recordingProcessingJobEventObserver) ObserveProcessingJobEvent(
 	_ context.Context,
 	event ProcessingJobEvent,
 ) {
+	o.mutex.Lock()
+	defer o.mutex.Unlock()
 	o.events = append(o.events, event)
 }
 

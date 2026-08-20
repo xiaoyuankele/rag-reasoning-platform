@@ -161,6 +161,11 @@ Application 只报告任务事实，不依赖具体日志框架；`main.go` 负�
 现阶段不拆分 `python_startup_ms`、`parse_ms`、`split_ms`、`chunk_write_ms` 或
 `finalize_ms`。这些指标同时持久化在对应 `document_jobs` 记录，历史任务保持 `NULL`。
 
+固定大小 Worker Pool 启动时额外记录 `document_worker_pool_configured`，字段
+`concurrency` 表示同一后端实例内运行的文档 WorkerLoop 数量。默认值为 1；该值只反映
+Go Worker 上限，不代表 Python 常驻进程数量。当前一次性处理模式下，并发为 2 意味着最多
+同时启动两个独立 Python 子进程。
+
 当前中断恢复策略是服务启动后将遗留 `processing` 任务标记为失败，并不存在重新排队行为，
 因此这一版没有记录与实际业务不一致的 `requeued` 事件。
 

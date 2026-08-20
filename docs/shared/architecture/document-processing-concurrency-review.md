@@ -1,7 +1,7 @@
 # 文档处理并发与 Python 进程复用交接
 
-> 状态：2026-08-20 第一版处理指标已实现，尚未实现 Worker Pool 和 Python 进程池。
-> 当前仍是单 Go Worker、每份文档启动一次 Python CLI；本文冻结演进边界，供后端和前端后续开发使用。
+> 状态：2026-08-20 第一版处理指标和固定大小 Go Worker Pool 已实现，尚未实现 Python 进程池。
+> 当前支持同一后端实例内 1～4 个 Go Worker，默认仍为 1；每份文档仍启动一次 Python CLI。
 
 ## 1. 为什么现在记录这项设计
 
@@ -59,6 +59,8 @@ HTTP 上传
 ## 4. 目标过渡架构
 
 ### 4.1 第一阶段：固定大小的 Go Worker Pool
+
+> 已完成：`DOCUMENT_WORKER_CONCURRENCY` 默认 1、允许 1～4；并发 2 已通过双任务 PostgreSQL 收尾和双 Python 子进程测试。
 
 ```text
 document_jobs
@@ -139,12 +141,15 @@ API/任务服务 → 任务队列 → Python Processing Service → 共享对象
 - `succeeded` 的任务仍需要结合文档状态确认 `ready`；
 - 解析失败不会由前端伪造成成功，也不会自动触发向量化。
 
-### 建议增加的配置（计划字段，尚未实现）
+### 并发与进程池配置
 
 ```dotenv
+# 已实现，默认 1 可随时回退到稳定单并发模式。
 DOCUMENT_WORKER_CONCURRENCY=2
+
+# 以下仍为 Python 进程池计划字段，尚未实现。
 PYTHON_PROCESS_POOL_SIZE=2
-PYTHON_PROCESS_MAX_DOCUMENTS=100
+PYTHON_PROCESS_MAX_DOCUMENTS=20
 ```
 
 这些配置不是让用户直接控制的产品字段，而是部署和压测参数。实际并发必须受 CPU、内存、数据库连接池和单用户配额共同约束。
@@ -152,7 +157,7 @@ PYTHON_PROCESS_MAX_DOCUMENTS=100
 ### 后端实现顺序
 
 1. 已完成第一版必要指标：`queue_wait_ms`、`processor_ms`、`total_ms`、文件大小、chunk 数、状态和错误分类；结构化日志与 `document_jobs` 同时保留数据。
-2. 将当前单 Worker 改为固定大小 Worker Pool，先验证并发数 2。
+2. 已完成固定大小 Worker Pool：配置默认 1、上限 4，并发数 2 已通过领取、执行和 shutdown 测试。
 3. 区分“任务已收尾的业务失败”和“领取/数据库等基础设施错误”，避免业务失败统一触发 2 秒轮询退避。
 4. 在阶段耗时明确后，再决定是否使用批量 chunk 写入或 Python 进程池。
 5. Python 进程池稳定后，再加入进程回收、崩溃替换和长时间运行测试。

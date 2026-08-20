@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	documentapplication "rag-reasoning-platform/backend/internal/application/document"
 	"rag-reasoning-platform/backend/internal/config"
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
@@ -210,6 +211,122 @@ func TestPDFProcessorPersistsPageMetadataInPostgreSQL(t *testing.T) {
 		"second page content",
 		2,
 	)
+}
+
+// TestPDFProcessorHandlesTwoDocumentsConcurrently 验证同一个无状态
+// PythonProcessor 可以被两个 Go Worker 同时调用。每次调用仍会创建独立的
+// Python 子进程、stdin/stdout 缓冲区和 request_id，不会互相串包。
+func TestPDFProcessorHandlesTwoDocumentsConcurrently(t *testing.T) {
+	if os.Getenv("RUN_PYTHON_TESTS") != "1" {
+		t.Skip("set RUN_PYTHON_TESTS=1 to run Go/Python integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pythonExecutable := os.Getenv("PYTHON_EXECUTABLE")
+	if pythonExecutable == "" {
+		pythonExecutable = "python"
+	}
+
+	repositoryRoot := integrationRepositoryRoot(t)
+	aiRoot := filepath.Join(repositoryRoot, "ai")
+	storage, err := filestorage.NewLocalStorage(t.TempDir(), 5*1024*1024)
+	if err != nil {
+		t.Fatalf("create concurrent Python test storage: %v", err)
+	}
+	processor, err := pythonprocessor.NewProcessor(
+		storage,
+		pythonExecutable,
+		filepath.Join(aiRoot, "src"),
+		5*1024*1024,
+		10,
+	)
+	if err != nil {
+		t.Fatalf("create concurrent Python processor: %v", err)
+	}
+
+	documents := make([]documentdomain.Document, 0, 2)
+	for index := 0; index < 2; index++ {
+		fixturePath := filepath.Join(
+			t.TempDir(),
+			fmt.Sprintf("concurrent-%d.pdf", index+1),
+		)
+		writeIntegrationTextPDF(t, pythonExecutable, aiRoot, fixturePath)
+
+		fixture, err := os.Open(fixturePath)
+		if err != nil {
+			t.Fatalf("open concurrent PDF fixture %d: %v", index+1, err)
+		}
+		storedFile, saveErr := storage.Save(
+			ctx,
+			fmt.Sprintf("concurrent-%d.pdf", index+1),
+			fixture,
+		)
+		closeErr := fixture.Close()
+		if saveErr != nil {
+			t.Fatalf("save concurrent PDF fixture %d: %v", index+1, saveErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("close concurrent PDF fixture %d: %v", index+1, closeErr)
+		}
+
+		documents = append(documents, documentdomain.Document{
+			ID:           int64(index + 1),
+			OriginalName: fmt.Sprintf("concurrent-%d.pdf", index+1),
+			StoragePath:  storedFile.StoragePath,
+			MIMEType:     storedFile.MIMEType,
+			SizeBytes:    storedFile.SizeBytes,
+			Status:       documentdomain.StatusProcessing,
+		})
+	}
+
+	type processingResult struct {
+		documentID int64
+		result     documentapplication.ProcessingResult
+		err        error
+	}
+	start := make(chan struct{})
+	results := make(chan processingResult, len(documents))
+	for _, currentDocument := range documents {
+		go func(document documentdomain.Document) {
+			<-start
+			result, processErr := processor.Process(ctx, document)
+			results <- processingResult{
+				documentID: document.ID,
+				result:     result,
+				err:        processErr,
+			}
+		}(currentDocument)
+	}
+	close(start)
+
+	seenDocumentIDs := make(map[int64]struct{}, len(documents))
+	for range documents {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf(
+				"process concurrent document %d: %v",
+				result.documentID,
+				result.err,
+			)
+		}
+		if len(result.result.Chunks) != 2 {
+			t.Fatalf(
+				"concurrent document %d chunks = %d, want 2",
+				result.documentID,
+				len(result.result.Chunks),
+			)
+		}
+		seenDocumentIDs[result.documentID] = struct{}{}
+	}
+	if len(seenDocumentIDs) != len(documents) {
+		t.Fatalf(
+			"concurrent Python results = %v, want %d documents",
+			seenDocumentIDs,
+			len(documents),
+		)
+	}
 }
 
 func integrationRepositoryRoot(t *testing.T) string {

@@ -9,6 +9,7 @@ import (
 func TestLoadWorkerUsesDefaults(t *testing.T) {
 	t.Setenv("WORKER_POLL_INTERVAL", "")
 	t.Setenv("WORKER_PROCESSING_TIMEOUT", "")
+	t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "")
 
 	workerConfig, err := LoadWorker()
 	if err != nil {
@@ -28,11 +29,19 @@ func TestLoadWorkerUsesDefaults(t *testing.T) {
 			defaultWorkerProcessingTimeout,
 		)
 	}
+	if workerConfig.DocumentConcurrency != defaultDocumentWorkerConcurrency {
+		t.Fatalf(
+			"DocumentConcurrency = %d, want %d",
+			workerConfig.DocumentConcurrency,
+			defaultDocumentWorkerConcurrency,
+		)
+	}
 }
 
 func TestLoadWorkerUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("WORKER_POLL_INTERVAL", "500ms")
 	t.Setenv("WORKER_PROCESSING_TIMEOUT", "30s")
+	t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "2")
 
 	workerConfig, err := LoadWorker()
 	if err != nil {
@@ -51,6 +60,12 @@ func TestLoadWorkerUsesEnvironmentValues(t *testing.T) {
 			"ProcessingTimeout = %v, want %v",
 			workerConfig.ProcessingTimeout,
 			30*time.Second,
+		)
+	}
+	if workerConfig.DocumentConcurrency != 2 {
+		t.Fatalf(
+			"DocumentConcurrency = %d, want 2",
+			workerConfig.DocumentConcurrency,
 		)
 	}
 }
@@ -91,6 +106,21 @@ func TestLoadWorkerRejectsInvalidDurations(t *testing.T) {
 			environmentName: "WORKER_PROCESSING_TIMEOUT",
 			value:           "-1s",
 		},
+		{
+			name:            "non-numeric document concurrency",
+			environmentName: "DOCUMENT_WORKER_CONCURRENCY",
+			value:           "two",
+		},
+		{
+			name:            "zero document concurrency",
+			environmentName: "DOCUMENT_WORKER_CONCURRENCY",
+			value:           "0",
+		},
+		{
+			name:            "document concurrency above maximum",
+			environmentName: "DOCUMENT_WORKER_CONCURRENCY",
+			value:           "5",
+		},
 	}
 
 	for _, test := range tests {
@@ -98,6 +128,7 @@ func TestLoadWorkerRejectsInvalidDurations(t *testing.T) {
 			// 先建立一个全部合法的测试环境。
 			t.Setenv("WORKER_POLL_INTERVAL", "2s")
 			t.Setenv("WORKER_PROCESSING_TIMEOUT", "5m")
+			t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "1")
 
 			// 然后只破坏本测试关注的环境变量。
 			t.Setenv(test.environmentName, test.value)

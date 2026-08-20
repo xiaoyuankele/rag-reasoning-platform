@@ -17,7 +17,7 @@
 - 简洁的 Vue Web 工作台
 - 核心接口与任务状态测试
 
-项目强调低资源占用：文件流式处理、worker 默认单并发、Python 按需启动、AI 能力可关闭且失败可降级。
+项目强调低资源占用：文件流式处理、worker 默认单并发且可配置为有界并发、Python 按需启动、AI 能力可关闭且失败可降级。
 
 ## 技术架构
 
@@ -92,7 +92,7 @@ rag_reasoning_platform_individual/
 - PDF、Markdown 和 TXT 流式上传及大小、类型校验
 - 文档增删查
 - `uploaded`、`processing`、`ready`、`failed` 状态流转
-- 单并发后台解析、超时、失败记录和手动重试
+- 默认单并发、可配置 1～4 的后台解析，支持超时、失败记录和手动重试
 - 文本分块入库
 - 关键词检索、分页与过滤
 - 核心接口和任务状态测试
@@ -120,7 +120,7 @@ rag_reasoning_platform_individual/
 
 - **P0：范围与仓库**——目录、Git、忽略规则、配置示例和基础说明。
 - **P1：最小后端骨架**——Go 模块、`/health`、PostgreSQL 和文档基础接口。
-- **P2：异步解析链路**——任务表、单并发 worker、Python 解析、失败重试与幂等。
+- **P2：异步解析链路**——任务表、有界 worker、Python 解析、失败重试与幂等。
 - **P3：检索**——关键词/全文检索、分页、过滤、排序和测量。
 - **P4：AI 增强**——向量检索、带来源引用的摘要或问答，以及失败降级。
 - **P5：个人版后端工程化**——运行路径、测试、日志、配置校验、部署、备份和性能/成本记录。
@@ -225,7 +225,7 @@ Worker Application 已定义可替换的文档处理器端口，并实现单次�
 
 本地文件存储已经提供安全 `Open` 能力，能够校验存储路径、保留文件系统错误并在读取过程中响应 context 取消。Go 原生 `TextProcessor` 支持 `text/markdown` 和 `text/plain`，会流式读取 UTF-8 字符、折叠连续空白、去除 BOM，并按每块最多 1000 个 Unicode 字符生成从 0 开始的稳定文本块。自动化测试已覆盖格式拒绝、打开失败、空文本、非法 UTF-8、context 取消、成功与失败关闭，以及真实 LocalStorage 跨层组合。
 
-单并发 WorkerLoop 已经实现连续领取、空队列等待、错误上报和 context 取消，并由生产入口以独立 goroutine 启动。HTTP 服务使用标准库 `http.Server` 响应退出信号和执行限时优雅关闭；真实 HTTP、PostgreSQL 与本地文件链路已经验证 Markdown 文档能够自动处理为统一文本块。Worker 使用独立子 context 限制单份文档的处理时间，默认超时为 5 分钟，并在超时后使用仍有效的父 context 将任务安全标记为失败。
+固定大小 Worker Pool 已经实现连续领取、空队列等待、错误上报和 context 取消；默认并发为 1，可通过 `DOCUMENT_WORKER_CONCURRENCY` 配置为 1～4，并发 2 已通过两个不同任务的 PostgreSQL 收尾和两个一次性 Python 子进程测试。HTTP 服务使用标准库 `http.Server` 响应退出信号和执行限时优雅关闭；真实 HTTP、PostgreSQL 与本地文件链路已经验证 Markdown 文档能够自动处理为统一文本块。Worker 使用独立子 context 限制单份文档的处理时间，默认超时为 5 分钟，并在超时后使用仍有效的父 context 将任务安全标记为失败。
 
 服务启动时会在 Worker 运行前恢复上一次异常退出遗留的 `processing` 任务，并在同一 PostgreSQL 事务内把任务和关联文档标记为 `failed`。真实启动测试已验证恢复数量、双表状态一致性、安全错误信息和第二次启动的幂等性。当前恢复策略建立在单实例 Worker 约束上；未来扩展为多实例时需要使用 lease/heartbeat 判断任务是否真正失联。
 
