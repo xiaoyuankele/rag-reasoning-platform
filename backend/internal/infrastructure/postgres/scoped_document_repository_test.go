@@ -126,6 +126,9 @@ func TestScopedDocumentRepositoryRejectsInvalidScopeBeforeDatabaseAccess(t *test
 	if _, err := repository.CreateOrGetBySHA256(ctx, invalidScope, documentdomain.CreateInput{}); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
 		t.Fatalf("CreateOrGetBySHA256(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
 	}
+	if _, err := repository.FindBySHA256AndSize(ctx, invalidScope, strings.Repeat("a", 64), 1); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
+		t.Fatalf("FindBySHA256AndSize(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
+	}
 	if _, err := repository.GetByID(ctx, invalidScope, 1); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
 		t.Fatalf("GetByID(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
 	}
@@ -231,6 +234,25 @@ func TestScopedDocumentRepositoryCreateOrGetBySHA256(t *testing.T) {
 	}
 	if ownerACount != 1 {
 		t.Fatalf("owner A duplicate row count = %d, want 1", ownerACount)
+	}
+
+	foundDuplicate, err := repository.FindBySHA256AndSize(
+		ctx,
+		ownerA,
+		sharedHash,
+		1024,
+	)
+	if err != nil {
+		t.Fatalf("FindBySHA256AndSize(owner A) error = %v", err)
+	}
+	if foundDuplicate.ID != sharedDocumentID || foundDuplicate.OwnerUserID != ownerAID {
+		t.Fatalf("FindBySHA256AndSize(owner A) = %+v, want document %d", foundDuplicate, sharedDocumentID)
+	}
+	if _, err := repository.FindBySHA256AndSize(ctx, ownerA, sharedHash, 2048); !errors.Is(err, documentdomain.ErrNotFound) {
+		t.Fatalf("FindBySHA256AndSize(wrong size) error = %v, want ErrNotFound", err)
+	}
+	if _, err := repository.FindBySHA256AndSize(ctx, ownerB, sharedHash, 1024); !errors.Is(err, documentdomain.ErrNotFound) {
+		t.Fatalf("FindBySHA256AndSize(other owner) error = %v, want ErrNotFound", err)
 	}
 
 	otherOwnerResult, err := repository.CreateOrGetBySHA256(

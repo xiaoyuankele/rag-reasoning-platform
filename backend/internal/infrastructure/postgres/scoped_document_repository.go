@@ -201,6 +201,57 @@ func (r *ScopedDocumentRepository) getByOwnerAndSHA256(
 	))
 }
 
+// FindBySHA256AndSize 在指定所有者范围内查找二进制内容完全相同的文档。
+// 该查询复用 (owner_user_id, sha256) 唯一索引，不需要为预检新增缓存或迁移。
+func (r *ScopedDocumentRepository) FindBySHA256AndSize(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	sha256 string,
+	sizeBytes int64,
+) (documentdomain.Document, error) {
+	if !scope.IsValid() {
+		return documentdomain.Document{}, accessdomain.ErrInvalidOwnerScope
+	}
+
+	const query = `
+		SELECT
+			id,
+			owner_user_id,
+			title,
+			original_name,
+			storage_path,
+			mime_type,
+			size_bytes,
+			sha256,
+			status,
+			error_message,
+			created_at,
+			updated_at
+		FROM documents
+		WHERE owner_user_id = $1
+		  AND sha256 = $2
+		  AND size_bytes = $3
+	`
+
+	foundDocument, err := scanScopedDocument(r.pool.QueryRow(
+		ctx,
+		query,
+		scope.OwnerUserID(),
+		sha256,
+		sizeBytes,
+	))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return documentdomain.Document{}, documentdomain.ErrNotFound
+	}
+	if err != nil {
+		return documentdomain.Document{}, fmt.Errorf(
+			"find scoped document by SHA-256 and size: %w",
+			err,
+		)
+	}
+	return foundDocument, nil
+}
+
 // GetByID 只查询同时匹配文档 ID 和 OwnerScope 的记录。
 func (r *ScopedDocumentRepository) GetByID(
 	ctx context.Context,

@@ -84,6 +84,19 @@ type ScopedCreateOrGetter interface {
 	) (CreateOrGetResult, error)
 }
 
+// ScopedContentFinder 定义在可信所有者范围内按照内容指纹查找文档的能力。
+//
+// SHA-256 与字节数同时匹配才表示二进制内容完全相同。未命中时返回
+// ErrNotFound；不同用户的相同内容不能互相命中。
+type ScopedContentFinder interface {
+	FindBySHA256AndSize(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		sha256 string,
+		sizeBytes int64,
+	) (Document, error)
+}
+
 // ScopedFinder 定义只能在可信所有者范围内按 ID 查询文档的仓储能力。
 // 文档不存在和属于其他用户都必须返回 ErrNotFound。
 type ScopedFinder interface {
@@ -116,6 +129,7 @@ type ScopedDeleter interface {
 type ScopedRepository interface {
 	ScopedCreator
 	ScopedCreateOrGetter
+	ScopedContentFinder
 	ScopedFinder
 	ScopedLister
 	ScopedDeleter

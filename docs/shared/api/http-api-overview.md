@@ -1,6 +1,6 @@
 # HTTP API 总览
 
-> 更新时间：2026-08-19。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
+> 更新时间：2026-08-20。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
 > Handler 测试和后续 OpenAPI 文件为最终校验依据。
 
 ## 1. 当前访问边界
@@ -19,6 +19,7 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 |---|---|---|---|---|---|
 | `GET` | `/health` | 无 | `200` | 检查后端是否存活 | 系统状态/开发验收 |
 | `POST` | `/documents` | Session Cookie；`multipart/form-data` 的 `file` | 新建 `201`；同用户重复 `200` | 上传、绑定当前用户并按内容去重 | 用户功能；已隔离 |
+| `POST` | `/documents/preflight` | Session Cookie；JSON：`sha256`、`size_bytes` | `200` | 上传文件正文前检查当前用户是否已有相同二进制内容 | 用户功能；已隔离/性能优化 |
 | `GET` | `/documents` | Session Cookie；`page`、`page_size` | `200` | 分页获取当前用户文档 | 用户功能；已隔离 |
 | `GET` | `/documents/:id` | Session Cookie；路径参数 `id` | `200` | 获取当前用户文档详情 | 用户功能；已隔离 |
 | `GET` | `/documents/:id/chunks` | Session Cookie；路径参数 `id`，可选 `page`、`page_size` | `200` | 查看当前用户 ready 文档的文本块 | 用户功能；已隔离 |
@@ -38,6 +39,77 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `POST` | `/auth/password-reset` | JSON：`verification_id`、`verification_code`、`new_password` | `204` | 更新密码并撤销全部旧 Session | 认证功能；清除当前 `rag_session` Cookie |
 | `POST` | `/auth/logout` | `rag_session` Cookie（可选） | `204` | 幂等撤销 Session 并清除 Cookie | 认证功能 |
 | `GET` | `/users/me` | `rag_session` Cookie | `200` | 恢复当前用户公开资料 | 认证功能；已受 Session 中间件保护 |
+
+### 2.1 上传前重复文件预检正式契约
+
+`POST /documents/preflight` 是受 Session 保护的只读预检接口。它只减少重复文件的上传流量和服务端读取成本，
+不能替代 `POST /documents` 的可信哈希计算、文件类型校验和数据库唯一约束。
+
+请求：
+
+```http
+POST /documents/preflight
+Content-Type: application/json
+Cookie: rag_session=...
+```
+
+```json
+{
+  "sha256": "d5db70fbccdd8ccc6a553604b79a09cd33083b401340d546efa08a52142c972e",
+  "size_bytes": 14
+}
+```
+
+- `sha256` 必须是恰好 64 位的小写十六进制 SHA-256；
+- `size_bytes` 必须是正整数，且不能超过后端当前文件大小上限；
+- `original_name` 不属于预检契约，因为文件名不参与内容去重；
+- 身份只来自 Session，禁止发送 `user_id`。
+
+当前用户没有相同内容时返回 `200`：
+
+```json
+{
+  "exists": false,
+  "document": null
+}
+```
+
+当前用户已有同时匹配 `sha256` 和 `size_bytes` 的文档时返回 `200`：
+
+```json
+{
+  "exists": true,
+  "document": {
+    "id": 3,
+    "title": null,
+    "original_name": "first-upload.pdf",
+    "mime_type": "application/pdf",
+    "size_bytes": 14,
+    "sha256": "d5db70fbccdd8ccc6a553604b79a09cd33083b401340d546efa08a52142c972e",
+    "status": "ready",
+    "error_message": null,
+    "created_at": "2026-08-20T16:00:00+08:00",
+    "updated_at": "2026-08-20T16:01:00+08:00"
+  }
+}
+```
+
+正式错误契约：
+
+| 状态码 | 稳定 `code` | 含义 | 前端行为 |
+| --- | --- | --- | --- |
+| `400` | `invalid_document_preflight` | JSON、SHA-256 或文件大小格式不合法 | 阻止上传并修正本地输入，不降级 |
+| `401` | `authentication_required` | Session 缺失、过期或已撤销 | 进入重新认证流程，不降级 |
+| `413` | `file_too_large` | 文件超过当前上传上限 | 阻止上传，不降级 |
+| `500` | `internal_error` | 后端查询异常 | 可以降级到原 `POST /documents`，同时保留请求 ID |
+
+网络错误、超时或 `5xx` 时允许前端“失效开放”：继续调用原上传接口。这样只会失去预检带来的性能优化，
+不会破坏正确性，因为后端仍会根据真实文件字节重新计算 SHA-256。`400`、`401` 和 `413` 属于确定性拒绝，
+不得绕过预检继续上传。
+
+预检结果不是上传预约，也不锁定文档。两个标签页可能同时得到 `exists:false`；随后并发上传时，
+`POST /documents` 仍依靠 `(owner_user_id, sha256)` 唯一约束确保同一用户只保留一份内容。
+不同用户之间不会通过预检互相看到文档。第一版直接查询 PostgreSQL，不引入 Redis。
 
 ## 3. P6 认证接口状态
 

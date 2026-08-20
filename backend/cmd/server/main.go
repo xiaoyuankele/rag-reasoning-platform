@@ -316,6 +316,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// Service 负责文档查询用例和业务参数校验。
 	documentService := documentapplication.NewService(scopedDocumentRepository)
 	documentUploadService := documentapplication.NewUploadService(scopedDocumentRepository, localFileStorage)
+	documentPreflightService := documentapplication.NewPreflightService(
+		scopedDocumentRepository,
+		storageConfig.MaxFileSizeBytes,
+	)
 	documentListService := documentapplication.NewListService(scopedDocumentRepository)
 	documentChunkListService := documentapplication.NewChunkListService(
 		scopedDocumentRepository,
@@ -615,6 +619,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// Handler 负责把 HTTP 请求转换成应用服务调用。
 	documentHandler := api.NewDocumentHandler(documentService, logger)
 	documentUploadHandler := api.NewDocumentUploadHandler(documentUploadService, storageConfig.MaxFileSizeBytes)
+	documentPreflightHandler := api.NewDocumentPreflightHandler(
+		documentPreflightService,
+		logger,
+	)
 	documentListHandler := api.NewDocumentListHandler(documentListService)
 	documentChunkHandler := api.NewDocumentChunkHandler(
 		documentChunkListService,
@@ -696,6 +704,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	protectedRoutes.Use(authMiddleware.Require)
 	documentHandler.RegisterRoutes(protectedRoutes)
 	documentUploadHandler.RegisterRoutes(protectedRoutes)
+	documentPreflightHandler.RegisterRoutes(protectedRoutes)
 	documentListHandler.RegisterRoutes(protectedRoutes)
 	documentDeleteHandler.RegisterRoutes(protectedRoutes)
 	documentChunkHandler.RegisterRoutes(protectedRoutes)

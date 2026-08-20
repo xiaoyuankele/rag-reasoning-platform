@@ -12,6 +12,8 @@ import (
 const (
 	errorCodeInvalidDocumentID              = "invalid_document_id"
 	errorCodeDocumentNotFound               = "document_not_found"
+	errorCodeInvalidDocumentPreflight       = "invalid_document_preflight"
+	errorCodeFileTooLarge                   = "file_too_large"
 	errorCodeInvalidEmbeddingJobID          = "invalid_embedding_job_id"
 	errorCodeEmbeddingJobNotFound           = "embedding_job_not_found"
 	errorCodeEmbeddingJobProcessing         = "embedding_job_processing"
