@@ -117,6 +117,11 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			createdJob.ID,
 			documentdomain.ProcessingCompletion{
 				DetectedTitle: &detectedTitle,
+				Metrics: documentdomain.ProcessingExecutionMetrics{
+					ProcessorDuration: 1250 * time.Millisecond,
+					FileBytes:         createdDocument.SizeBytes,
+					ChunkCount:        7,
+				},
 			},
 		); err != nil {
 			t.Fatalf("mark processing job succeeded: %v", err)
@@ -133,6 +138,16 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			documentdomain.StatusReady,
 			nil,
 			&detectedTitle,
+		)
+		assertPersistedProcessingMetrics(
+			t,
+			ctx,
+			pool,
+			createdJob.ID,
+			1250,
+			createdDocument.SizeBytes,
+			7,
+			nil,
 		)
 
 		activatedEmbeddingJob, err := embeddingJobs.GetEmbeddingJobByID(
@@ -250,10 +265,18 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 		}
 
 		safeErrorMessage := "document processing failed"
+		errorCode := string(documentdomain.ProcessingErrorCodeProcessor)
 		if err := jobRepository.MarkProcessingJobFailed(
 			ctx,
 			createdJob.ID,
-			safeErrorMessage,
+			documentdomain.ProcessingFailure{
+				Message: safeErrorMessage,
+				Metrics: documentdomain.ProcessingExecutionMetrics{
+					ProcessorDuration: 900 * time.Millisecond,
+					FileBytes:         createdDocument.SizeBytes,
+					ErrorCode:         documentdomain.ProcessingErrorCodeProcessor,
+				},
+			},
 		); err != nil {
 			t.Fatalf("mark processing job failed: %v", err)
 		}
@@ -269,6 +292,16 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			documentdomain.StatusFailed,
 			&safeErrorMessage,
 			nil,
+		)
+		assertPersistedProcessingMetrics(
+			t,
+			ctx,
+			pool,
+			createdJob.ID,
+			900,
+			createdDocument.SizeBytes,
+			0,
+			&errorCode,
 		)
 
 		stillWaitingJob, err := embeddingJobs.GetEmbeddingJobByID(
@@ -290,7 +323,9 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 		err = jobRepository.MarkProcessingJobFailed(
 			ctx,
 			createdJob.ID,
-			safeErrorMessage,
+			documentdomain.ProcessingFailure{
+				Message: safeErrorMessage,
+			},
 		)
 		if !errors.Is(
 			err,
@@ -452,6 +487,72 @@ func assertFinalizedJobAndDocument(
 		"finalized document title",
 		foundDocument.Title,
 		expectedTitle,
+	)
+}
+
+func assertPersistedProcessingMetrics(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	jobID int64,
+	expectedProcessorMS int64,
+	expectedFileBytes int64,
+	expectedChunkCount int,
+	expectedErrorCode *string,
+) {
+	t.Helper()
+
+	var queueWaitMS int64
+	var processorMS int64
+	var totalMS int64
+	var fileBytes int64
+	var chunkCount int
+	var errorCode *string
+	if err := pool.QueryRow(
+		ctx,
+		`
+			SELECT
+				queue_wait_ms,
+				processor_ms,
+				total_ms,
+				file_bytes,
+				chunk_count,
+				error_code
+			FROM document_jobs
+			WHERE id = $1
+		`,
+		jobID,
+	).Scan(
+		&queueWaitMS,
+		&processorMS,
+		&totalMS,
+		&fileBytes,
+		&chunkCount,
+		&errorCode,
+	); err != nil {
+		t.Fatalf("query persisted processing metrics: %v", err)
+	}
+
+	if queueWaitMS < 0 {
+		t.Fatalf("queue_wait_ms = %d, want non-negative", queueWaitMS)
+	}
+	if totalMS < 0 {
+		t.Fatalf("total_ms = %d, want non-negative", totalMS)
+	}
+	if processorMS != expectedProcessorMS {
+		t.Fatalf("processor_ms = %d, want %d", processorMS, expectedProcessorMS)
+	}
+	if fileBytes != expectedFileBytes {
+		t.Fatalf("file_bytes = %d, want %d", fileBytes, expectedFileBytes)
+	}
+	if chunkCount != expectedChunkCount {
+		t.Fatalf("chunk_count = %d, want %d", chunkCount, expectedChunkCount)
+	}
+	assertOptionalString(
+		t,
+		"processing metrics error code",
+		errorCode,
+		expectedErrorCode,
 	)
 }
 

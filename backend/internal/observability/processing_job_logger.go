@@ -40,11 +40,21 @@ func (l *ProcessingJobLogger) ObserveProcessingJobEvent(
 		slog.Int64("document_id", event.DocumentID),
 		slog.Int("attempt_count", event.AttemptCount),
 		slog.String("status", string(event.Status)),
+		slog.Int64("queue_wait_ms", event.QueueWait.Milliseconds()),
 	}
 	if event.Type != documentapplication.ProcessingJobEventStarted {
 		attributes = append(
 			attributes,
-			slog.Int64("duration_ms", event.Duration.Milliseconds()),
+			slog.Int64("processor_ms", event.ProcessorDuration.Milliseconds()),
+			slog.Int64("total_ms", event.TotalDuration.Milliseconds()),
+			slog.Int64("file_bytes", event.FileBytes),
+			slog.Int("chunk_count", event.ChunkCount),
+		)
+	}
+	if event.ErrorCode != "" {
+		attributes = append(
+			attributes,
+			slog.String("error_code", string(event.ErrorCode)),
 		)
 	}
 	if event.Err != nil {

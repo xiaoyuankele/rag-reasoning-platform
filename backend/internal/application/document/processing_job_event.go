@@ -30,16 +30,22 @@ const (
 
 // ProcessingJobEvent 是 Application 交给可观测性适配器的任务事件数据。
 //
-// Err 只供后端诊断使用，不能直接返回给前端；Duration 在 started 事件中为零，
-// 在其他终结事件中表示本次 Worker 执行耗时。
+// Err 只供后端诊断使用，不能直接返回给前端。QueueWait 表示任务排队耗时，
+// ProcessorDuration 表示整个文档处理器调用耗时，TotalDuration 表示 Worker
+// 从领取任务到产生终结事件的总耗时。
 type ProcessingJobEvent struct {
-	Type         ProcessingJobEventType
-	JobID        int64
-	DocumentID   int64
-	AttemptCount int
-	Status       documentdomain.ProcessingJobStatus
-	Duration     time.Duration
-	Err          error
+	Type              ProcessingJobEventType
+	JobID             int64
+	DocumentID        int64
+	AttemptCount      int
+	Status            documentdomain.ProcessingJobStatus
+	QueueWait         time.Duration
+	ProcessorDuration time.Duration
+	TotalDuration     time.Duration
+	FileBytes         int64
+	ChunkCount        int
+	ErrorCode         documentdomain.ProcessingErrorCode
+	Err               error
 }
 
 // ProcessingJobEventObserver 是 Application 与任务日志实现之间的插口契约。

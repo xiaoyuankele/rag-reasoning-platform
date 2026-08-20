@@ -138,6 +138,7 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 	expectedDocument := documentdomain.Document{
 		ID:          expectedJob.DocumentID,
 		StoragePath: "documents/example.pdf",
+		SizeBytes:   4096,
 		Status:      documentdomain.StatusProcessing,
 	}
 	expectedChunks := []documentdomain.ChunkInput{
@@ -169,6 +170,26 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 					"completion detected title = %v, want %q",
 					completion.DetectedTitle,
 					detectedTitle,
+				)
+			}
+			if completion.Metrics.FileBytes != expectedDocument.SizeBytes {
+				t.Fatalf(
+					"completion file bytes = %d, want %d",
+					completion.Metrics.FileBytes,
+					expectedDocument.SizeBytes,
+				)
+			}
+			if completion.Metrics.ChunkCount != len(expectedChunks) {
+				t.Fatalf(
+					"completion chunk count = %d, want %d",
+					completion.Metrics.ChunkCount,
+					len(expectedChunks),
+				)
+			}
+			if completion.Metrics.ErrorCode != documentdomain.ProcessingErrorCodeNone {
+				t.Fatalf(
+					"completion error code = %q, want empty",
+					completion.Metrics.ErrorCode,
 				)
 			}
 			return nil
@@ -289,8 +310,22 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 	if events.events[1].Err != nil {
 		t.Fatalf("succeeded event error = %v, want nil", events.events[1].Err)
 	}
-	if events.events[1].Duration < 0 {
-		t.Fatalf("succeeded event duration = %s, want non-negative", events.events[1].Duration)
+	if events.events[1].TotalDuration < 0 {
+		t.Fatalf("succeeded event duration = %s, want non-negative", events.events[1].TotalDuration)
+	}
+	if events.events[1].FileBytes != expectedDocument.SizeBytes {
+		t.Fatalf(
+			"succeeded event file bytes = %d, want %d",
+			events.events[1].FileBytes,
+			expectedDocument.SizeBytes,
+		)
+	}
+	if events.events[1].ChunkCount != len(expectedChunks) {
+		t.Fatalf(
+			"succeeded event chunk count = %d, want %d",
+			events.events[1].ChunkCount,
+			len(expectedChunks),
+		)
 	}
 }
 
@@ -382,7 +417,7 @@ func TestWorkerRunOnceMarksFailedProcessing(t *testing.T) {
 		markFailedFunc: func(
 			_ context.Context,
 			jobID int64,
-			errorMessage string,
+			failure documentdomain.ProcessingFailure,
 		) error {
 			if jobID != expectedJob.ID {
 				t.Fatalf(
@@ -391,11 +426,18 @@ func TestWorkerRunOnceMarksFailedProcessing(t *testing.T) {
 					expectedJob.ID,
 				)
 			}
-			if errorMessage != safeProcessingFailureMessage {
+			if failure.Message != safeProcessingFailureMessage {
 				t.Fatalf(
 					"failure message = %q, want %q",
-					errorMessage,
+					failure.Message,
 					safeProcessingFailureMessage,
+				)
+			}
+			if failure.Metrics.ErrorCode != documentdomain.ProcessingErrorCodeProcessor {
+				t.Fatalf(
+					"failure error code = %q, want %q",
+					failure.Metrics.ErrorCode,
+					documentdomain.ProcessingErrorCodeProcessor,
 				)
 			}
 			return nil
@@ -495,7 +537,7 @@ func TestWorkerRunOnceMarksTimedOutProcessingFailed(t *testing.T) {
 		markFailedFunc: func(
 			ctx context.Context,
 			jobID int64,
-			errorMessage string,
+			failure documentdomain.ProcessingFailure,
 		) error {
 			// 数据库收尾必须使用仍然有效的父 context，不能使用
 			// 已经发生 DeadlineExceeded 的 processContext。
@@ -512,11 +554,18 @@ func TestWorkerRunOnceMarksTimedOutProcessingFailed(t *testing.T) {
 					expectedJob.ID,
 				)
 			}
-			if errorMessage != safeProcessingTimeoutMessage {
+			if failure.Message != safeProcessingTimeoutMessage {
 				t.Fatalf(
 					"failure message = %q, want %q",
-					errorMessage,
+					failure.Message,
 					safeProcessingTimeoutMessage,
+				)
+			}
+			if failure.Metrics.ErrorCode != documentdomain.ProcessingErrorCodeProcessorTimeout {
+				t.Fatalf(
+					"failure error code = %q, want %q",
+					failure.Metrics.ErrorCode,
+					documentdomain.ProcessingErrorCodeProcessorTimeout,
 				)
 			}
 			return nil
@@ -615,7 +664,7 @@ func TestWorkerRunOnceMarksFailedWhenChunkReplacementFails(t *testing.T) {
 		markFailedFunc: func(
 			_ context.Context,
 			jobID int64,
-			errorMessage string,
+			failure documentdomain.ProcessingFailure,
 		) error {
 			steps = append(steps, "mark failed")
 			if jobID != expectedJob.ID {
@@ -625,11 +674,18 @@ func TestWorkerRunOnceMarksFailedWhenChunkReplacementFails(t *testing.T) {
 					expectedJob.ID,
 				)
 			}
-			if errorMessage != safeProcessingFailureMessage {
+			if failure.Message != safeProcessingFailureMessage {
 				t.Fatalf(
 					"failure message = %q, want %q",
-					errorMessage,
+					failure.Message,
 					safeProcessingFailureMessage,
+				)
+			}
+			if failure.Metrics.ErrorCode != documentdomain.ProcessingErrorCodeChunkWrite {
+				t.Fatalf(
+					"failure error code = %q, want %q",
+					failure.Metrics.ErrorCode,
+					documentdomain.ProcessingErrorCodeChunkWrite,
 				)
 			}
 			return nil
@@ -745,7 +801,7 @@ func TestWorkerRunOncePreservesChunkAndFailureFinalizationErrors(
 		markFailedFunc: func(
 			context.Context,
 			int64,
-			string,
+			documentdomain.ProcessingFailure,
 		) error {
 			return finalizationError
 		},
@@ -835,7 +891,7 @@ func TestWorkerRunOncePreservesProcessingAndFailureFinalizationErrors(
 		markFailedFunc: func(
 			context.Context,
 			int64,
-			string,
+			documentdomain.ProcessingFailure,
 		) error {
 			return finalizationError
 		},

@@ -151,8 +151,15 @@ Application 只报告任务事实，不依赖具体日志框架；`main.go` 负�
 | `processing_job_failed` | `ERROR` | 处理失败，而且任务已经安全写入 `failed` |
 | `processing_job_unfinished` | `ERROR` | Worker 未能写入终态，任务可能仍停留在 `processing` |
 
-所有任务事件包含 `processing_job_id`、`document_id`、`attempt_count` 和 `status`；终结事件还包含
-`duration_ms`，失败事件在后端日志保留原始 `error`。日志不记录正文、存储路径、密钥或上传内容。
+所有任务事件包含 `processing_job_id`、`document_id`、`attempt_count`、`status` 和
+`queue_wait_ms`。终结事件还包含 `processor_ms`、`total_ms`、`file_bytes` 和
+`chunk_count`。失败事件使用稳定 `error_code` 供数据库统计，同时仅在后端日志保留原始
+`error`。日志和指标表都不记录正文、存储路径、密钥或上传内容。
+
+第一版有意只测量最关键的三个时间范围：排队、整个文档处理器调用和 Worker 总执行。
+其中 `processor_ms` 包含 Python 进程启动、PDF 提取、文本切分和 Go/Python 协议往返；
+现阶段不拆分 `python_startup_ms`、`parse_ms`、`split_ms`、`chunk_write_ms` 或
+`finalize_ms`。这些指标同时持久化在对应 `document_jobs` 记录，历史任务保持 `NULL`。
 
 当前中断恢复策略是服务启动后将遗留 `processing` 任务标记为失败，并不存在重新排队行为，
 因此这一版没有记录与实际业务不一致的 `requeued` 事件。

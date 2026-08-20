@@ -54,6 +54,41 @@ func (s ProcessingJobStatus) IsValid() bool {
 	}
 }
 
+// ProcessingErrorCode 是文档处理失败时可持久化、可统计的稳定分类。
+//
+// 它不包含文件路径、SQL 或第三方响应等底层细节；完整错误只进入后端日志。
+type ProcessingErrorCode string
+
+const (
+	// ProcessingErrorCodeNone 表示本次处理没有业务失败。
+	ProcessingErrorCodeNone ProcessingErrorCode = ""
+
+	// ProcessingErrorCodeDocumentLookup 表示 Worker 领取任务后无法读取文档记录。
+	ProcessingErrorCodeDocumentLookup ProcessingErrorCode = "document_lookup_failed"
+
+	// ProcessingErrorCodeProcessor 表示文档处理器执行失败。
+	ProcessingErrorCodeProcessor ProcessingErrorCode = "processor_failed"
+
+	// ProcessingErrorCodeProcessorTimeout 表示文档处理器超过执行时限。
+	ProcessingErrorCodeProcessorTimeout ProcessingErrorCode = "processor_timeout"
+
+	// ProcessingErrorCodeChunkWrite 表示处理器成功，但文本块写入失败。
+	ProcessingErrorCodeChunkWrite ProcessingErrorCode = "chunk_write_failed"
+
+	// ProcessingErrorCodeFinalization 表示处理结果已经产生，但任务终态回写失败。
+	ProcessingErrorCodeFinalization ProcessingErrorCode = "finalization_failed"
+)
+
+// ProcessingExecutionMetrics 是一次 Worker 执行需要持久化的精简观测数据。
+// QueueWait 和 TotalDuration 由 PostgreSQL 根据任务时间戳计算，Application
+// 只负责提供它能够准确测量的处理器耗时和输入、输出规模。
+type ProcessingExecutionMetrics struct {
+	ProcessorDuration time.Duration
+	FileBytes         int64
+	ChunkCount        int
+	ErrorCode         ProcessingErrorCode
+}
+
 // ProcessingJob 表示一次异步文档解析任务。
 type ProcessingJob struct {
 	ID           int64
@@ -115,6 +150,18 @@ type ProcessingCompletion struct {
 	// DetectedTitle 是处理器自动识别的可选标题。
 	// Infrastructure 只在文档当前没有标题时采用它，避免覆盖未来的用户标题。
 	DetectedTitle *string
+
+	// Metrics 保存本次成功执行的精简性能指标。
+	Metrics ProcessingExecutionMetrics
+}
+
+// ProcessingFailure 是任务失败收尾需要持久化的安全结果。
+type ProcessingFailure struct {
+	// Message 可以返回给前端，不包含底层错误细节。
+	Message string
+
+	// Metrics 保存本次失败执行已经获得的精简性能指标。
+	Metrics ProcessingExecutionMetrics
 }
 
 // ProcessingJobFinalizer 定义 Worker 完成一次执行后所需的状态回写能力。
@@ -128,7 +175,7 @@ type ProcessingJobFinalizer interface {
 	MarkProcessingJobFailed(
 		ctx context.Context,
 		jobID int64,
-		errorMessage string,
+		failure ProcessingFailure,
 	) error
 }
 

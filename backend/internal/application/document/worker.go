@@ -125,6 +125,11 @@ func (w *Worker) RunOnce(
 	// 从领取成功开始，任务已经进入 processing。观察器先记录 started，
 	// 然后 defer 保证每条已领取任务最终都有一条终结事件。
 	startedAt := time.Now()
+	queueWait := processingJobQueueWait(job, startedAt)
+	processorDuration := time.Duration(0)
+	fileBytes := int64(0)
+	chunkCount := 0
+	errorCode := documentdomain.ProcessingErrorCodeNone
 	finalStatus := documentdomain.ProcessingJobStatusProcessing
 	w.events.ObserveProcessingJobEvent(ctx, ProcessingJobEvent{
 		Type:         ProcessingJobEventStarted,
@@ -132,6 +137,7 @@ func (w *Worker) RunOnce(
 		DocumentID:   job.DocumentID,
 		AttemptCount: job.AttemptCount,
 		Status:       finalStatus,
+		QueueWait:    queueWait,
 	})
 	defer func() {
 		eventType := ProcessingJobEventUnfinished
@@ -143,13 +149,18 @@ func (w *Worker) RunOnce(
 		}
 
 		w.events.ObserveProcessingJobEvent(ctx, ProcessingJobEvent{
-			Type:         eventType,
-			JobID:        job.ID,
-			DocumentID:   job.DocumentID,
-			AttemptCount: job.AttemptCount,
-			Status:       finalStatus,
-			Duration:     time.Since(startedAt),
-			Err:          err,
+			Type:              eventType,
+			JobID:             job.ID,
+			DocumentID:        job.DocumentID,
+			AttemptCount:      job.AttemptCount,
+			Status:            finalStatus,
+			QueueWait:         queueWait,
+			ProcessorDuration: processorDuration,
+			TotalDuration:     time.Since(startedAt),
+			FileBytes:         fileBytes,
+			ChunkCount:        chunkCount,
+			ErrorCode:         errorCode,
+			Err:               err,
 		})
 	}()
 
@@ -157,17 +168,21 @@ func (w *Worker) RunOnce(
 	// handled 也必须返回 true。
 	foundDocument, err := w.documents.GetByID(ctx, job.DocumentID)
 	if err != nil {
+		errorCode = documentdomain.ProcessingErrorCodeDocumentLookup
 		return true, fmt.Errorf(
 			"get claimed processing job document: %w",
 			err,
 		)
 	}
+	fileBytes = foundDocument.SizeBytes
 
 	// processContext 只限制文档处理器的执行时间。
 	// 父级 ctx 取消时，它也会立刻取消；即使父级仍然有效，
 	// 超过 processingTimeout 后也会自动返回 DeadlineExceeded。
 	processContext, cancelProcess := context.WithTimeout(ctx, w.processingTimeout)
+	processorStartedAt := time.Now()
 	processingResult, processingErr := w.processor.Process(processContext, foundDocument)
+	processorDuration = time.Since(processorStartedAt)
 
 	// 处理器已经返回，不再需要定时器，立即释放相关资源。
 	cancelProcess()
@@ -181,15 +196,24 @@ func (w *Worker) RunOnce(
 		)
 
 		failureMessage := safeProcessingFailureMessage
+		errorCode = documentdomain.ProcessingErrorCodeProcessor
 		if errors.Is(processingErr, context.DeadlineExceeded) {
 			failureMessage = safeProcessingTimeoutMessage
+			errorCode = documentdomain.ProcessingErrorCodeProcessorTimeout
 		}
 
 		// 数据库只保存可安全展示给前端的通用失败说明。
 		finalizationErr := w.jobs.MarkProcessingJobFailed(
 			ctx,
 			job.ID,
-			failureMessage,
+			documentdomain.ProcessingFailure{
+				Message: failureMessage,
+				Metrics: documentdomain.ProcessingExecutionMetrics{
+					ProcessorDuration: processorDuration,
+					FileBytes:         fileBytes,
+					ErrorCode:         errorCode,
+				},
+			},
 		)
 		if finalizationErr != nil {
 			wrappedFinalizationErr := fmt.Errorf(
@@ -209,9 +233,11 @@ func (w *Worker) RunOnce(
 		finalStatus = documentdomain.ProcessingJobStatusFailed
 		return true, wrappedProcessingErr
 	}
+	chunkCount = len(processingResult.Chunks)
 	// 处理器成功后先保存文本块；只有结果成功入库，任务才能进入 succeeded。
 	replaceErr := w.chunks.ReplaceForDocument(ctx, foundDocument.ID, processingResult.Chunks)
 	if replaceErr != nil {
+		errorCode = documentdomain.ProcessingErrorCodeChunkWrite
 		wrappedReplaceErr := fmt.Errorf(
 			"replace document %d chunks: %w",
 			foundDocument.ID,
@@ -221,7 +247,15 @@ func (w *Worker) RunOnce(
 		markFailedErr := w.jobs.MarkProcessingJobFailed(
 			ctx,
 			job.ID,
-			safeProcessingFailureMessage,
+			documentdomain.ProcessingFailure{
+				Message: safeProcessingFailureMessage,
+				Metrics: documentdomain.ProcessingExecutionMetrics{
+					ProcessorDuration: processorDuration,
+					FileBytes:         fileBytes,
+					ChunkCount:        chunkCount,
+					ErrorCode:         errorCode,
+				},
+			},
 		)
 		if markFailedErr != nil {
 			wrappedMarkFailedErr := fmt.Errorf(
@@ -245,10 +279,16 @@ func (w *Worker) RunOnce(
 		job.ID,
 		documentdomain.ProcessingCompletion{
 			DetectedTitle: processingResult.DetectedTitle,
+			Metrics: documentdomain.ProcessingExecutionMetrics{
+				ProcessorDuration: processorDuration,
+				FileBytes:         fileBytes,
+				ChunkCount:        chunkCount,
+			},
 		},
 	); err != nil {
 		// 这里不能改写成 failed：文档处理已经成功，
 		// 失败的是数据库状态回写，两者的业务事实不同。
+		errorCode = documentdomain.ProcessingErrorCodeFinalization
 		return true, fmt.Errorf(
 			"mark processing job %d succeeded: %w",
 			job.ID,
@@ -258,4 +298,28 @@ func (w *Worker) RunOnce(
 
 	finalStatus = documentdomain.ProcessingJobStatusSucceeded
 	return true, nil
+}
+
+// processingJobQueueWait 优先使用数据库领取事务写入的 StartedAt，避免把
+// PostgreSQL 查询返回和 Go 调度时间误算进排队耗时。测试替身或旧数据没有
+// StartedAt 时，使用 Worker 本地领取完成时间作为保守回退。
+func processingJobQueueWait(
+	job documentdomain.ProcessingJob,
+	claimedAt time.Time,
+) time.Duration {
+	if job.CreatedAt.IsZero() {
+		return 0
+	}
+
+	queueEndedAt := claimedAt
+	if job.StartedAt != nil {
+		queueEndedAt = *job.StartedAt
+	}
+
+	wait := queueEndedAt.Sub(job.CreatedAt)
+	if wait < 0 {
+		return 0
+	}
+
+	return wait
 }

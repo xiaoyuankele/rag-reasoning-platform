@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -166,6 +167,12 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 			status = 'processing',
 			attempt_count = attempt_count + 1,
 			error_message = NULL,
+			error_code = NULL,
+			queue_wait_ms = NULL,
+			processor_ms = NULL,
+			total_ms = NULL,
+			file_bytes = NULL,
+			chunk_count = NULL,
 			updated_at = CURRENT_TIMESTAMP,
 			started_at = CURRENT_TIMESTAMP,
 			completed_at = NULL
@@ -245,6 +252,7 @@ func (r *ProcessingJobRepository) MarkProcessingJobSucceeded(
 		document.StatusReady,
 		nil,
 		completion.DetectedTitle,
+		completion.Metrics,
 	)
 }
 
@@ -253,15 +261,16 @@ func (r *ProcessingJobRepository) MarkProcessingJobSucceeded(
 func (r *ProcessingJobRepository) MarkProcessingJobFailed(
 	ctx context.Context,
 	jobID int64,
-	errorMessage string,
+	failure document.ProcessingFailure,
 ) error {
 	return r.finalizeProcessingJob(
 		ctx,
 		jobID,
 		document.ProcessingJobStatusFailed,
 		document.StatusFailed,
-		&errorMessage,
+		&failure.Message,
 		nil,
+		failure.Metrics,
 	)
 }
 
@@ -311,6 +320,15 @@ func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
 			SET
 				status = 'failed',
 				error_message = $1,
+				error_code = 'worker_interrupted',
+				queue_wait_ms = GREATEST(
+					0,
+					ROUND(EXTRACT(EPOCH FROM (j.started_at - j.created_at)) * 1000)::BIGINT
+				),
+				total_ms = GREATEST(
+					0,
+					ROUND(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - j.started_at)) * 1000)::BIGINT
+				),
 				updated_at = CURRENT_TIMESTAMP,
 				completed_at = CURRENT_TIMESTAMP
 			FROM interrupted_jobs AS interrupted
@@ -364,6 +382,7 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 	documentStatus document.Status,
 	errorMessage *string,
 	detectedTitle *string,
+	metrics document.ProcessingExecutionMetrics,
 ) error {
 	transaction, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -408,6 +427,18 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		SET
 			status = $2,
 			error_message = $3,
+			queue_wait_ms = GREATEST(
+				0,
+				ROUND(EXTRACT(EPOCH FROM (started_at - created_at)) * 1000)::BIGINT
+			),
+			processor_ms = $4,
+			total_ms = GREATEST(
+				0,
+				ROUND(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - started_at)) * 1000)::BIGINT
+			),
+			file_bytes = $5,
+			chunk_count = $6,
+			error_code = NULLIF($7, ''),
 			updated_at = CURRENT_TIMESTAMP,
 			completed_at = CURRENT_TIMESTAMP
 		WHERE id = $1
@@ -420,6 +451,10 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		jobID,
 		jobStatus,
 		errorMessage,
+		durationMilliseconds(metrics.ProcessorDuration),
+		metrics.FileBytes,
+		metrics.ChunkCount,
+		string(metrics.ErrorCode),
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -499,6 +534,17 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 	}
 
 	return nil
+}
+
+// durationMilliseconds 统一把 Go 耗时转换为数据库使用的非负毫秒数。
+// time.Duration.Milliseconds 会舍去不足一毫秒的部分，这是当前性能基线
+// 所需的精度，也避免为短操作引入微秒级噪声。
+func durationMilliseconds(duration time.Duration) int64 {
+	if duration < 0 {
+		return 0
+	}
+
+	return duration.Milliseconds()
 }
 
 func scanProcessingJob(

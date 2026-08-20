@@ -204,3 +204,4 @@ Redis 中作为唯一数据源。
 
 - [前端交接：用户可选向量化与文档编辑](../../frontend/architecture/document-vectorization-editing-handoff.md)
 - [后端交接：向量任务并发、版本与 Redis 演进](../../backend/architecture/document-vectorization-concurrency-handoff.md)
+- [文档处理并发与 Python 进程复用交接](document-processing-concurrency-review.md)

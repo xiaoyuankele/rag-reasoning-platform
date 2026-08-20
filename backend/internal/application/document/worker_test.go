@@ -20,7 +20,7 @@ type fakeProcessingJobClaimer struct {
 	// 三个 Func 字段定义本次测试希望仓储表现出的行为。
 	claimNextFunc     func(context.Context) (documentdomain.ProcessingJob, error)
 	markSucceededFunc func(context.Context, int64, documentdomain.ProcessingCompletion) error
-	markFailedFunc    func(context.Context, int64, string) error
+	markFailedFunc    func(context.Context, int64, documentdomain.ProcessingFailure) error
 
 	// 三个 Calls 字段记录对应方法实际被调用的次数，供测试断言使用。
 	claimNextCalls     int
@@ -53,13 +53,13 @@ func (f *fakeProcessingJobClaimer) MarkProcessingJobSucceeded(
 func (f *fakeProcessingJobClaimer) MarkProcessingJobFailed(
 	ctx context.Context,
 	jobID int64,
-	errorMessage string,
+	failure documentdomain.ProcessingFailure,
 ) error {
 	f.markFailedCalls++
 	if f.markFailedFunc == nil {
 		return nil
 	}
-	return f.markFailedFunc(ctx, jobID, errorMessage)
+	return f.markFailedFunc(ctx, jobID, failure)
 }
 
 func TestWorkerClaimNextReturnsIdleWhenQueueIsEmpty(t *testing.T) {

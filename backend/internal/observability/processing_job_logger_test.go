@@ -15,11 +15,11 @@ import (
 
 func TestProcessingJobLoggerWritesStructuredLifecycleEvents(t *testing.T) {
 	testCases := []struct {
-		name         string
-		event        documentapplication.ProcessingJobEvent
-		wantLevel    string
-		wantDuration bool
-		wantError    bool
+		name        string
+		event       documentapplication.ProcessingJobEvent
+		wantLevel   string
+		wantMetrics bool
+		wantError   bool
 	}{
 		{
 			name: "started",
@@ -29,51 +29,65 @@ func TestProcessingJobLoggerWritesStructuredLifecycleEvents(t *testing.T) {
 				DocumentID:   7,
 				AttemptCount: 1,
 				Status:       documentdomain.ProcessingJobStatusProcessing,
+				QueueWait:    75 * time.Millisecond,
 			},
 			wantLevel: "INFO",
 		},
 		{
 			name: "succeeded",
 			event: documentapplication.ProcessingJobEvent{
-				Type:         documentapplication.ProcessingJobEventSucceeded,
-				JobID:        17,
-				DocumentID:   7,
-				AttemptCount: 1,
-				Status:       documentdomain.ProcessingJobStatusSucceeded,
-				Duration:     1250 * time.Millisecond,
+				Type:              documentapplication.ProcessingJobEventSucceeded,
+				JobID:             17,
+				DocumentID:        7,
+				AttemptCount:      1,
+				Status:            documentdomain.ProcessingJobStatusSucceeded,
+				QueueWait:         75 * time.Millisecond,
+				ProcessorDuration: time.Second,
+				TotalDuration:     1250 * time.Millisecond,
+				FileBytes:         4096,
+				ChunkCount:        2,
 			},
-			wantLevel:    "INFO",
-			wantDuration: true,
+			wantLevel:   "INFO",
+			wantMetrics: true,
 		},
 		{
 			name: "failed",
 			event: documentapplication.ProcessingJobEvent{
-				Type:         documentapplication.ProcessingJobEventFailed,
-				JobID:        18,
-				DocumentID:   8,
-				AttemptCount: 2,
-				Status:       documentdomain.ProcessingJobStatusFailed,
-				Duration:     2 * time.Second,
-				Err:          errors.New("processor exited with code 1"),
+				Type:              documentapplication.ProcessingJobEventFailed,
+				JobID:             18,
+				DocumentID:        8,
+				AttemptCount:      2,
+				Status:            documentdomain.ProcessingJobStatusFailed,
+				QueueWait:         150 * time.Millisecond,
+				ProcessorDuration: 1800 * time.Millisecond,
+				TotalDuration:     2 * time.Second,
+				FileBytes:         8192,
+				ErrorCode:         documentdomain.ProcessingErrorCodeProcessor,
+				Err:               errors.New("processor exited with code 1"),
 			},
-			wantLevel:    "ERROR",
-			wantDuration: true,
-			wantError:    true,
+			wantLevel:   "ERROR",
+			wantMetrics: true,
+			wantError:   true,
 		},
 		{
 			name: "unfinished",
 			event: documentapplication.ProcessingJobEvent{
-				Type:         documentapplication.ProcessingJobEventUnfinished,
-				JobID:        19,
-				DocumentID:   9,
-				AttemptCount: 3,
-				Status:       documentdomain.ProcessingJobStatusProcessing,
-				Duration:     3 * time.Second,
-				Err:          errors.New("finalize task: database unavailable"),
+				Type:              documentapplication.ProcessingJobEventUnfinished,
+				JobID:             19,
+				DocumentID:        9,
+				AttemptCount:      3,
+				Status:            documentdomain.ProcessingJobStatusProcessing,
+				QueueWait:         200 * time.Millisecond,
+				ProcessorDuration: 2500 * time.Millisecond,
+				TotalDuration:     3 * time.Second,
+				FileBytes:         16384,
+				ChunkCount:        4,
+				ErrorCode:         documentdomain.ProcessingErrorCodeFinalization,
+				Err:               errors.New("finalize task: database unavailable"),
 			},
-			wantLevel:    "ERROR",
-			wantDuration: true,
-			wantError:    true,
+			wantLevel:   "ERROR",
+			wantMetrics: true,
+			wantError:   true,
 		},
 	}
 
@@ -99,10 +113,29 @@ func TestProcessingJobLoggerWritesStructuredLifecycleEvents(t *testing.T) {
 			assertNumericLogField(t, entry, "processing_job_id", testCase.event.JobID)
 			assertNumericLogField(t, entry, "document_id", testCase.event.DocumentID)
 			assertNumericLogField(t, entry, "attempt_count", int64(testCase.event.AttemptCount))
+			assertNumericLogField(t, entry, "queue_wait_ms", testCase.event.QueueWait.Milliseconds())
 
-			_, hasDuration := entry["duration_ms"]
-			if hasDuration != testCase.wantDuration {
-				t.Fatalf("duration_ms presence = %t, want %t", hasDuration, testCase.wantDuration)
+			_, hasTotal := entry["total_ms"]
+			if hasTotal != testCase.wantMetrics {
+				t.Fatalf("total_ms presence = %t, want %t", hasTotal, testCase.wantMetrics)
+			}
+			_, hasProcessor := entry["processor_ms"]
+			if hasProcessor != testCase.wantMetrics {
+				t.Fatalf("processor_ms presence = %t, want %t", hasProcessor, testCase.wantMetrics)
+			}
+			_, hasFileBytes := entry["file_bytes"]
+			if hasFileBytes != testCase.wantMetrics {
+				t.Fatalf("file_bytes presence = %t, want %t", hasFileBytes, testCase.wantMetrics)
+			}
+			_, hasChunkCount := entry["chunk_count"]
+			if hasChunkCount != testCase.wantMetrics {
+				t.Fatalf("chunk_count presence = %t, want %t", hasChunkCount, testCase.wantMetrics)
+			}
+
+			_, hasErrorCode := entry["error_code"]
+			wantErrorCode := testCase.event.ErrorCode != ""
+			if hasErrorCode != wantErrorCode {
+				t.Fatalf("error_code presence = %t, want %t", hasErrorCode, wantErrorCode)
 			}
 			_, hasError := entry["error"]
 			if hasError != testCase.wantError {

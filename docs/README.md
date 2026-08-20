@@ -23,6 +23,8 @@ docs/
 - 后端认证完成后的前端起点：[P6 个人用户认证前端交接](frontend/architecture/p6-authentication-handoff.md)
 - 后续文档能力与并发演进：
   [文档向量化、在线编辑、并发与缓存设计复盘](shared/architecture/document-vectorization-editing-concurrency-review.md)
+- 文档处理并发与 Python 进程生命周期：
+  [文档处理并发与 Python 进程复用交接](shared/architecture/document-processing-concurrency-review.md)
 
 ## 维护规则
 
