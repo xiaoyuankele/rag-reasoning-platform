@@ -30,6 +30,12 @@ export const router = createRouter({
           meta: { title: '检索' },
         },
         {
+          path: 'embeddings',
+          name: 'embeddings',
+          component: () => import('../../pages/EmbeddingsPage.vue'),
+          meta: { title: '向量化' },
+        },
+        {
           path: 'answer',
           name: 'answer',
           component: () => import('../../pages/AnswerPage.vue'),
