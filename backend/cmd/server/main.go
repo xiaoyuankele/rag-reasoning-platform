@@ -541,7 +541,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	// 默认不启动远程向量 Worker，避免开发者未明确授权时产生后台 API 调用。
-	var embeddingWorkerLoop *documentapplication.WorkerLoop
+	var embeddingWorkerPool *documentapplication.WorkerPool
 	if embeddingConfig.WorkerEnabled {
 
 		retryPolicy, err := embeddingapplication.NewRetryPolicy(
@@ -566,7 +566,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			return fmt.Errorf("create embedding worker: %w", err)
 		}
 
-		embeddingWorkerLoop, err = documentapplication.NewWorkerLoop(
+		embeddingWorkerLoop, err := documentapplication.NewWorkerLoop(
 			embeddingWorker,
 			embeddingConfig.PollInterval,
 			func(err error) {
@@ -580,6 +580,20 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("create embedding worker loop: %w", err)
 		}
+
+		embeddingWorkerPool, err = documentapplication.NewWorkerPool(
+			embeddingWorkerLoop,
+			embeddingConfig.WorkerConcurrency,
+		)
+		if err != nil {
+			return fmt.Errorf("create embedding worker pool: %w", err)
+		}
+
+		logger.Info(
+			"Embedding worker pool configured",
+			"event", "embedding_worker_pool_configured",
+			"concurrency", embeddingConfig.WorkerConcurrency,
+		)
 	}
 
 	// workerContext 专门控制后台 Worker 的生命周期。
@@ -598,8 +612,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	startBackgroundWorker(documentWorkerPool.Run)
-	if embeddingWorkerLoop != nil {
-		startBackgroundWorker(embeddingWorkerLoop.Run)
+	if embeddingWorkerPool != nil {
+		startBackgroundWorker(embeddingWorkerPool.Run)
 	}
 
 	// defer 在 run 返回前执行。
