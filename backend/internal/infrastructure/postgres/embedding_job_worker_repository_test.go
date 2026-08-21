@@ -2,10 +2,11 @@ package postgres_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,6 +85,94 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 		if claimedJob.Status != embeddingdomain.JobStatusProcessing ||
 			claimedJob.AttemptCount != 1 || claimedJob.StartedAt == nil {
 			t.Fatalf("claimed job = %+v, want first processing attempt", claimedJob)
+		}
+	})
+
+	t.Run("concurrent claimers receive different jobs", func(t *testing.T) {
+		fixtures := []embeddingWorkerFixture{
+			createEmbeddingWorkerFixture(
+				t,
+				ctx,
+				pool,
+				documentRepository,
+				chunkRepository,
+				jobRepository,
+				"concurrent-claim-a",
+				[]string{"first concurrent claim chunk"},
+			),
+			createEmbeddingWorkerFixture(
+				t,
+				ctx,
+				pool,
+				documentRepository,
+				chunkRepository,
+				jobRepository,
+				"concurrent-claim-b",
+				[]string{"second concurrent claim chunk"},
+			),
+		}
+
+		for index, fixture := range fixtures {
+			if _, err := pool.Exec(
+				ctx,
+				"UPDATE embedding_jobs SET next_attempt_at = $2 WHERE id = $1",
+				fixture.job.ID,
+				time.Date(1900+index, 1, 1, 0, 0, 0, 0, time.UTC),
+			); err != nil {
+				t.Fatalf("make concurrent embedding job due: %v", err)
+			}
+		}
+
+		type claimResult struct {
+			job embeddingdomain.Job
+			err error
+		}
+
+		start := make(chan struct{})
+		results := make(chan claimResult, len(fixtures))
+		var group sync.WaitGroup
+		group.Add(len(fixtures))
+
+		for range fixtures {
+			go func() {
+				defer group.Done()
+				<-start
+				job, err := jobRepository.ClaimNextEmbeddingJob(ctx)
+				results <- claimResult{job: job, err: err}
+			}()
+		}
+
+		close(start)
+		group.Wait()
+		close(results)
+
+		wantedIDs := map[int64]struct{}{
+			fixtures[0].job.ID: {},
+			fixtures[1].job.ID: {},
+		}
+		claimedIDs := make(map[int64]struct{}, len(fixtures))
+		for result := range results {
+			if result.err != nil {
+				t.Fatalf("claim embedding job concurrently: %v", result.err)
+			}
+			if _, wanted := wantedIDs[result.job.ID]; !wanted {
+				t.Fatalf(
+					"concurrent claimer received job %d outside fixture set",
+					result.job.ID,
+				)
+			}
+			if _, duplicate := claimedIDs[result.job.ID]; duplicate {
+				t.Fatalf("embedding job %d was claimed twice", result.job.ID)
+			}
+			claimedIDs[result.job.ID] = struct{}{}
+		}
+
+		if len(claimedIDs) != len(fixtures) {
+			t.Fatalf(
+				"claimed %d distinct jobs, want %d",
+				len(claimedIDs),
+				len(fixtures),
+			)
 		}
 	})
 
@@ -240,18 +329,20 @@ func createEmbeddingWorkerFixture(
 	t.Helper()
 
 	uniqueValue := time.Now().UnixNano()
+	storagePath := fmt.Sprintf(
+		"integration-tests/embedding-worker-%s-%d.pdf",
+		suffix,
+		uniqueValue,
+	)
+	contentHash := sha256.Sum256([]byte(storagePath))
 	createdDocument, err := documentRepository.Create(
 		ctx,
 		documentdomain.CreateInput{
 			OriginalName: fmt.Sprintf("embedding-worker-%s.pdf", suffix),
-			StoragePath: fmt.Sprintf(
-				"integration-tests/embedding-worker-%s-%d.pdf",
-				suffix,
-				uniqueValue,
-			),
-			MIMEType:  "application/pdf",
-			SizeBytes: 4096,
-			SHA256:    strings.Repeat("c", 64),
+			StoragePath:  storagePath,
+			MIMEType:     "application/pdf",
+			SizeBytes:    4096,
+			SHA256:       fmt.Sprintf("%x", contentHash),
 		},
 	)
 	if err != nil {
