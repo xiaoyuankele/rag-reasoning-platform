@@ -33,7 +33,7 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `GET` | `/embedding-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的向量任务状态、重试和 Token 信息 | 用户功能；已隔离/轮询 |
 | `POST` | `/embedding-jobs/:id/cancel` | Session Cookie；路径参数 `id` | `200` | 取消 waiting/queued 向量任务 | 用户功能；processing/终态返回 `409` |
 | `POST` | `/semantic-search` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k` | `200` | 在当前用户文档中进行语义检索 | 用户功能；已隔离，受功能开关控制 |
-| `POST` | `/answers` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200` | 基于当前用户来源生成回答 | 用户功能；已隔离，受功能开关控制 |
+| `POST` | `/answers` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200`；容量等待超时 `503` | 基于当前用户来源生成回答 | 用户功能；已隔离，受功能开关和并发闸门控制 |
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册或密码重置验证码挑战 | 认证功能；`purpose` 为 `register` 或 `password_reset` |
 | `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建用户和 Session | 认证功能；设置 `rag_session` Cookie |
 | `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 核对凭据并创建新 Session | 认证功能；设置 `rag_session` Cookie |
@@ -225,6 +225,11 @@ P6 路由保护边界：
 - `/documents/:id/chunks` 只允许读取 `ready` 文档；文档存在但仍处于 `uploaded`、`processing`
   或 `failed` 时返回 `409`，避免把旧 chunks 当成当前正式结果；
 - `semantic-search` 和 `answers` 可能调用远程模型并产生费用，前端应提供加载态、超时提示和重试入口。
+- `POST /answers` 的完整“问题向量化 → 检索 → 生成”链路受进程内并发闸门保护。并发槽位已满时，
+  后端最多等待 `ANSWER_QUEUE_WAIT_TIMEOUT`；仍未获得槽位则返回 `503 Service Unavailable`、
+  `Retry-After: 2` 和
+  `{"error":"answer service is busy; try again later","code":"answer_capacity_exhausted"}`。
+  前端应保留用户输入并按 `Retry-After` 提供稍后重试，不应在循环中立即重放请求。
 - `semantic-search` 和 `answers` 提供 `document_id` 时，文档不存在返回 `404`；文档存在但状态、
   chunks 或当前模型向量尚未完整就绪时返回 `409` 和
   `{"error":"document embeddings are not ready"}`。这两种情况都不会调用远程模型。
