@@ -50,6 +50,10 @@ P5 不包含用户认证。P6 后端 B1～B5 已交付个人账户、Session 以
 [P6 个人用户域与私有数据闭环](../shared/architecture/personal-user-domain.md)，后端实施顺序见
 [P6 个人用户域后端交接](architecture/personal-user-backend-handoff.md)。
 
+当前后端的工程目标已经提升为“高性能、高并发训练型模块化单体”：在保留个人版业务范围的同时，重点验证
+Worker Pool、Python Process Pool、任务背压、资源隔离、指标观测和多实例演进边界。目标、压测口径和阶段验收见
+[高性能与高并发工程目标](../shared/architecture/performance-engineering-goal.md)。
+
 P5.1 已建立统一 `APP_ROOT` 路径基准：本地开发可从项目根目录或 `backend` 目录启动，
 部署环境则必须显式提供绝对应用根目录。文件存储与 Python 源码的相对路径不再依赖偶然的当前工作目录。
 
