@@ -32,7 +32,7 @@ function updateScope(scope: DocumentScope): void {
     <PageHeader
       eyebrow="Keyword Retrieval"
       title="基础检索"
-      description="在已经完成解析的资料中按关键词查找文本块，并保留文档、页码和原始内容。"
+      description="使用完整短语或 2～8 个关键词查找同一文本块，并保留文档、页码和原始内容。"
     />
     <DocumentScopePicker
       :model-value="parsedScope.scope"

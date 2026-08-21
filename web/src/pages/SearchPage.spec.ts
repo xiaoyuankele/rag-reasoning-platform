@@ -38,6 +38,9 @@ const documentPage: DocumentPage = {
 
 const searchPage: KeywordSearchPage = {
   query: 'bridge',
+  terms: [],
+  operator: null,
+  within: null,
   results: [],
   pagination: { page: 1, pageSize: 10, total: 0, totalPages: 0 },
 }
@@ -67,6 +70,7 @@ describe('SearchPage document scope integration', () => {
     expect(router.currentRoute.value.query).toEqual({ q: 'bridge', document_id: '42' })
     expect(searchKeywordsMock).toHaveBeenLastCalledWith(
       {
+        mode: 'phrase',
         query: 'bridge',
         documentId: 42,
         page: 1,

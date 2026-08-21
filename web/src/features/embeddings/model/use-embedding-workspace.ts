@@ -10,6 +10,7 @@ import { toApiError } from '../../../shared/api/api-error'
 import {
   cancelEmbeddingJob,
   getEmbeddingJob,
+  getLatestEmbeddingJobs,
   queueEmbeddingJob,
   queueEmbeddingJobs,
 } from '../api/embedding-api'
@@ -105,6 +106,7 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
   const documents = shallowRef<ResearchDocument[]>([])
   const selectedDocumentIds = shallowRef<Set<number>>(new Set())
   const jobsByDocumentId = shallowRef<Map<number, EmbeddingJob>>(new Map())
+  const discoveredDocumentIds = shallowRef<Set<number>>(new Set())
   const actionsByDocumentId = shallowRef<Map<number, EmbeddingDocumentAction>>(new Map())
   const feedbackByDocumentId = shallowRef<Map<number, EmbeddingDocumentFeedback>>(new Map())
   const workspaceMessage = ref<EmbeddingDocumentFeedback | null>(null)
@@ -152,12 +154,23 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
 
   function rememberJob(job: EmbeddingJob): void {
     jobsByDocumentId.value = replaceMapValue(jobsByDocumentId.value, job.documentId, job)
+    discoveredDocumentIds.value = new Set(discoveredDocumentIds.value).add(job.documentId)
     storedJobs.set(job.documentId, job.id)
+    writeStoredJobs(storage, storedJobs)
+  }
+
+  function rememberNoJob(documentId: number): void {
+    jobsByDocumentId.value = removeMapValue(jobsByDocumentId.value, documentId)
+    discoveredDocumentIds.value = new Set(discoveredDocumentIds.value).add(documentId)
+    storedJobs.delete(documentId)
     writeStoredJobs(storage, storedJobs)
   }
 
   function forgetJob(documentId: number): void {
     jobsByDocumentId.value = removeMapValue(jobsByDocumentId.value, documentId)
+    const nextDiscoveredIds = new Set(discoveredDocumentIds.value)
+    nextDiscoveredIds.delete(documentId)
+    discoveredDocumentIds.value = nextDiscoveredIds
     storedJobs.delete(documentId)
     writeStoredJobs(storage, storedJobs)
   }
@@ -197,37 +210,22 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
     }
   }
 
-  async function restoreKnownJobs(signal: AbortSignal): Promise<void> {
-    const visibleDocumentIds = new Set(documents.value.map((document) => document.id))
-    const entries = [...storedJobs.entries()].filter(([documentId]) =>
-      visibleDocumentIds.has(documentId),
-    )
-
-    await runInBatches(entries, async ([documentId, jobId]) => {
-      try {
-        const job = await getEmbeddingJob(jobId, signal)
-        if (job.documentId !== documentId) {
-          forgetJob(documentId)
-          return
-        }
-        rememberJob(job)
-      } catch (error) {
-        if (signal.aborted) return
-        const apiError = toApiError(error)
-        if (apiError.kind === 'not-found') {
-          forgetJob(documentId)
-          return
-        }
-        setFeedback(documentId, {
-          kind: 'error',
-          message: `暂时无法恢复任务状态：${apiError.message}`,
-          requestId: apiError.requestId,
-        })
+  async function discoverLatestJobs(signal: AbortSignal): Promise<void> {
+    const documentIds = documents.value.map((document) => document.id)
+    for (let index = 0; index < documentIds.length; index += maximumBatchSize) {
+      const items = await getLatestEmbeddingJobs(
+        documentIds.slice(index, index + maximumBatchSize),
+        signal,
+      )
+      if (signal.aborted || disposed) return
+      for (const item of items) {
+        if (item.job) rememberJob(item.job)
+        else rememberNoJob(item.documentId)
       }
-    })
+    }
   }
 
-  /** 重新读取全部文档，并恢复当前浏览器会话知道的最近任务。 */
+  /** 重新读取全部文档，并从后端批量恢复每篇文档的最新任务快照。 */
   async function load(): Promise<void> {
     const controller = createController()
     state.value = 'loading'
@@ -238,8 +236,22 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
       const result = await loadAllDocuments(controller.signal)
       if (controller.signal.aborted || disposed) return
       documents.value = result
+      jobsByDocumentId.value = new Map()
+      discoveredDocumentIds.value = new Set()
+      if (result.length > 0) {
+        try {
+          await discoverLatestJobs(controller.signal)
+        } catch (error) {
+          if (controller.signal.aborted || disposed) return
+          const apiError = toApiError(error)
+          workspaceMessage.value = {
+            kind: 'error',
+            message: `文档已加载，但向量任务状态恢复失败：${apiError.message}`,
+            requestId: apiError.requestId,
+          }
+        }
+      }
       state.value = result.length === 0 ? 'empty' : 'success'
-      await restoreKnownJobs(controller.signal)
       schedulePoll()
     } catch (error) {
       if (controller.signal.aborted || disposed) return
@@ -453,7 +465,7 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
           if (latestJob.status === 'succeeded') {
             setFeedback(latestJob.documentId, {
               kind: 'success',
-              message: '向量化完成，现在可以用于语义检索。',
+              message: '最近向量任务已成功；当前文档版本是否就绪仍以后续版本契约为准。',
             })
           } else if (latestJob.status === 'failed') {
             setFeedback(latestJob.documentId, {
@@ -521,6 +533,7 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
     activeJobCount,
     cancel,
     clearSelection,
+    discoveredDocumentIds,
     documents,
     feedbackByDocumentId,
     initialize,

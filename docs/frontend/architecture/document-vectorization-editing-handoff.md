@@ -1,9 +1,9 @@
 # 前端交接：用户可选向量化与文档编辑
 
-> 状态：2026-08-21 基础向量化页面已实现。后端提交 `c4696bc` 已提供单份/批量向量申请、任务查询和取消；
-> 前端已经接入独立向量化页面、文本/向量双状态筛选、逐项状态、集中轮询、取消、当前浏览器会话恢复和
-> “全部文档”顺序拆批提交。
-> 原文件读取、按 document 永久恢复任务和 Markdown 保存接口仍未实现。跨端决策以
+> 状态：2026-08-21 基础向量化页面已实现。后端提交 `c4696bc` 已提供单份/批量向量申请、任务查询和取消，
+> 提交 `c813c2c` 已提供按一批 document IDs 发现最近任务；前端已经接入独立向量化页面、文本/向量双状态筛选、
+> 最近任务发现、逐项状态、集中轮询、取消和“全部文档”顺序拆批提交。
+> 原文件读取、当前 revision 向量就绪事实和 Markdown 保存接口仍未实现。跨端决策以
 > [文档向量化、在线编辑、并发与缓存设计复盘](../../shared/architecture/document-vectorization-editing-concurrency-review.md)
 > 为准。
 
@@ -14,10 +14,10 @@
 - [x] 在独立页面选择单篇或多篇文档申请向量化；
 - [x] 在独立页面将当前可操作的全部文档申请向量化，并按后端 100 项上限自动拆批；
 - [x] 文档解析状态和向量状态的独立展示；
-- [x] 按当前浏览器会话已知的向量任务状态计数和筛选；
-- [x] 当前浏览器会话刷新后按已知 job ID 恢复向量任务；
+- [x] 页面初始化按最多 100 个 document IDs 分批发现最近向量任务；
+- [x] 按最近向量任务状态计数和筛选，并只轮询其中的活动任务；
 - [ ] 批量导入结束后提供“不向量化 / 选中 / 本批次全部”入口；
-- [ ] 后端提供按 document 查询或列表接口后完成跨设备永久恢复；
+- [ ] 后端提供“匹配当前 document revision”的向量就绪事实；
 - PDF 受保护打开和可选 annotation；
 - Markdown 内容查看、编辑、本地草稿和版本冲突处理。
 
@@ -62,14 +62,15 @@ DocumentBatchImportPanel
 | ready            | none             | 文本可浏览，尚未向量化         | 向量化                       |
 | ready            | queued           | 已进入向量队列                 | 取消                         |
 | ready            | processing       | 正在向量化                     | 查看进度；第一版不可强制取消 |
-| ready            | succeeded        | 当前版本向量已就绪             | 进入语义检索/问答            |
+| ready            | succeeded        | 最近向量任务成功               | 等待当前 revision 就绪事实   |
 | ready            | failed           | 向量化失败                     | 查看安全错误、重试           |
 | failed           | waiting_document | 解析失败，向量任务等待前置条件 | 重试解析或取消向量意图       |
 | 任意现存解析状态 | canceled         | 用户已经取消当前向量任务       | 需要时重新申请向量化         |
 
-页面不得仅凭解析 `ready` 开放语义问答；必须由后端提供的当前 revision 向量就绪事实决定。UI 使用“文本未解析 / 文本已解析”
-和“向量：……”两套独立徽标，并提供两个独立筛选器。向量筛选在发现接口交付前必须标注“当前会话”；`untracked`
-只表示当前浏览器没有恢复到 job ID，不表示从未向量化。
+页面不得仅凭解析 `ready` 或最近任务 `succeeded` 开放语义问答；必须由后端提供的当前 revision 向量就绪事实决定。UI 使用
+“文本未解析 / 文本已解析”和“向量：……”两套独立徽标，并提供两个独立筛选器。最近任务发现返回 `job:null` 时，当前页面
+只因 document ID 来自已通过 OwnerScope 过滤的文档列表而显示“无任务”；发现请求部分失败的文档显示“状态未知”，不能推断为
+“从未向量化”。
 
 ## 4. 当前基础向量化分层
 
@@ -80,9 +81,9 @@ entities/
 
 features/embeddings/
 ├─ api/
-│  └─ embedding-api           单个、批量、按 ID 查询与取消；运行时 DTO 校验
+│  └─ embedding-api           单个、批量、最近任务发现、按 ID 查询与取消；运行时 DTO 校验
 ├─ model/
-│  └─ use-embedding-workspace 文档选择、逐项结果、有界轮询、取消和会话恢复
+│  └─ use-embedding-workspace 文档选择、逐项结果、最近任务发现、有界轮询和取消
 └─ ui/
    └─ EmbeddingWorkspacePanel 独立工作区
 
@@ -96,7 +97,7 @@ API 层把响应先作为 `unknown` 校验，不允许 UI 直接解释 snake_cas
 ## 5. 批量向量化前端规则
 
 - 只提交当前后端文档列表返回的 document IDs；服务端仍必须重新校验 OwnerScope，不能信任前端列表；
-- 当前独立页面的“全部文档”指当前 OwnerScope 列表中没有已知成功/活动任务的全部可操作文档，不受文本解析状态筛选影响；
+- 当前独立页面的“全部文档”指当前 OwnerScope 列表中没有最近成功/活动任务的全部可操作文档，不受文本解析状态筛选影响；
 - `uploaded/processing/failed` 文档也可提交，后端将其保存为 `waiting_document`，前端不得伪装为向量成功；
 - 遵守后端单批 100 项上限。全部文档超过上限时顺序拆成多批，整批错误不得抹去前序批次已经成功的逐项结果；
 - 响应逐项使用 `created`、`already_active`、`not_found` 或 `failed`；成功项中的 `job.status` 再区分
@@ -107,9 +108,10 @@ API 层把响应先作为 `unknown` 校验，不允许 UI 直接解释 snake_cas
 - 取消调用 `POST /embedding-jobs/:id/cancel`。成功和重复取消返回 `200`；收到 `409` 时重新查询任务，
   说明 Worker 已经领取或任务已经终结，不在客户端强行改为 canceled。
 - 当前轮询使用一个调度器，单轮最多 4 路查询并发，不为每一行创建独立定时器；页面隐藏时暂停，恢复可见后立即同步。
-- 当前 `sessionStorage` 只保存 document ID 到最近 job ID 的映射。换账户时后端 OwnerScope 会使旧任务返回 404，
-  前端随即清理映射；该存储不承担权限判断或永久任务历史。
-- 后端目前只复用活动任务，无法让前端先发现历史 succeeded 任务；提交确认必须提示可能重新生成向量并消耗远程模型额度。
+- 页面初始化调用 `POST /embedding-jobs/latest`，每批最多 100 个 document IDs，并校验响应 ID 去重、顺序和 job 归属；
+  只有 `waiting_document/queued/processing` 继续使用 `GET /embedding-jobs/:id` 集中轮询，终态不产生持续请求。
+- 最近任务 `succeeded` 只证明该任务成功，不证明它匹配文档当前 revision。当前页面保守地避免默认重复申请，但语义检索或问答
+  仍必须等待后端提供 revision-aware 就绪事实。
 
 ## 6. PDF 打开与缓存
 
@@ -177,29 +179,28 @@ draft:{userId}:{documentId}:{baseRevision}
 
 ## 9. 后端已冻结与仍待冻结的契约
 
-提交 `c4696bc` 已冻结：
+提交 `c4696bc` 与 `c813c2c` 已冻结：
 
 1. 单份申请的 `202/200` 幂等语义；
 2. 批量请求 `POST /embedding-jobs/batch`、最多 100 个 ID 和逐项结果；
 3. `waiting_document/canceled` 正式状态；
 4. `POST /embedding-jobs/:id/cancel` 的允许状态、`409` 和稳定错误 code。
+5. `POST /embedding-jobs/latest` 的 1～100 个 document IDs、逐项最近任务或 `null` 以及 OwnerScope 隐藏语义。
 
 前端开发期间仍需避免猜测以下计划契约：
 
-1. 批量按 document IDs 发现当前/最近向量任务或分页列出任务的接口；当前页面只能恢复本浏览器会话已知 job ID。
-   优先返回逐文档最新任务或 `null`，避免前端对文档列表发出 N+1 个请求；正式路径和 DTO 仍由后端冻结；
+1. 当前 document revision 与 embeddings 是否匹配的就绪事实，以及内容变化后的 stale 表达；
 2. PDF/MD 内容读取的 MIME、Range、ETag 与缓存头；
 3. Markdown revision DTO、保存成功和冲突响应；
-4. 内容变化后 chunks/embeddings 的 stale 表达；
-5. 用户默认向量偏好是否属于本阶段。
+4. 用户默认向量偏好是否属于本阶段。
 
 ## 10. 前端验收矩阵
 
 - [x] 独立页面手动选择单篇和多篇向量化；
 - [x] 独立页面一键提交全部可操作文档，超过 100 篇时自动顺序拆批；
 - [x] 单项失败、整批失败、创建和复用的前端自动化分支；
-- [x] 已知 job ID 的刷新恢复、waiting/queued 集中轮询和取消；
-- [x] 当前会话向量状态的独立计数、筛选和行级徽标；
+- [x] 按最多 100 个 document IDs 发现最近任务，并只对活动任务集中轮询；
+- [x] 最近向量任务状态的独立计数、筛选和行级徽标；
 - [ ] 批量导入后的选中/本批次全部快捷路径；
 - [ ] waiting → queued → processing → terminal 的真实后端与真实模型纵向验收；
 - 取消与 Worker 领取竞态返回后的界面重新同步；

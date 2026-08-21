@@ -33,7 +33,7 @@ PostgreSQL / Python / 远程模型
 | 构建工具      | Vite                                     | 已安装，开发服务器已验证                     | 开发反馈快，配置轻量                             |
 | 页面路由      | Vue Router                               | 已接入公共认证页、受保护外壳和五个工作台路由 | 映射认证、工作台、文档库、向量化、搜索和问答页面 |
 | 跨页面状态    | Pinia                                    | 已接入三态 Auth Store                        | 只承载真正跨页面共享的状态                       |
-| HTTP Client   | Axios 封装                               | 已安装并接入健康、认证、文档与检索接口       | 统一基础地址、超时、错误转换和请求配置           |
+| HTTP Client   | Axios 封装                               | 已安装并接入健康、认证、文档、检索与问答接口 | 统一基础地址、超时、错误转换和请求配置           |
 | 组件库        | Element Plus 选择性使用                  | 已确认原则，尚未安装                         | 使用成熟交互组件但不接管整体视觉                 |
 | 样式          | CSS Variables + Scoped CSS               | 已接入设计令牌、基础样式与响应式应用外壳     | 保留 CSS 基础并支持统一设计令牌                  |
 | 单元/组件测试 | Vitest + Vue Test Utils                  | 已安装并接入，26 个测试文件、88 个测试通过   | 与 Vite/Vue 集成，验证用户可观察行为             |
@@ -55,15 +55,15 @@ web/src/
 │  ├─ system-health/           # 健康检查、连接状态与重试
 │  ├─ auth/                    # P6 注册、登录、退出、登录态恢复和密码重置
 │  ├─ documents/              # 哈希预检、批量导入、列表、详情、处理、删除
-│  ├─ embeddings/             # 单篇/批量向量任务、集中轮询、取消和会话恢复
-│  ├─ search/                 # 关键词和语义检索
-│  └─ answer/                 # 问答、回答语言、引用来源
+│  ├─ embeddings/             # 单篇/批量向量任务、最近任务发现、集中轮询和取消
+│  ├─ search/                 # 短语与同一 chunk 多关键词检索
+│  └─ answer/                 # 单次问答、回答语言、引用来源和 Token 用量
 ├─ entities/
 │  ├─ document/               # 文档及展示模型
 │  ├─ user/                   # P6 当前用户公开模型与 DTO 转换
 │  ├─ processing-job/         # 解析任务与状态
 │  ├─ embedding-job/          # 向量任务、状态和可取消规则
-│  └─ answer-source/          # 回答来源与页码
+│  └─ answer/                 # 回答、来源、页码与用量模型
 └─ shared/
    ├─ api/                    # Axios 实例、错误模型、基础请求能力
    ├─ ui/                     # 与业务无关的通用展示组件
@@ -95,12 +95,13 @@ app → pages → features → entities → shared
 
 单次搜索结果、临时上传进度和局部错误默认不进入全局 Store。
 
-向量化页面同样遵守最小状态范围：文档选择、逐项结果和任务轮询保存在 `features/embeddings` composable，
-不进入 Pinia，也不写入文档库组件。由于后端暂时只能按 job ID 查询，页面只把“文档 ID → 最近任务 ID”保存到
-`sessionStorage`，用于当前浏览器会话刷新恢复；后端 OwnerScope 仍是隔离真相，前端存储既不证明权限，也不证明
-一份未记录的文档从未向量化。
+向量化页面同样遵守最小状态范围：文档选择、逐项结果、最近任务快照和活动任务轮询保存在
+`features/embeddings` composable，不进入 Pinia，也不写入文档库组件。页面初始化把当前 OwnerScope 的 document IDs
+按最多 100 项分批提交给最近任务发现接口，只对 waiting/queued/processing 按 job ID 继续轮询。`job:null` 和发现失败
+分别显示“无任务”和“状态未知”；最近 succeeded 不证明 embeddings 匹配当前 document revision。
 
-关键词检索已经按此规则实现：`q`、`document_id` 和 `page` 保存在 Router query 中，
+关键词检索已经按此规则实现：完整短语的 `q`，或多关键词的重复 `term`、`operator`、`within`，连同
+`document_id` 和 `page` 保存在 Router query 中，
 单次请求的加载、结果、空状态和错误保存在 `features/search` composable 中，不进入 Pinia。F2-C 通过共享
 `DocumentScope` 把缺省 ID 映射为“全部文档”、单个 ID 映射为“指定单篇”；范围选择器分页读取当前用户文档并只展示
 解析 `ready` 项。页面层负责组合文档选择与检索，具体边界见
@@ -115,6 +116,10 @@ app → pages → features → entities → shared
 - DTO 转换负责处理 `snake_case`、可空字段、时间字符串和视图兜底；
 - 权威接口契约位于 `docs/shared/api/`，前端类型必须随契约变更同步；
 - 语义检索和回答可能产生远程调用，界面必须提供加载、超时、重试与功能关闭状态。
+
+带来源问答已经按该边界实现：`AnswerPage` 只组合共享文档范围与 `GroundedAnswerPanel`；`features/answer` 分为 API、model、UI，
+`entities/answer` 保存与 HTTP DTO 解耦的回答模型。问题不会写入 URL、Pinia 或浏览器持久存储；只有用户显式提交才调用
+`POST /answers`。问答请求使用独立 70 秒超时覆盖远程生成窗口，其余 API 继续使用基础 Client 的 10 秒超时。
 
 当前开发环境约定：浏览器请求以 `/api` 为基础路径，Vite 开发代理将其转发到默认
 `http://localhost:8080` 并移除 `/api` 前缀。生产环境仍需由部署层提供同源反向代理，
@@ -201,7 +206,7 @@ Element Plus 只用于弹窗、分页、选择器、消息等行为成熟的组�
 ```
 
 - Vite 负责转换和构建，类型检查必须由 `vue-tsc` 单独执行；
-- Vitest 验证状态转换、错误转换和纯逻辑；当前 26 个测试文件、88 个测试通过；
+- Vitest 验证状态转换、错误转换和纯逻辑；当前 30 个测试文件、111 个测试通过；
 - Vue Test Utils 验证组件渲染和用户交互；
 - Playwright 在 F5 验证上传、处理、搜索和问答主流程；
 - 测试优先断言用户可观察结果，不依赖组件内部实现细节。

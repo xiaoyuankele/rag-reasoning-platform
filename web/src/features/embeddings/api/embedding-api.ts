@@ -47,6 +47,11 @@ interface EmbeddingBatchResponseDto {
   items: EmbeddingBatchItemDto[]
 }
 
+interface LatestEmbeddingJobItemDto {
+  document_id: number
+  job: EmbeddingJobDto | null
+}
+
 export type EmbeddingBatchOutcome = 'created' | 'already_active' | 'not_found' | 'failed'
 
 export interface EmbeddingQueueResult {
@@ -60,6 +65,11 @@ export interface EmbeddingBatchItem {
   job: EmbeddingJob | null
   errorMessage: string | null
   errorCode: string | null
+}
+
+export interface LatestEmbeddingJobItem {
+  documentId: number
+  job: EmbeddingJob | null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -191,6 +201,37 @@ export function mapEmbeddingBatchResponse(data: unknown): EmbeddingBatchItem[] {
   return mappedItems
 }
 
+/** 校验按文档发现的最新任务；null 是后端明确返回的“当前用户不可见或没有任务”。 */
+export function mapLatestEmbeddingJobsResponse(data: unknown): LatestEmbeddingJobItem[] {
+  if (!isRecord(data) || !Array.isArray(data.items)) {
+    throw new ApiError('invalid-response', '后端最新向量任务响应不符合约定。')
+  }
+
+  const sourceItems = data.items as LatestEmbeddingJobItemDto[]
+  const seenDocumentIds = new Set<number>()
+  return sourceItems.map((item) => {
+    if (!isRecord(item) || !isInteger(item.document_id, 1)) {
+      throw new ApiError('invalid-response', '后端最新向量任务响应不符合约定。')
+    }
+    if (seenDocumentIds.has(item.document_id)) {
+      throw new ApiError('invalid-response', '后端最新向量任务响应包含重复文档。')
+    }
+    seenDocumentIds.add(item.document_id)
+
+    if (item.job !== null && !isEmbeddingJobDto(item.job)) {
+      throw new ApiError('invalid-response', '后端最新向量任务响应不符合约定。')
+    }
+    if (item.job !== null && item.job.document_id !== item.document_id) {
+      throw new ApiError('invalid-response', '后端最新向量任务与文档不一致。')
+    }
+
+    return {
+      documentId: item.document_id,
+      job: item.job === null ? null : mapEmbeddingJob(item.job),
+    }
+  })
+}
+
 /** 为一份文档创建或复用活动向量任务。 */
 export async function queueEmbeddingJob(
   documentId: number,
@@ -230,6 +271,27 @@ export async function queueEmbeddingJobs(
     items.some((item) => !requestedIds.has(item.documentId))
   ) {
     throw new ApiError('invalid-response', '后端批量向量任务未逐项返回请求结果。')
+  }
+  return items
+}
+
+/** 按最多 100 个文档 ID 发现当前用户可见的最新向量任务。 */
+export async function getLatestEmbeddingJobs(
+  documentIds: number[],
+  signal?: AbortSignal,
+): Promise<LatestEmbeddingJobItem[]> {
+  const requestedIds = [...new Set(documentIds)]
+  const response = await httpClient.post<unknown>(
+    '/embedding-jobs/latest',
+    { document_ids: requestedIds },
+    { signal },
+  )
+  const items = mapLatestEmbeddingJobsResponse(response.data)
+  if (
+    items.length !== requestedIds.length ||
+    items.some((item, index) => item.documentId !== requestedIds[index])
+  ) {
+    throw new ApiError('invalid-response', '后端最新向量任务未按请求顺序逐项返回。')
   }
   return items
 }
