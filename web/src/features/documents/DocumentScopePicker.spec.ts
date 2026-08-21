@@ -78,7 +78,7 @@ describe('DocumentScopePicker', () => {
     })
     await flushPromises()
 
-    expect(wrapper.get('[role="alert"]').text()).toContain('文档 #99 当前不可用于关键词检索')
+    expect(wrapper.get('[role="alert"]').text()).toContain('文档 #99 当前不可用于检索或问答')
     await wrapper.get('[role="alert"] button').trigger('click')
     expect(wrapper.emitted('update:modelValue')).toEqual([[{ kind: 'all' }]])
     wrapper.unmount()

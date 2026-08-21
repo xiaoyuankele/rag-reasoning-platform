@@ -5,6 +5,7 @@ import type { DocumentPage, ResearchDocument } from '../../../entities/document/
 import {
   cancelEmbeddingJob,
   getEmbeddingJob,
+  getLatestEmbeddingJobs,
   queueEmbeddingJob,
   queueEmbeddingJobs,
 } from '../api/embedding-api'
@@ -17,6 +18,7 @@ import {
 vi.mock('../api/embedding-api', () => ({
   cancelEmbeddingJob: vi.fn(),
   getEmbeddingJob: vi.fn(),
+  getLatestEmbeddingJobs: vi.fn(),
   queueEmbeddingJob: vi.fn(),
   queueEmbeddingJobs: vi.fn(),
 }))
@@ -24,6 +26,7 @@ vi.mock('../api/embedding-api', () => ({
 const listDocumentsMock = vi.fn<EmbeddingDocumentPageLoader>()
 const cancelEmbeddingJobMock = vi.mocked(cancelEmbeddingJob)
 const getEmbeddingJobMock = vi.mocked(getEmbeddingJob)
+const getLatestEmbeddingJobsMock = vi.mocked(getLatestEmbeddingJobs)
 const queueEmbeddingJobMock = vi.mocked(queueEmbeddingJob)
 const queueEmbeddingJobsMock = vi.mocked(queueEmbeddingJobs)
 
@@ -84,8 +87,12 @@ beforeEach(() => {
   listDocumentsMock.mockReset()
   cancelEmbeddingJobMock.mockReset()
   getEmbeddingJobMock.mockReset()
+  getLatestEmbeddingJobsMock.mockReset()
   queueEmbeddingJobMock.mockReset()
   queueEmbeddingJobsMock.mockReset()
+  getLatestEmbeddingJobsMock.mockImplementation(async (documentIds) =>
+    documentIds.map((documentId) => ({ documentId, job: null })),
+  )
 })
 
 afterEach(() => vi.useRealTimers())
@@ -196,11 +203,11 @@ describe('useEmbeddingWorkspace', () => {
     scope.stop()
   })
 
-  it('刷新时恢复已知任务并允许取消排队任务', async () => {
+  it('初始化时从后端发现最新任务并允许取消排队任务', async () => {
     const storage = createMemoryStorage({ [storedJobsKey]: JSON.stringify({ 42: 142 }) })
     const queuedJob = createJob(42)
     listDocumentsMock.mockResolvedValue(createPage([createDocument(42)]))
-    getEmbeddingJobMock.mockResolvedValue(queuedJob)
+    getLatestEmbeddingJobsMock.mockResolvedValue([{ documentId: 42, job: queuedJob }])
     cancelEmbeddingJobMock.mockResolvedValue(createJob(42, 'canceled'))
 
     const scope = effectScope()
@@ -210,12 +217,47 @@ describe('useEmbeddingWorkspace', () => {
     if (!workspace) throw new Error('embedding workspace was not created')
 
     await workspace.initialize()
+    expect(getLatestEmbeddingJobsMock).toHaveBeenCalledWith([42], expect.any(AbortSignal))
+    expect(getEmbeddingJobMock).not.toHaveBeenCalled()
     expect(workspace.jobsByDocumentId.value.get(42)?.status).toBe('queued')
 
     await workspace.cancel(42)
     expect(cancelEmbeddingJobMock).toHaveBeenCalledWith(142, expect.any(AbortSignal))
     expect(workspace.jobsByDocumentId.value.get(42)?.status).toBe('canceled')
     expect(workspace.feedbackByDocumentId.value.get(42)?.message).toContain('已取消')
+    scope.stop()
+  })
+
+  it('发现阶段按 100 份拆批，并区分无任务与状态未知', async () => {
+    const documents = Array.from({ length: 101 }, (_, index) => createDocument(index + 1))
+    listDocumentsMock.mockResolvedValue(createPage(documents))
+    getLatestEmbeddingJobsMock
+      .mockResolvedValueOnce(
+        documents.slice(0, 100).map((document) => ({
+          documentId: document.id,
+          job: document.id === 1 ? createJob(1, 'succeeded') : null,
+        })),
+      )
+      .mockRejectedValueOnce(new Error('lookup unavailable'))
+
+    const scope = effectScope()
+    const workspace = scope.run(() =>
+      useEmbeddingWorkspace({
+        loadDocumentPage: listDocumentsMock,
+        storage: createMemoryStorage(),
+      }),
+    )
+    if (!workspace) throw new Error('embedding workspace was not created')
+
+    await workspace.initialize()
+
+    expect(getLatestEmbeddingJobsMock).toHaveBeenCalledTimes(2)
+    expect(getLatestEmbeddingJobsMock.mock.calls[0]?.[0]).toHaveLength(100)
+    expect(getLatestEmbeddingJobsMock.mock.calls[1]?.[0]).toEqual([101])
+    expect(workspace.jobsByDocumentId.value.get(1)?.status).toBe('succeeded')
+    expect(workspace.discoveredDocumentIds.value.has(100)).toBe(true)
+    expect(workspace.discoveredDocumentIds.value.has(101)).toBe(false)
+    expect(workspace.workspaceMessage.value?.message).toContain('向量任务状态恢复失败')
     scope.stop()
   })
 })

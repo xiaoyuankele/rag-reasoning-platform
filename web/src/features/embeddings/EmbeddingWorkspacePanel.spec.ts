@@ -2,19 +2,26 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EmbeddingJob } from '../../entities/embedding-job/model/embedding-job'
 import type { DocumentPage, ResearchDocument } from '../../entities/document/model/document'
-import { getEmbeddingJob, queueEmbeddingJob, queueEmbeddingJobs } from './api/embedding-api'
+import {
+  getEmbeddingJob,
+  getLatestEmbeddingJobs,
+  queueEmbeddingJob,
+  queueEmbeddingJobs,
+} from './api/embedding-api'
 import type { EmbeddingDocumentPageLoader } from './model/use-embedding-workspace'
 import EmbeddingWorkspacePanel from './ui/EmbeddingWorkspacePanel.vue'
 
 vi.mock('./api/embedding-api', () => ({
   cancelEmbeddingJob: vi.fn(),
   getEmbeddingJob: vi.fn(),
+  getLatestEmbeddingJobs: vi.fn(),
   queueEmbeddingJob: vi.fn(),
   queueEmbeddingJobs: vi.fn(),
 }))
 
 const listDocumentsMock = vi.fn<EmbeddingDocumentPageLoader>()
 const getEmbeddingJobMock = vi.mocked(getEmbeddingJob)
+const getLatestEmbeddingJobsMock = vi.mocked(getLatestEmbeddingJobs)
 const queueEmbeddingJobMock = vi.mocked(queueEmbeddingJob)
 const queueEmbeddingJobsMock = vi.mocked(queueEmbeddingJobs)
 
@@ -66,9 +73,13 @@ beforeEach(() => {
   sessionStorage.clear()
   listDocumentsMock.mockReset()
   getEmbeddingJobMock.mockReset()
+  getLatestEmbeddingJobsMock.mockReset()
   queueEmbeddingJobMock.mockReset()
   queueEmbeddingJobsMock.mockReset()
   listDocumentsMock.mockResolvedValue(documentPage)
+  getLatestEmbeddingJobsMock.mockImplementation(async (documentIds) =>
+    documentIds.map((documentId) => ({ documentId, job: null })),
+  )
 })
 
 describe('EmbeddingWorkspacePanel', () => {
@@ -83,7 +94,7 @@ describe('EmbeddingWorkspacePanel', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('Maglev study')
-    expect(wrapper.text()).toContain('向量：当前会话未跟踪')
+    expect(wrapper.text()).toContain('向量：无任务')
 
     await wrapper.get('input[type="checkbox"]').setValue(true)
     expect(wrapper.get('.primary-button').text()).toContain('开始向量化（1）')
@@ -151,7 +162,7 @@ describe('EmbeddingWorkspacePanel', () => {
     expect(wrapper.text()).toContain('文本已解析')
     expect(wrapper.text()).toContain('文本未解析')
     expect(wrapper.get('select').text()).toContain('未解析（1）')
-    expect(wrapper.findAll('select')[1]?.text()).toContain('未跟踪（2）')
+    expect(wrapper.findAll('select')[1]?.text()).toContain('无任务（2）')
 
     const bulkButton = wrapper.get('.bulk-button')
     expect(bulkButton.text()).toContain('全部文档向量化（2）')

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { highlightKeyword } from './highlight-keyword'
+import { highlightKeyword, highlightKeywords } from './highlight-keyword'
 
 describe('highlightKeyword', () => {
   it('保留原文并高亮全部大小写不敏感命中', () => {
@@ -22,6 +22,19 @@ describe('highlightKeyword', () => {
   it('没有命中时返回完整普通文本', () => {
     expect(highlightKeyword('maglev response', 'bridge')).toEqual([
       { text: 'maglev response', highlighted: false },
+    ])
+  })
+
+  it('高亮多个关键词，并优先处理相互包含的较长关键词', () => {
+    expect(
+      highlightKeywords('railway vibration and rail response', ['rail', 'vibration', 'railway']),
+    ).toEqual([
+      { text: 'railway', highlighted: true },
+      { text: ' ', highlighted: false },
+      { text: 'vibration', highlighted: true },
+      { text: ' and ', highlighted: false },
+      { text: 'rail', highlighted: true },
+      { text: ' response', highlighted: false },
     ])
   })
 })

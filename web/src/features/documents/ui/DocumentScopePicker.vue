@@ -49,12 +49,12 @@ const unavailableDocumentId = computed(() => {
 const scopeDescription = computed(() => {
   if (props.invalidSelection) return 'URL 中的文档范围无效，请改用全部文档或重新选择。'
   if (props.modelValue.kind === 'all') {
-    return '在当前账户所有已经解析完成的文档中检索。'
+    return '使用当前账户所有已经解析完成的文档。'
   }
   if (selectedDocument.value) {
-    return `只检索“${displayTitle(selectedDocument.value)}”。`
+    return `只使用“${displayTitle(selectedDocument.value)}”。`
   }
-  return `文档 #${props.modelValue.documentId} 当前不可用于关键词检索。`
+  return `文档 #${props.modelValue.documentId} 当前不可用于检索或问答。`
 })
 
 function displayTitle(document: ResearchDocument): string {
@@ -142,7 +142,7 @@ function handleChange(event: Event): void {
       </button>
     </div>
     <div v-else-if="!isLoading && state === 'empty' && !invalidSelection" class="scope-notice">
-      当前没有解析完成的文档。选择“全部”仍可检索，但结果会为空。
+      当前没有解析完成的文档。选择“全部”仍可提交范围，但检索或问答将没有可用证据。
     </div>
   </section>
 </template>

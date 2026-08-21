@@ -2,8 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../../shared/api/api-error'
 import { httpClient } from '../../../shared/api/http-client'
 import {
+  getLatestEmbeddingJobs,
   mapEmbeddingBatchResponse,
   mapEmbeddingJobResponse,
+  mapLatestEmbeddingJobsResponse,
   queueEmbeddingJob,
   queueEmbeddingJobs,
 } from './embedding-api'
@@ -116,6 +118,49 @@ describe('embedding API response mapping', () => {
 
     await expect(queueEmbeddingJobs([42, 43])).rejects.toThrow(
       new ApiError('invalid-response', '后端批量向量任务未逐项返回请求结果。'),
+    )
+  })
+
+  it('映射最新任务与后端明确返回的无任务状态', async () => {
+    const response = {
+      items: [
+        { document_id: 42, job: jobDto },
+        { document_id: 43, job: null },
+      ],
+    }
+
+    expect(mapLatestEmbeddingJobsResponse(response)).toEqual([
+      { documentId: 42, job: expect.objectContaining({ id: 31, documentId: 42 }) },
+      { documentId: 43, job: null },
+    ])
+
+    postMock.mockResolvedValue({ status: 200, data: response })
+    await expect(getLatestEmbeddingJobs([42, 43])).resolves.toHaveLength(2)
+    expect(postMock).toHaveBeenCalledWith(
+      '/embedding-jobs/latest',
+      { document_ids: [42, 43] },
+      { signal: undefined },
+    )
+  })
+
+  it('拒绝最新任务缺项、乱序或任务与文档不一致', async () => {
+    expect(() =>
+      mapLatestEmbeddingJobsResponse({
+        items: [{ document_id: 42, job: { ...jobDto, document_id: 43 } }],
+      }),
+    ).toThrow(new ApiError('invalid-response', '后端最新向量任务与文档不一致。'))
+
+    postMock.mockResolvedValue({
+      status: 200,
+      data: {
+        items: [
+          { document_id: 43, job: null },
+          { document_id: 42, job: jobDto },
+        ],
+      },
+    })
+    await expect(getLatestEmbeddingJobs([42, 43])).rejects.toThrow(
+      new ApiError('invalid-response', '后端最新向量任务未按请求顺序逐项返回。'),
     )
   })
 })

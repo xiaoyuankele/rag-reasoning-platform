@@ -16,7 +16,7 @@ const props = defineProps<{
 
 const searchQuery = ref('')
 const documentStatusFilter = ref<DocumentStatus | 'all'>('all')
-const embeddingStatusFilter = ref<EmbeddingJobStatus | 'untracked' | 'all'>('all')
+const embeddingStatusFilter = ref<EmbeddingJobStatus | 'none' | 'unknown' | 'all'>('all')
 const pendingSubmission = ref<{ mode: 'selected' | 'all'; documentIds: number[] } | null>(null)
 
 const {
@@ -24,6 +24,7 @@ const {
   activeJobCount,
   cancel,
   clearSelection,
+  discoveredDocumentIds,
   documents,
   feedbackByDocumentId,
   initialize,
@@ -59,20 +60,24 @@ const documentStatusCounts = computed(() => {
   return counts
 })
 
-type EmbeddingDisplayStatus = EmbeddingJobStatus | 'untracked'
+type EmbeddingDisplayStatus = EmbeddingJobStatus | 'none' | 'unknown'
 
 const embeddingDisplayStatusLabels: Record<EmbeddingDisplayStatus, string> = {
-  untracked: '当前会话未跟踪',
+  unknown: '状态未知',
+  none: '无任务',
   ...embeddingJobStatusLabels,
 }
 
 function embeddingDisplayStatus(documentId: number): EmbeddingDisplayStatus {
-  return jobsByDocumentId.value.get(documentId)?.status ?? 'untracked'
+  const job = jobsByDocumentId.value.get(documentId)
+  if (job) return job.status
+  return discoveredDocumentIds.value.has(documentId) ? 'none' : 'unknown'
 }
 
 const embeddingStatusCounts = computed(() => {
   const counts: Record<EmbeddingDisplayStatus, number> = {
-    untracked: 0,
+    unknown: 0,
+    none: 0,
     waiting_document: 0,
     queued: 0,
     processing: 0,
@@ -187,6 +192,7 @@ onMounted(() => void initialize())
         <h2 id="embedding-workspace-title">选择需要进入语义检索的文档</h2>
         <p>
           “文本解析”与“向量化”是两个阶段：先提取文本块，再把文本块转换成可比较的数值表示。任务由后端异步执行，关闭本页不会中断任务。
+          页面会从后端恢复每篇文档的最近任务；最近任务成功不等于已经证明向量匹配当前文档版本。
         </p>
       </div>
       <dl>
@@ -231,16 +237,17 @@ onMounted(() => void initialize())
         </select>
       </label>
       <label class="status-field">
-        <span>向量任务状态（当前会话）</span>
+        <span>最近向量任务</span>
         <select v-model="embeddingStatusFilter">
           <option value="all">全部状态（{{ documents.length }}）</option>
-          <option value="untracked">未跟踪（{{ embeddingStatusCounts.untracked }}）</option>
+          <option value="none">无任务（{{ embeddingStatusCounts.none }}）</option>
+          <option value="unknown">状态未知（{{ embeddingStatusCounts.unknown }}）</option>
           <option value="waiting_document">
             等待文本（{{ embeddingStatusCounts.waiting_document }}）
           </option>
           <option value="queued">排队中（{{ embeddingStatusCounts.queued }}）</option>
           <option value="processing">向量化中（{{ embeddingStatusCounts.processing }}）</option>
-          <option value="succeeded">已完成（{{ embeddingStatusCounts.succeeded }}）</option>
+          <option value="succeeded">最近成功（{{ embeddingStatusCounts.succeeded }}）</option>
           <option value="failed">失败（{{ embeddingStatusCounts.failed }}）</option>
           <option value="canceled">已取消（{{ embeddingStatusCounts.canceled }}）</option>
         </select>
@@ -293,8 +300,8 @@ onMounted(() => void initialize())
           <template v-if="pendingNonReadyCount > 0">
             其中 {{ pendingNonReadyCount }} 份尚未完成文本解析，将由后端保存为等待文档的向量任务。
           </template>
-          向量任务可能调用远程模型并消耗额度。后端尚不能按文档返回历史成功任务；当前会话未跟踪的文档如果过去已经完成向量化，
-          本次可能重新生成。
+          向量任务可能调用远程模型并消耗额度。页面已经跳过最近任务为活动或成功的文档；失败、取消或后端明确无任务的文档
+          将重新申请。
         </p>
       </div>
       <div class="confirmation-actions">
@@ -418,7 +425,7 @@ onMounted(() => void initialize())
     </ol>
 
     <p class="session-note">
-      页面只能恢复本浏览器会话已经记录的任务。后端提供任务列表接口前，“未跟踪”不等于“从未向量化”。
+      最近任务来自后端的按文档批量快照；不存在、无任务和越权资源统一表现为“无任务”。“最近任务成功”尚不等于当前文档版本的向量已经就绪。
     </p>
   </section>
 </template>

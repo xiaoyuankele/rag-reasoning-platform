@@ -1,18 +1,33 @@
 import type {
   KeywordSearchHit,
+  KeywordSearchOperator,
   KeywordSearchPage,
   KeywordSearchPagination,
+  KeywordSearchWithin,
 } from '../../../entities/search-result/model/search-result'
 import { ApiError } from '../../../shared/api/api-error'
 import { httpClient } from '../../../shared/api/http-client'
 
-/** 关键词检索请求参数；page/pageSize 始终由前端提供明确值。 */
-export interface KeywordSearchParams {
-  query: string
+interface KeywordSearchBaseParams {
   documentId?: number
   page: number
   pageSize: number
 }
+
+export interface KeywordPhraseSearchParams extends KeywordSearchBaseParams {
+  mode: 'phrase'
+  query: string
+}
+
+export interface KeywordTermsSearchParams extends KeywordSearchBaseParams {
+  mode: 'terms'
+  terms: string[]
+  operator: KeywordSearchOperator
+  within: KeywordSearchWithin
+}
+
+/** 短语模式与多关键词模式互斥，避免同时发送 q 和 term。 */
+export type KeywordSearchParams = KeywordPhraseSearchParams | KeywordTermsSearchParams
 
 interface SearchHitDto {
   chunk_id: number
@@ -35,6 +50,9 @@ interface SearchPaginationDto {
 
 interface SearchResponseDto {
   query: string
+  terms?: string[]
+  operator?: KeywordSearchOperator
+  within?: KeywordSearchWithin
   results: SearchHitDto[]
   pagination: SearchPaginationDto
 }
@@ -81,12 +99,42 @@ function isSearchPaginationDto(value: unknown): value is SearchPaginationDto {
 function isSearchResponseDto(value: unknown): value is SearchResponseDto {
   if (!isRecord(value)) return false
 
-  return (
-    typeof value.query === 'string' &&
-    Array.isArray(value.results) &&
-    value.results.every(isSearchHitDto) &&
-    isSearchPaginationDto(value.pagination)
+  if (
+    typeof value.query !== 'string' ||
+    !Array.isArray(value.results) ||
+    !value.results.every(isSearchHitDto) ||
+    !isSearchPaginationDto(value.pagination)
+  ) {
+    return false
+  }
+
+  if (value.terms === undefined) {
+    return (
+      value.query.trim().length > 0 && value.operator === undefined && value.within === undefined
+    )
+  }
+
+  if (
+    !Array.isArray(value.terms) ||
+    value.terms.length < 2 ||
+    value.terms.length > 8 ||
+    !value.terms.every(
+      (term) => typeof term === 'string' && term.trim().length > 0 && [...term].length <= 100,
+    ) ||
+    (value.operator !== 'all' && value.operator !== 'any') ||
+    value.within !== 'chunk'
+  ) {
+    return false
+  }
+
+  const normalizedTerms = new Set(
+    value.terms.map((term) => (term as string).trim().toLocaleLowerCase()),
   )
+  const totalCharacters = value.terms.reduce(
+    (total, term) => total + [...(term as string)].length,
+    0,
+  )
+  return normalizedTerms.size === value.terms.length && totalCharacters <= 200
 }
 
 function mapSearchHit(source: SearchHitDto): KeywordSearchHit {
@@ -120,6 +168,9 @@ export function mapKeywordSearchResponse(data: unknown): KeywordSearchPage {
 
   return {
     query: data.query,
+    terms: data.terms ?? [],
+    operator: data.operator ?? null,
+    within: data.within ?? null,
     results: data.results.map(mapSearchHit),
     pagination: mapPagination(data.pagination),
   }
@@ -130,13 +181,23 @@ export async function searchKeywords(
   params: KeywordSearchParams,
   signal?: AbortSignal,
 ): Promise<KeywordSearchPage> {
+  const searchParams =
+    params.mode === 'phrase'
+      ? { q: params.query }
+      : {
+          term: params.terms,
+          operator: params.operator,
+          within: params.within,
+        }
   const response = await httpClient.get<unknown>('/search', {
     params: {
-      q: params.query,
+      ...searchParams,
       document_id: params.documentId,
       page: params.page,
       page_size: params.pageSize,
     },
+    // Axios 使用 term=a&term=b，匹配 Gin GetQueryArray("term")，不发送 term[]=a。
+    paramsSerializer: { indexes: null },
     signal,
   })
 

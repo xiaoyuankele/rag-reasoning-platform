@@ -24,7 +24,7 @@ export const embeddingJobStatusLabels: Record<EmbeddingJobStatus, string> = {
   waiting_document: '等待文档解析',
   queued: '等待向量化',
   processing: '向量化中',
-  succeeded: '向量已就绪',
+  succeeded: '最近任务成功',
   failed: '向量化失败',
   canceled: '已取消',
 }
