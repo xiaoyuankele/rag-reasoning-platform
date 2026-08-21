@@ -413,14 +413,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// 第一版问答使用 DashScope 的 OpenAI 兼容生成接口。Generator 只在显式
 	// 启用 ANSWER_ENABLED 时创建，避免基础服务启动后意外产生生成费用。
-	var answerService *answerapplication.Service
+	var answerService *answerapplication.ConcurrentService
 	if generationConfig.Enabled {
 		generator, err := newGenerationClient(generationConfig)
 		if err != nil {
 			return err
 		}
 
-		answerService, err = answerapplication.NewService(
+		baseAnswerService, err := answerapplication.NewService(
 			semanticSearchService,
 			generator,
 			observability.NewGenerationCallLogger(logger),
@@ -431,6 +431,24 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("create answer service: %w", err)
 		}
+
+		answerService, err = answerapplication.NewConcurrentService(
+			baseAnswerService,
+			observability.NewAnswerAdmissionLogger(logger),
+			generationConfig.MaxConcurrency,
+			generationConfig.QueueWaitTimeout,
+		)
+		if err != nil {
+			return fmt.Errorf("create answer concurrency service: %w", err)
+		}
+
+		logger.Info(
+			"Answer concurrency configured",
+			"event", "answer_concurrency_configured",
+			"max_concurrency", generationConfig.MaxConcurrency,
+			"queue_wait_timeout_ms",
+			generationConfig.QueueWaitTimeout.Milliseconds(),
+		)
 	}
 
 	// Application 只依赖验证码端口；这里是组合根，负责选择具体实现。

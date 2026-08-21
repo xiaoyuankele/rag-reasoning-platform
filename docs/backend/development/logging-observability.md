@@ -214,7 +214,25 @@ P5.2.5 在 Answer Application 定义 `GenerationEventObserver`，由 `internal/o
 Generation 日志严格禁止记录用户问题、System Instruction、User Prompt、证据正文、生成答案和 API Key。
 HTTP 访问日志负责整次请求的状态与总耗时，Generation 事件只负责远程生成阶段，二者不能混为同一个指标。
 
-### 7.4 可重复成本汇总
+### 7.4 Answer 并发准入
+
+在线问答在原有 Answer Service 外增加进程内并发包装器。一个槽位覆盖问题向量化、数据库语义检索和远程答案
+生成的完整链路，防止大量并发请求同时占满数据库连接、远程 API 配额和本机资源。
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `answer_request_admitted` | `INFO` | 请求取得并发槽位，开始执行完整问答链路 |
+| `answer_request_rejected` | `WARN`/`INFO` | 等待容量超时，或客户端在等待期间取消 |
+| `answer_request_released` | `INFO` | 问答成功或失败，槽位已经通过 `defer` 归还 |
+
+事件记录 `request_id`、`wait_duration_ms`、`in_flight`、`max_concurrency` 和 `outcome`；释放事件额外记录
+`execution_duration_ms`。`outcome` 使用 `succeeded`、`downstream_error`、`capacity_timeout` 或 `canceled`。
+容量超时使用 `WARN`，客户端取消使用 `INFO`。这些日志同样禁止记录问题、Prompt、答案、证据和 API Key。
+
+当前闸门是**单后端进程级**限制：如果未来水平扩容为多个后端副本，总并发约等于“副本数 × 每副本上限”，
+届时若要形成全局配额，需要增加 Redis/数据库等分布式准入能力。
+
+### 7.5 可重复成本汇总
 
 P5.2.6 第一部分提供 `go run ./cmd/observability-report`。该命令只消费已有 JSONL 日志，不启动服务、
 不访问数据库，也不调用远程模型。它排除 started 事件，按终结事件汇总 Embedding/Generation 的调用次数、

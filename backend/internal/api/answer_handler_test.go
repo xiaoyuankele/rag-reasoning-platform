@@ -301,6 +301,41 @@ func TestAnswerHandlerMapsServiceErrors(t *testing.T) {
 	}
 }
 
+func TestAnswerHandlerReturnsStableCapacityError(t *testing.T) {
+	service := &fakeAnswerService{
+		err: errors.Join(
+			errors.New("answer admission failed"),
+			answerapplication.ErrAnswerCapacityExhausted,
+		),
+	}
+	recorder := performAnswerRequest(
+		t,
+		service,
+		`{"query":"control","top_k":5}`,
+	)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"status = %d, want %d; body = %s",
+			recorder.Code,
+			http.StatusServiceUnavailable,
+			recorder.Body.String(),
+		)
+	}
+	if retryAfter := recorder.Header().Get("Retry-After"); retryAfter != "2" {
+		t.Fatalf("Retry-After = %q, want 2", retryAfter)
+	}
+
+	var response errorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode capacity response: %v", err)
+	}
+	if response.Code != errorCodeAnswerCapacityExhausted ||
+		response.Error != "answer service is busy; try again later" {
+		t.Fatalf("capacity response = %+v", response)
+	}
+}
+
 func performAnswerRequest(
 	t *testing.T,
 	service answerService,

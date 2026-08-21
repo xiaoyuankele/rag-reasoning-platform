@@ -16,6 +16,9 @@ const (
 	defaultGenerationMaxOutputTokens   = 1024
 	maximumGenerationMaxOutputTokens   = 8192
 	defaultGenerationTemperature       = 0.1
+	defaultAnswerMaxConcurrency        = 2
+	maximumAnswerMaxConcurrency        = 16
+	defaultAnswerQueueWaitTimeout      = 3 * time.Second
 )
 
 var (
@@ -34,14 +37,16 @@ var (
 //
 // APIKey 只允许交给 Infrastructure HTTP 适配器，禁止写入日志、数据库和响应。
 type GenerationConfig struct {
-	Enabled         bool
-	APIKey          string
-	Endpoint        string
-	ModelName       string
-	HTTPTimeout     time.Duration
-	MaxOutputTokens int
-	Temperature     float64
-	ThinkingEnabled bool
+	Enabled          bool
+	APIKey           string
+	Endpoint         string
+	ModelName        string
+	HTTPTimeout      time.Duration
+	MaxOutputTokens  int
+	Temperature      float64
+	ThinkingEnabled  bool
+	MaxConcurrency   int
+	QueueWaitTimeout time.Duration
 }
 
 // LoadGeneration 从环境变量加载文本生成配置。
@@ -102,15 +107,40 @@ func LoadGeneration() (GenerationConfig, error) {
 		return GenerationConfig{}, err
 	}
 
+	maxConcurrency, err := loadPositiveBoundedInt(
+		"ANSWER_MAX_CONCURRENCY",
+		defaultAnswerMaxConcurrency,
+		maximumAnswerMaxConcurrency,
+	)
+	if err != nil {
+		return GenerationConfig{}, fmt.Errorf(
+			"load answer max concurrency: %w",
+			err,
+		)
+	}
+
+	queueWaitTimeout, err := loadPositiveDuration(
+		"ANSWER_QUEUE_WAIT_TIMEOUT",
+		defaultAnswerQueueWaitTimeout,
+	)
+	if err != nil {
+		return GenerationConfig{}, fmt.Errorf(
+			"load answer queue wait timeout: %w",
+			err,
+		)
+	}
+
 	return GenerationConfig{
-		Enabled:         enabled,
-		APIKey:          apiKey,
-		Endpoint:        endpoint,
-		ModelName:       modelName,
-		HTTPTimeout:     httpTimeout,
-		MaxOutputTokens: maxOutputTokens,
-		Temperature:     temperature,
-		ThinkingEnabled: thinkingEnabled,
+		Enabled:          enabled,
+		APIKey:           apiKey,
+		Endpoint:         endpoint,
+		ModelName:        modelName,
+		HTTPTimeout:      httpTimeout,
+		MaxOutputTokens:  maxOutputTokens,
+		Temperature:      temperature,
+		ThinkingEnabled:  thinkingEnabled,
+		MaxConcurrency:   maxConcurrency,
+		QueueWaitTimeout: queueWaitTimeout,
 	}, nil
 }
 
