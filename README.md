@@ -239,6 +239,8 @@ Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义�
 
 `GET /embedding-jobs/:id` 已提供受 Session 保护的向量任务状态查询。接口通过任务 JOIN 所属文档并按 OwnerScope 过滤，任务不存在或属于其他用户统一返回 `404`；成功时返回任务所属文档、冻结的模型与维度、当前状态、尝试次数、下次重试时间、错误信息、Token 用量和各阶段时间戳。前端可以在创建任务获得 ID 后轮询该接口，而不需要读取数据库或依赖后端日志。
 
+`POST /embedding-jobs/latest` 已提供按最多 100 个文档 ID 批量发现最新向量任务的能力，用于页面刷新、换浏览器或换设备后恢复服务端状态，避免逐文档产生 N+1 查询。Application 对 ID 去重并保持首次出现顺序，PostgreSQL 通过 OwnerScope JOIN 和 `(document_id, id DESC)` 索引一次选出各文档最新任务；没有任务、不存在和属于其他用户统一返回 `job: null`。该接口只表达最新任务快照，不能在尚无 document revision 契约时把历史成功任务冒充为当前版本向量就绪。
+
 DashScope 真实验收已经完成：文档 20 的 42 个文本块创建任务 22，使用 `text-embedding-v4`
 生成 1536 维向量；任务只领取 1 次并进入 `succeeded`，记录 16399 个输入 Token。数据库最终存在
 42 条互不重复、维度一致且非零的向量，没有遗漏文本块，也没有遗留 `queued/processing` 任务。

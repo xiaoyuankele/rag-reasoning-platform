@@ -21,6 +21,7 @@ type ScopedEmbeddingJobRepository struct {
 
 var _ embeddingdomain.ScopedJobRequester = (*ScopedEmbeddingJobRepository)(nil)
 var _ embeddingdomain.ScopedJobFinder = (*ScopedEmbeddingJobRepository)(nil)
+var _ embeddingdomain.ScopedLatestJobFinder = (*ScopedEmbeddingJobRepository)(nil)
 var _ embeddingdomain.ScopedJobCanceler = (*ScopedEmbeddingJobRepository)(nil)
 
 // NewScopedEmbeddingJobRepository 创建带文档所有者边界的向量任务仓储。
@@ -265,6 +266,66 @@ func (r *ScopedEmbeddingJobRepository) GetEmbeddingJobByID(
 		)
 	}
 	return foundJob, nil
+}
+
+// FindLatestEmbeddingJobsByDocumentIDs 一次查询当前所有者每份文档最新的任务。
+// DISTINCT ON 按 document_id 分组，ORDER BY id DESC 选择该组最新创建的任务。
+// 没有任务、不存在和属于其他用户的文档都不会出现在结果中。
+func (r *ScopedEmbeddingJobRepository) FindLatestEmbeddingJobsByDocumentIDs(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	documentIDs []int64,
+) ([]embeddingdomain.Job, error) {
+	if !scope.IsValid() {
+		return nil, accessdomain.ErrInvalidOwnerScope
+	}
+	if len(documentIDs) == 0 {
+		return make([]embeddingdomain.Job, 0), nil
+	}
+
+	const query = `
+		SELECT DISTINCT ON (job.document_id)
+			job.id,
+			job.document_id,
+			job.model_name,
+			job.dimensions,
+			job.status,
+			job.attempt_count,
+			job.error_message,
+			job.next_attempt_at,
+			job.prompt_tokens,
+			job.total_tokens,
+			job.created_at,
+			job.updated_at,
+			job.started_at,
+			job.completed_at
+		FROM embedding_jobs AS job
+		JOIN documents AS source_document
+		  ON source_document.id = job.document_id
+		WHERE source_document.owner_user_id = $1
+		  AND job.document_id = ANY($2::BIGINT[])
+		ORDER BY job.document_id, job.id DESC
+	`
+
+	rows, err := r.pool.Query(ctx, query, scope.OwnerUserID(), documentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("query latest scoped embedding jobs: %w", err)
+	}
+	defer rows.Close()
+
+	jobs := make([]embeddingdomain.Job, 0, len(documentIDs))
+	for rows.Next() {
+		job, err := scanEmbeddingJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan latest scoped embedding job: %w", err)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate latest scoped embedding jobs: %w", err)
+	}
+
+	return jobs, nil
 }
 
 // CancelEmbeddingJob 在所有者边界内原子取消 waiting_document 或 queued 任务。

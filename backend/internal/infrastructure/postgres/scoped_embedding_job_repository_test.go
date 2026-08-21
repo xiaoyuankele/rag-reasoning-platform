@@ -144,4 +144,70 @@ func TestScopedEmbeddingJobRepositoryRejectsInvalidScope(t *testing.T) {
 	); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
 		t.Fatalf("GetEmbeddingJobByID(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
 	}
+	if _, err := repository.FindLatestEmbeddingJobsByDocumentIDs(
+		ctx,
+		invalidScope,
+		[]int64{1},
+	); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
+		t.Fatalf("FindLatestEmbeddingJobsByDocumentIDs(invalid scope) error = %v, want ErrInvalidOwnerScope", err)
+	}
+}
+
+func TestScopedEmbeddingJobRepositoryFindsLatestJobsByDocumentIDs(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	ownerAID := insertScopedRepositoryUser(t, ctx, pool, "latest-embedding-owner-a@example.com")
+	ownerBID := insertScopedRepositoryUser(t, ctx, pool, "latest-embedding-owner-b@example.com")
+	ownerA, _ := accessdomain.NewOwnerScope(ownerAID)
+	ownerB, _ := accessdomain.NewOwnerScope(ownerBID)
+	documents := postgresrepository.NewScopedDocumentRepository(pool)
+	jobs := postgresrepository.NewScopedEmbeddingJobRepository(pool)
+
+	ownerADocument, err := documents.Create(ctx, ownerA, scopedDocumentInput("latest-a.md", "latest/a.md", "a"))
+	if err != nil {
+		t.Fatalf("create owner A document: %v", err)
+	}
+	ownerANoJobDocument, err := documents.Create(ctx, ownerA, scopedDocumentInput("latest-no-job.md", "latest/no-job.md", "b"))
+	if err != nil {
+		t.Fatalf("create owner A no-job document: %v", err)
+	}
+	ownerBDocument, err := documents.Create(ctx, ownerB, scopedDocumentInput("latest-b.md", "latest/b.md", "c"))
+	if err != nil {
+		t.Fatalf("create owner B document: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE documents SET status = 'ready' WHERE id = ANY($1::BIGINT[])", []int64{ownerADocument.ID, ownerBDocument.ID}); err != nil {
+		t.Fatalf("mark documents ready: %v", err)
+	}
+
+	firstResult, err := jobs.RequestEmbeddingJob(ctx, ownerA, ownerADocument.ID, "old-model", 768)
+	if err != nil {
+		t.Fatalf("create first owner A job: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE embedding_jobs SET status = 'failed' WHERE id = $1", firstResult.Job.ID); err != nil {
+		t.Fatalf("finish first owner A job: %v", err)
+	}
+	latestResult, err := jobs.RequestEmbeddingJob(ctx, ownerA, ownerADocument.ID, "current-model", 1536)
+	if err != nil {
+		t.Fatalf("create latest owner A job: %v", err)
+	}
+	if _, err := jobs.RequestEmbeddingJob(ctx, ownerB, ownerBDocument.ID, "private-model", 1536); err != nil {
+		t.Fatalf("create owner B job: %v", err)
+	}
+
+	foundJobs, err := jobs.FindLatestEmbeddingJobsByDocumentIDs(
+		ctx,
+		ownerA,
+		[]int64{ownerADocument.ID, ownerANoJobDocument.ID, ownerBDocument.ID, 999999},
+	)
+	if err != nil {
+		t.Fatalf("FindLatestEmbeddingJobsByDocumentIDs() error = %v", err)
+	}
+	if len(foundJobs) != 1 || foundJobs[0].ID != latestResult.Job.ID || foundJobs[0].ModelName != "current-model" {
+		t.Fatalf("found jobs = %+v, want only latest owner A job %+v", foundJobs, latestResult.Job)
+	}
 }

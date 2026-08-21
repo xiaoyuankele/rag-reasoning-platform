@@ -29,6 +29,7 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `GET` | `/search` | Session Cookie；完整短语 `q`，或重复 `term` + 可选 `operator`、`within`；另可选 `document_id`、`page`、`page_size` | `200` | 在当前用户文档的同一文本块内执行短语或多关键词检索 | 用户功能；已隔离 |
 | `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | 新建 `202`；活动任务已存在 `200` | 保存当前用户的向量化意图 | 用户功能；已隔离/幂等 |
 | `POST` | `/embedding-jobs/batch` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 对多份文档逐项创建或复用向量任务 | 用户功能；已隔离/逐项结果 |
+| `POST` | `/embedding-jobs/latest` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 按文档批量发现当前用户可见的最新向量任务 | 用户功能；已隔离/状态恢复 |
 | `GET` | `/embedding-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的向量任务状态、重试和 Token 信息 | 用户功能；已隔离/轮询 |
 | `POST` | `/embedding-jobs/:id/cancel` | Session Cookie；路径参数 `id` | `200` | 取消 waiting/queued 向量任务 | 用户功能；processing/终态返回 `409` |
 | `POST` | `/semantic-search` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k` | `200` | 在当前用户文档中进行语义检索 | 用户功能；已隔离，受功能开关控制 |
@@ -134,6 +135,34 @@ GET /search?term=磁悬浮&term=振动&operator=all&within=chunk&page=1&page_siz
 - `document_id`、OwnerScope、`ready` 状态和分页规则继续沿用原接口。
 
 当前 chunk 不等于自然句或自然段。`within=sentence/paragraph` 尚未实现，不能由前端在分页结果上二次过滤冒充。
+
+### 2.3 按文档批量发现最新向量任务
+
+`POST /embedding-jobs/latest` 用于页面首次进入、刷新或换设备后，从已知文档 ID 恢复服务端真实任务状态：
+
+```json
+{
+  "document_ids": [600, 595, 593]
+}
+```
+
+成功统一返回 `200`，去重后仍按第一次出现的文档 ID 顺序逐项响应：
+
+```json
+{
+  "items": [
+    {"document_id": 600, "job": {"id": 931, "document_id": 600, "status": "succeeded"}},
+    {"document_id": 595, "job": {"id": 932, "document_id": 595, "status": "processing"}},
+    {"document_id": 593, "job": null}
+  ]
+}
+```
+
+- 请求必须包含 1～100 个正整数文档 ID；格式或边界错误返回 `400`、`invalid_embedding_job_lookup`；
+- 查询始终使用 Session OwnerScope。文档不存在、属于其他用户或从未创建任务都返回 `job: null`，避免泄露资源存在性；
+- “最新”第一版按 `embedding_jobs.id DESC` 定义；接口返回的是调用时刻快照，不是锁；
+- 页面初始化时调用一次，随后只对 `waiting_document/queued/processing` 任务复用 `GET /embedding-jobs/:id` 有界轮询；
+- 最新任务 `succeeded` 目前只表示最近任务成功，不等同于已经证明其向量匹配当前文档 revision。版本和 stale 语义后续单独设计。
 
 ## 3. P6 认证接口状态
 
