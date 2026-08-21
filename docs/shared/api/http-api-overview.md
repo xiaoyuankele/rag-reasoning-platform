@@ -1,6 +1,6 @@
 # HTTP API 总览
 
-> 更新时间：2026-08-20。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
+> 更新时间：2026-08-21。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
 > Handler 测试和后续 OpenAPI 文件为最终校验依据。
 
 ## 1. 当前访问边界
@@ -26,7 +26,7 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `DELETE` | `/documents/:id` | Session Cookie；路径参数 `id` | `204` | 删除当前用户文档及其关联数据 | 用户功能；已隔离，需二次确认 |
 | `POST` | `/documents/:id/process` | Session Cookie；路径参数 `id` | `202` | 为当前用户文档创建异步解析任务 | 用户功能；已隔离 |
 | `GET` | `/processing-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的解析任务状态 | 用户功能；已隔离/轮询 |
-| `GET` | `/search` | Session Cookie；`q`、可选 `document_id`、`page`、`page_size` | `200` | 检索当前用户文档的文本块 | 用户功能；已隔离 |
+| `GET` | `/search` | Session Cookie；完整短语 `q`，或重复 `term` + 可选 `operator`、`within`；另可选 `document_id`、`page`、`page_size` | `200` | 在当前用户文档的同一文本块内执行短语或多关键词检索 | 用户功能；已隔离 |
 | `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | 新建 `202`；活动任务已存在 `200` | 保存当前用户的向量化意图 | 用户功能；已隔离/幂等 |
 | `POST` | `/embedding-jobs/batch` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 对多份文档逐项创建或复用向量任务 | 用户功能；已隔离/逐项结果 |
 | `GET` | `/embedding-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的向量任务状态、重试和 Token 信息 | 用户功能；已隔离/轮询 |
@@ -110,6 +110,30 @@ Cookie: rag_session=...
 预检结果不是上传预约，也不锁定文档。两个标签页可能同时得到 `exists:false`；随后并发上传时，
 `POST /documents` 仍依靠 `(owner_user_id, sha256)` 唯一约束确保同一用户只保留一份内容。
 不同用户之间不会通过预检互相看到文档。第一版直接查询 PostgreSQL，不引入 Redis。
+
+### 2.2 关键词检索模式
+
+`GET /search` 保留原有完整短语模式：
+
+```http
+GET /search?q=磁悬浮振动&page=1&page_size=20
+```
+
+同一文本块多关键词模式使用重复 `term` 参数：
+
+```http
+GET /search?term=磁悬浮&term=振动&operator=all&within=chunk&page=1&page_size=20
+```
+
+- 规范化后必须包含 2～8 个不同关键词；单项最多 100 个 Unicode 字符，合计最多 200 个字符；
+- `operator` 为 `all` 或 `any`，省略时默认 `all`；
+- 第一版 `within` 只接受 `chunk`，省略时也默认为 `chunk`；
+- `q` 与 `term` 不能同时提供；
+- `all` 要求同一条 `text_chunks` 记录包含全部词，`any` 要求至少包含一个词；
+- 响应在原 `query` 和分页字段之外，为多词请求返回规范化 `terms`、`operator`、`within`；
+- `document_id`、OwnerScope、`ready` 状态和分页规则继续沿用原接口。
+
+当前 chunk 不等于自然句或自然段。`within=sentence/paragraph` 尚未实现，不能由前端在分页结果上二次过滤冒充。
 
 ## 3. P6 认证接口状态
 

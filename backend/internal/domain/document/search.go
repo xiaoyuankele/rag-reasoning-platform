@@ -6,13 +6,45 @@ import (
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 )
 
+// SearchOperator 定义多个关键词在同一个文本块中的组合方式。
+type SearchOperator string
+
+const (
+	// SearchOperatorAll 要求同一文本块包含全部关键词。
+	SearchOperatorAll SearchOperator = "all"
+	// SearchOperatorAny 要求同一文本块至少包含一个关键词。
+	SearchOperatorAny SearchOperator = "any"
+)
+
+// IsValid 判断组合方式是否由当前关键词检索支持。
+func (o SearchOperator) IsValid() bool {
+	return o == SearchOperatorAll || o == SearchOperatorAny
+}
+
+// SearchWithin 定义多个关键词必须共同出现的数据范围。
+type SearchWithin string
+
+const (
+	// SearchWithinChunk 表示全部匹配判断都在一条 text_chunks 记录内完成。
+	SearchWithinChunk SearchWithin = "chunk"
+)
+
+// IsValid 判断位置范围是否由当前关键词检索支持。
+func (w SearchWithin) IsValid() bool {
+	return w == SearchWithinChunk
+}
+
 // SearchOptions 表示文本块仓储执行关键词检索时需要的参数。
 //
-// Query 已由 Application 层完成去除首尾空白和合法性校验；DocumentID
-// 为 nil 时跨全部 ready 文档搜索，非 nil 时只搜索指定文档；Limit 与
-// Offset 是仓储可以直接转换为 SQL LIMIT/OFFSET 的分页参数。
+// Query 保存向后兼容的单个完整短语；Terms 保存多关键词模式的规范化词项。
+// 二者由 Application 保证不会同时提供。Terms 已完成去除首尾空白、去重和合法性校验；
+// Operator 决定同一 chunk 需要命中全部词还是任意词；DocumentID 为 nil
+// 时跨全部 ready 文档搜索，非 nil 时只搜索指定文档；Limit 与 Offset
+// 是仓储可以直接转换为 SQL LIMIT/OFFSET 的分页参数。
 type SearchOptions struct {
 	Query      string
+	Terms      []string
+	Operator   SearchOperator
 	DocumentID *int64
 	Limit      int64
 	Offset     int64

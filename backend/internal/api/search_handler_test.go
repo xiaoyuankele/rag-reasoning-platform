@@ -116,7 +116,7 @@ func TestDocumentSearchHandlerReturnsResults(t *testing.T) {
 				Page:     2,
 				PageSize: 5,
 			}
-			if input != expectedInput {
+			if !reflect.DeepEqual(input, expectedInput) {
 				t.Fatalf("expected input %+v, got %+v", expectedInput, input)
 			}
 
@@ -188,6 +188,77 @@ func TestDocumentSearchHandlerReturnsResults(t *testing.T) {
 
 	if service.searchCalls != 1 {
 		t.Fatalf("expected one Search call, got %d", service.searchCalls)
+	}
+}
+
+func TestDocumentSearchHandlerPassesMultipleTerms(t *testing.T) {
+	service := &fakeDocumentSearchService{
+		searchFunc: func(
+			_ context.Context,
+			_ accessdomain.OwnerScope,
+			input applicationdocument.SearchInput,
+		) (applicationdocument.SearchOutput, error) {
+			want := applicationdocument.SearchInput{
+				Terms:    []string{"maglev", "vibration"},
+				Operator: documentdomain.SearchOperatorAny,
+				Within:   documentdomain.SearchWithinChunk,
+				Page:     1,
+				PageSize: 20,
+			}
+			if !reflect.DeepEqual(input, want) {
+				t.Fatalf("Search() input = %+v, want %+v", input, want)
+			}
+			return applicationdocument.SearchOutput{
+				Terms:      want.Terms,
+				Operator:   want.Operator,
+				Within:     want.Within,
+				Hits:       make([]documentdomain.SearchHit, 0),
+				Page:       1,
+				PageSize:   20,
+				Total:      0,
+				TotalPages: 0,
+			}, nil
+		},
+	}
+
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/search?term=maglev&term=vibration&operator=any&within=chunk",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	newTestDocumentSearchRouter(service).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d want=200 body=%s", response.Code, response.Body.String())
+	}
+	var actual documentSearchResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &actual); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !reflect.DeepEqual(actual.Terms, []string{"maglev", "vibration"}) ||
+		actual.Operator != documentdomain.SearchOperatorAny ||
+		actual.Within != documentdomain.SearchWithinChunk {
+		t.Fatalf("response metadata = %+v", actual)
+	}
+}
+
+func TestDocumentSearchHandlerRejectsPhraseAndTermsTogether(t *testing.T) {
+	service := &fakeDocumentSearchService{
+		searchFunc: func(context.Context, accessdomain.OwnerScope, applicationdocument.SearchInput) (applicationdocument.SearchOutput, error) {
+			t.Fatal("Search must not be called for conflicting query modes")
+			return applicationdocument.SearchOutput{}, nil
+		},
+	}
+	request := httptest.NewRequest(http.MethodGet, "/search?q=maglev&term=maglev&term=vibration", nil)
+	response := httptest.NewRecorder()
+	newTestDocumentSearchRouter(service).ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || response.Body.String() != `{"error":"q and term cannot be used together"}` {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	if service.searchCalls != 0 {
+		t.Fatalf("Search calls = %d, want 0", service.searchCalls)
 	}
 }
 
@@ -297,7 +368,7 @@ func TestDocumentSearchHandlerUsesDefaultPagination(t *testing.T) {
 				Page:     applicationdocument.DefaultPage,
 				PageSize: applicationdocument.DefaultPageSize,
 			}
-			if input != expectedInput {
+			if !reflect.DeepEqual(input, expectedInput) {
 				t.Fatalf("expected input %+v, got %+v", expectedInput, input)
 			}
 
@@ -474,6 +545,24 @@ func TestDocumentSearchHandlerMapsApplicationErrors(t *testing.T) {
 			serviceError:   applicationdocument.ErrSearchQueryTooLong,
 			expectedStatus: http.StatusBadRequest,
 			expectedBody:   `{"error":"query must not exceed 200 characters"}`,
+		},
+		{
+			name:           "term count is invalid",
+			serviceError:   applicationdocument.ErrInvalidSearchTermCount,
+			expectedStatus: http.StatusBadRequest,
+			expectedBody:   `{"error":"term must contain between 2 and 8 unique keywords"}`,
+		},
+		{
+			name:           "operator is invalid",
+			serviceError:   applicationdocument.ErrInvalidSearchOperator,
+			expectedStatus: http.StatusBadRequest,
+			expectedBody:   `{"error":"operator must be all or any"}`,
+		},
+		{
+			name:           "within is invalid",
+			serviceError:   applicationdocument.ErrInvalidSearchWithin,
+			expectedStatus: http.StatusBadRequest,
+			expectedBody:   `{"error":"within must be chunk"}`,
 		},
 		{
 			name:           "page is invalid",
