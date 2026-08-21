@@ -1,7 +1,8 @@
 # 后端交接：向量任务并发、版本与 Redis 演进
 
 > 状态：2026-08-21 部分完成。提交 `c4696bc` 已实现等待意图、幂等申请、批量申请、取消和解析成功原子激活；
-> 后续已补充按最多 100 个文档 ID 一次发现各自最新任务的 OwnerScope 查询；
+> 后续已补充按最多 100 个文档 ID 一次发现各自最新任务的 OwnerScope 查询，并完成单实例固定大小
+> Embedding Worker Pool；
 > 内容 revision、活动任务下的重新解析/删除约束、Worker 租约、配额和 Redis 仍未实现。跨端产品决策见
 > [文档向量化、在线编辑、并发与缓存设计复盘](../../shared/architecture/document-vectorization-editing-concurrency-review.md)。
 
@@ -14,7 +15,7 @@
 - `OwnerScope` 在 Handler、Application 和 SQL 三层的向量任务隔离；
 - PostgreSQL `FOR UPDATE SKIP LOCKED` 原子领取；
 - 活动向量任务唯一约束、有限重试、Token 和生命周期日志；
-- PDF Worker 与 Embedding Worker 独立循环。
+- PDF Worker 与 Embedding Worker 独立运行；Embedding 支持 1～4 个固定并发循环，默认 1 可安全降级；
 - `waiting_document` 持久意图和解析成功事务内激活；
 - 最多 100 份文档的逐项批量申请；
 - `waiting_document/queued` 取消和 `processing` 冲突保护。
@@ -31,7 +32,7 @@
   → [完成] V3 解析成功原子激活 waiting 任务
   → [完成] V3.1 按文档批量发现最新任务
   → [计划] V4 revision 与重新解析一致性
-  → [计划] V5 并发配额、压测和 Worker 池
+  → [部分完成] V5 单实例 Worker 池；并发配额与完整压测仍待实施
   → [计划] V6 Worker 租约与 API/Worker 分进程
   → [计划] V7 可选 Redis 限流、Session 缓存和进度通知
 ```
@@ -170,7 +171,12 @@ WHERE document_id = $1
 ### 6.1 Worker 领取
 
 只领取 `queued`，不再通过 JOIN ready 文档把 `waiting_document` 混入可执行队列。领取与状态更新保持同一事务，
-继续使用 `FOR UPDATE SKIP LOCKED`。
+继续使用 `FOR UPDATE SKIP LOCKED`。同一实例可以通过 `EMBEDDING_WORKER_CONCURRENCY` 启动 1～4 个固定循环；
+不同循环共享无单次任务状态的 Worker、数据库连接池和 HTTP 客户端。每个循环一次只处理一份文档，单份文档内部
+仍按批次顺序调用提供方，最后通过一个 PostgreSQL 事务保存全部向量并更新任务终态。
+
+默认并发为 1，允许在供应商异常、费用控制或本机资源紧张时无代码降级。当前本机建议从 2 开始验证，不能把
+Worker 数直接等同于 HTTP goroutine 数或 Python 进程数。
 
 ### 6.2 用户取消
 

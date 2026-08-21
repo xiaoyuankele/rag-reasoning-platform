@@ -11,6 +11,8 @@ import (
 
 const (
 	defaultEmbeddingDimensions        = 1536
+	defaultEmbeddingWorkerConcurrency = 1
+	maximumEmbeddingWorkerConcurrency = 4
 	defaultEmbeddingHTTPTimeout       = 30 * time.Second
 	defaultEmbeddingProcessingTimeout = 5 * time.Minute
 	defaultEmbeddingPollInterval      = 2 * time.Second
@@ -66,6 +68,7 @@ var (
 // APIKey 只允许传给远程 HTTP 适配器，禁止写入日志、数据库或 HTTP 响应。
 type EmbeddingConfig struct {
 	WorkerEnabled         bool
+	WorkerConcurrency     int
 	SemanticSearchEnabled bool
 	Provider              EmbeddingProvider
 	APIKey                string
@@ -93,6 +96,18 @@ func LoadEmbedding() (EmbeddingConfig, error) {
 	)
 	if err != nil {
 		return EmbeddingConfig{}, err
+	}
+
+	workerConcurrency, err := loadPositiveBoundedInt(
+		"EMBEDDING_WORKER_CONCURRENCY",
+		defaultEmbeddingWorkerConcurrency,
+		maximumEmbeddingWorkerConcurrency,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding worker concurrency: %w",
+			err,
+		)
 	}
 
 	provider, err := loadEmbeddingProvider()
@@ -201,6 +216,7 @@ func LoadEmbedding() (EmbeddingConfig, error) {
 
 	return EmbeddingConfig{
 		WorkerEnabled:         workerEnabled,
+		WorkerConcurrency:     workerConcurrency,
 		SemanticSearchEnabled: semanticSearchEnabled,
 		Provider:              provider,
 		APIKey:                apiKey,

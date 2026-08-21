@@ -17,6 +17,13 @@ func TestLoadEmbeddingUsesDefaults(t *testing.T) {
 	if embeddingConfig.WorkerEnabled {
 		t.Fatal("WorkerEnabled = true, want false by default")
 	}
+	if embeddingConfig.WorkerConcurrency != defaultEmbeddingWorkerConcurrency {
+		t.Fatalf(
+			"WorkerConcurrency = %d, want %d",
+			embeddingConfig.WorkerConcurrency,
+			defaultEmbeddingWorkerConcurrency,
+		)
+	}
 	if embeddingConfig.SemanticSearchEnabled {
 		t.Fatal("SemanticSearchEnabled = true, want false by default")
 	}
@@ -43,6 +50,7 @@ func TestLoadEmbeddingUsesDefaults(t *testing.T) {
 func TestLoadEmbeddingUsesOpenAIEnvironment(t *testing.T) {
 	clearEmbeddingEnvironment(t)
 	t.Setenv("EMBEDDING_WORKER_ENABLED", "true")
+	t.Setenv("EMBEDDING_WORKER_CONCURRENCY", "2")
 	t.Setenv("EMBEDDING_PROVIDER", " OPENAI ")
 	t.Setenv("OPENAI_API_KEY", " test-api-key ")
 	t.Setenv("OPENAI_EMBEDDING_ENDPOINT", " https://example.com/v1/embeddings ")
@@ -62,6 +70,7 @@ func TestLoadEmbeddingUsesOpenAIEnvironment(t *testing.T) {
 	}
 
 	if !embeddingConfig.WorkerEnabled ||
+		embeddingConfig.WorkerConcurrency != 2 ||
 		embeddingConfig.Provider != EmbeddingProviderOpenAI ||
 		embeddingConfig.APIKey != "test-api-key" ||
 		embeddingConfig.Endpoint != "https://example.com/v1/embeddings" ||
@@ -201,6 +210,24 @@ func TestLoadEmbeddingRejectsInvalidWorkerEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadEmbeddingRejectsInvalidWorkerConcurrency(t *testing.T) {
+	testCases := []string{"not-a-number", "0", "5"}
+
+	for _, value := range testCases {
+		t.Run(value, func(t *testing.T) {
+			clearEmbeddingEnvironment(t)
+			t.Setenv("EMBEDDING_WORKER_CONCURRENCY", value)
+
+			if _, err := LoadEmbedding(); err == nil {
+				t.Fatalf(
+					"LoadEmbedding() error = nil for EMBEDDING_WORKER_CONCURRENCY=%q",
+					value,
+				)
+			}
+		})
+	}
+}
+
 func TestLoadEmbeddingRejectsInvalidSemanticSearchEnabled(t *testing.T) {
 	clearEmbeddingEnvironment(t)
 	t.Setenv("SEMANTIC_SEARCH_ENABLED", "sometimes")
@@ -226,6 +253,7 @@ func clearEmbeddingEnvironment(t *testing.T) {
 
 	for _, name := range []string{
 		"EMBEDDING_WORKER_ENABLED",
+		"EMBEDDING_WORKER_CONCURRENCY",
 		"SEMANTIC_SEARCH_ENABLED",
 		"EMBEDDING_PROVIDER",
 		"DASHSCOPE_API_KEY",
