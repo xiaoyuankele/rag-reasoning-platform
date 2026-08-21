@@ -4,6 +4,8 @@
 > 同用户内容去重前端切片；F2-B 已实现详情、解析任务创建与轮询、chunks 分页和删除二次确认，
 > 批量导入解析队列也已复用现有单文档接口完成；自动化门禁已通过，真实上传、解析和删除已由用户验证正常，
 > 真实多文件批次、chunks 分页和刷新恢复仍待专项验收。
+> 上传前重复预检正式契约已经接入：浏览器在单路 Web Worker 中分块计算 SHA-256，命中当前用户已有文档时跳过正文上传；
+> 网络、超时和 5xx 按契约降级到原上传接口，后端哈希与数据库唯一约束继续承担最终一致性。
 > F2-C 第一阶段“单篇 / 全部文档”共享检索范围选择器已经接入，F3 关键词检索不再要求手填文档 ID，
 > 并已完成真实后端结果联调、零命中辨识和文本块关键词安全高亮；
 > P6 前端第一批认证基础、公共页面和受保护应用外壳已经实现，并通过真实 Go 后端、PostgreSQL、Mailpit、
@@ -25,17 +27,19 @@
 3. [前端分层与阶段路线](architecture/frontend-roadmap.md)；
 4. [P6 个人用户域与私有数据闭环](../shared/architecture/personal-user-domain.md)；
 5. [工程化、个人用户与团队演进路线](../shared/architecture/product-evolution-roadmap.md)；
-6. [P6 个人用户认证前端交接](architecture/p6-authentication-handoff.md)；
-7. [F2 文档上传去重联调交接](architecture/f2-document-upload-integration-handoff.md)；
-8. [F2-B 文档操作闭环](architecture/f2b-document-lifecycle.md)；
-9. [F2 批量导入与解析队列](architecture/f2-batch-import-queue.md)；
-10. [F2-C 单篇 / 全部文档检索范围选择器](architecture/f2c-document-scope-picker.md)；
-11. [F3 关键词检索结果高亮](architecture/f3-keyword-result-highlighting.md)；
-12. [F3 多关键词与位置范围检索设计](architecture/f3-multi-keyword-search-design.md)；
-13. [F3 检索对 Chunk 质量的依赖](architecture/f3-chunk-quality-dependency.md)；
-14. [F3 文档解析器替换与并行评估](architecture/f3-document-parser-package-evaluation.md)；
-15. [用户可选向量化与文档编辑前端交接](architecture/document-vectorization-editing-handoff.md)；
-16. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
+6. [高性能与高并发工程目标](../shared/architecture/performance-engineering-goal.md)；
+7. [P6 个人用户认证前端交接](architecture/p6-authentication-handoff.md)；
+8. [F2 文档上传去重联调交接](architecture/f2-document-upload-integration-handoff.md)；
+9. [F2-B 文档操作闭环](architecture/f2b-document-lifecycle.md)；
+10. [F2 批量导入与解析队列](architecture/f2-batch-import-queue.md)；
+11. [F2 上传前重复文件预检](architecture/f2-upload-preflight-evaluation.md)；
+12. [F2-C 单篇 / 全部文档检索范围选择器](architecture/f2c-document-scope-picker.md)；
+13. [F3 关键词检索结果高亮](architecture/f3-keyword-result-highlighting.md)；
+14. [F3 多关键词与位置范围检索设计](architecture/f3-multi-keyword-search-design.md)；
+15. [F3 检索对 Chunk 质量的依赖](architecture/f3-chunk-quality-dependency.md)；
+16. [F3 文档解析器替换与并行评估](architecture/f3-document-parser-package-evaluation.md)；
+17. [用户可选向量化与文档编辑前端交接](architecture/document-vectorization-editing-handoff.md)；
+18. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
 
 ## 文档边界
 

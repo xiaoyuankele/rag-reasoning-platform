@@ -4,7 +4,9 @@ import type { ResearchDocument } from '../../../entities/document/model/document
 import type { ProcessingJob } from '../../../entities/processing-job/model/processing-job'
 import { ApiError } from '../../../shared/api/api-error'
 import { getDocument, uploadDocument } from '../api/document-api'
+import { preflightDocument } from '../api/document-preflight-api'
 import { getProcessingJob, queueDocumentProcessing } from '../api/processing-api'
+import { createFileHashWorkerClient } from './file-hash-worker-client'
 import { useDocumentImportQueue } from './use-document-import-queue'
 
 vi.mock('../api/document-api', () => ({
@@ -12,24 +14,42 @@ vi.mock('../api/document-api', () => ({
   uploadDocument: vi.fn(),
 }))
 
+vi.mock('../api/document-preflight-api', () => ({
+  preflightDocument: vi.fn(),
+}))
+
 vi.mock('../api/processing-api', () => ({
   getProcessingJob: vi.fn(),
   queueDocumentProcessing: vi.fn(),
 }))
 
+vi.mock('./file-hash-worker-client', () => ({
+  createFileHashWorkerClient: vi.fn(),
+}))
+
 const getDocumentMock = vi.mocked(getDocument)
 const uploadDocumentMock = vi.mocked(uploadDocument)
+const preflightDocumentMock = vi.mocked(preflightDocument)
 const getProcessingJobMock = vi.mocked(getProcessingJob)
 const queueDocumentProcessingMock = vi.mocked(queueDocumentProcessing)
+const createFileHashWorkerClientMock = vi.mocked(createFileHashWorkerClient)
+const hashFileMock = vi.fn()
+const disposeHashClientMock = vi.fn()
+const fileSha256 = 'a'.repeat(64)
 
-function createDocument(id: number, status: ResearchDocument['status']): ResearchDocument {
+function createDocument(
+  id: number,
+  status: ResearchDocument['status'],
+  sha256 = fileSha256,
+  sizeBytes = 9,
+): ResearchDocument {
   return {
     id,
     title: null,
     originalName: `document-${id}.pdf`,
     mimeType: 'application/pdf',
-    sizeBytes: 1024,
-    sha256: id.toString(16).padStart(64, 'a').slice(-64),
+    sizeBytes,
+    sha256,
     status,
     errorMessage: null,
     createdAt: new Date('2026-08-18T02:00:00Z'),
@@ -58,8 +78,19 @@ function pdf(name: string): File {
 beforeEach(() => {
   getDocumentMock.mockReset()
   uploadDocumentMock.mockReset()
+  preflightDocumentMock.mockReset()
   getProcessingJobMock.mockReset()
   queueDocumentProcessingMock.mockReset()
+  createFileHashWorkerClientMock.mockReset()
+  hashFileMock.mockReset()
+  disposeHashClientMock.mockReset()
+
+  hashFileMock.mockResolvedValue(fileSha256)
+  createFileHashWorkerClientMock.mockReturnValue({
+    hash: hashFileMock,
+    dispose: disposeHashClientMock,
+  })
+  preflightDocumentMock.mockResolvedValue({ exists: false, document: null })
 })
 
 afterEach(() => {
@@ -93,14 +124,11 @@ describe('useDocumentImportQueue', () => {
 
     queue.addFiles([pdf('one.pdf'), pdf('two.pdf'), pdf('three.pdf')])
     const startPromise = queue.start()
-    await Promise.resolve()
-    expect(uploadDocumentMock).toHaveBeenCalledTimes(2)
+    await vi.waitFor(() => expect(uploadDocumentMock).toHaveBeenCalledTimes(2))
     expect(maximumActiveUploads).toBe(2)
 
     releaseUploads.shift()?.()
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(uploadDocumentMock).toHaveBeenCalledTimes(3)
+    await vi.waitFor(() => expect(uploadDocumentMock).toHaveBeenCalledTimes(3))
     releaseUploads.splice(0).forEach((release) => release())
     await startPromise
 
@@ -145,7 +173,7 @@ describe('useDocumentImportQueue', () => {
     scope.stop()
   })
 
-  it('重复且 ready 的文档直接复用，不创建新的解析任务', async () => {
+  it('预检未命中但上传端发现重复时直接复用 ready 文档', async () => {
     const readyDocument = createDocument(42, 'ready')
     uploadDocumentMock.mockResolvedValue({ document: readyDocument, duplicate: true })
 
@@ -214,6 +242,84 @@ describe('useDocumentImportQueue', () => {
     expect(queue.items.value[0]).toMatchObject({
       state: 'upload-failed',
       requestId: 'upload-bad-1',
+    })
+    scope.stop()
+  })
+
+  it('预检命中已有文档时跳过正文上传', async () => {
+    const readyDocument = createDocument(80, 'ready')
+    preflightDocumentMock.mockResolvedValue({ exists: true, document: readyDocument })
+
+    const scope = effectScope()
+    const queue = scope.run(() => useDocumentImportQueue())
+    if (!queue) throw new Error('queue composable was not created')
+
+    queue.addFiles([pdf('same-content-new-name.pdf')])
+    await queue.start()
+
+    expect(hashFileMock).toHaveBeenCalledTimes(1)
+    expect(preflightDocumentMock).toHaveBeenCalledWith(
+      { sha256: fileSha256, sizeBytes: 9 },
+      expect.any(AbortSignal),
+    )
+    expect(uploadDocumentMock).not.toHaveBeenCalled()
+    expect(queue.items.value[0]).toMatchObject({
+      state: 'duplicate',
+      duplicate: true,
+      document: readyDocument,
+    })
+    scope.stop()
+  })
+
+  it('预检网络或服务端故障时继续上传并保留降级提示', async () => {
+    preflightDocumentMock.mockRejectedValue(
+      new ApiError('server', '后端服务暂时不可用', {
+        status: 500,
+        requestId: 'preflight-500-1',
+      }),
+    )
+    uploadDocumentMock.mockResolvedValue({
+      document: createDocument(81, 'ready'),
+      duplicate: false,
+    })
+
+    const scope = effectScope()
+    const queue = scope.run(() => useDocumentImportQueue())
+    if (!queue) throw new Error('queue composable was not created')
+
+    queue.addFiles([pdf('new.pdf')])
+    await queue.start()
+
+    expect(uploadDocumentMock).toHaveBeenCalledTimes(1)
+    expect(queue.items.value[0]).toMatchObject({
+      state: 'ready',
+      warningMessage: '预检暂时不可用，已改由上传接口完成最终重复检查。',
+      warningRequestId: 'preflight-500-1',
+    })
+    scope.stop()
+  })
+
+  it('预检确定性拒绝时不绕过预检上传', async () => {
+    preflightDocumentMock.mockRejectedValue(
+      new ApiError('client', 'invalid document preflight', {
+        status: 400,
+        code: 'invalid_document_preflight',
+        requestId: 'preflight-400-1',
+      }),
+    )
+
+    const scope = effectScope()
+    const queue = scope.run(() => useDocumentImportQueue())
+    if (!queue) throw new Error('queue composable was not created')
+
+    queue.addFiles([pdf('invalid.pdf')])
+    await queue.start()
+
+    expect(uploadDocumentMock).not.toHaveBeenCalled()
+    expect(queue.items.value[0]).toMatchObject({
+      state: 'check-failed',
+      errorMessage: '文件摘要或大小未被后端接受，已停止上传。',
+      requestId: 'preflight-400-1',
     })
     scope.stop()
   })

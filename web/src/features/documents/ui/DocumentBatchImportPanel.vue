@@ -37,11 +37,16 @@ const progressPercent = computed(() =>
 
 const stateLabels: Record<DocumentImportState, string> = {
   waiting: '等待导入',
+  hashing: '本地检查中',
+  checking: '正在检查重复',
+  duplicate: '已有内容',
   uploading: '正在上传',
   queueing: '正在排队',
   queued: '等待解析',
   processing: '正在解析',
   ready: '解析完成',
+  'hash-failed': '本地检查失败',
+  'check-failed': '重复预检失败',
   'upload-failed': '上传失败',
   'queue-failed': '排队失败',
   'process-failed': '解析失败',
@@ -96,12 +101,22 @@ function formatFileSize(sizeBytes: number): string {
 }
 
 function isActive(item: DocumentImportItem): boolean {
-  return ['uploading', 'queueing', 'queued', 'processing'].includes(item.state)
+  return ['hashing', 'checking', 'uploading', 'queueing', 'queued', 'processing'].includes(
+    item.state,
+  )
 }
 
 function itemStatusLabel(item: DocumentImportItem): string {
-  if (item.state === 'ready' && item.duplicate) return '已有内容 · 可用'
+  if ((item.state === 'ready' || item.state === 'duplicate') && item.duplicate) {
+    return '已有内容 · 可用'
+  }
   return stateLabels[item.state]
+}
+
+function hashProgressPercent(item: DocumentImportItem): number {
+  const progress = item.hashProgress
+  if (!progress || progress.totalBytes <= 0) return 0
+  return Math.min(100, Math.round((progress.processedBytes / progress.totalBytes) * 100))
 }
 </script>
 
@@ -111,7 +126,7 @@ function itemStatusLabel(item: DocumentImportItem): string {
       <div>
         <p>Import documents</p>
         <h2 id="batch-import-title">批量导入并解析</h2>
-        <span>单批最多 20 份，上传并发为 2；内容重复仍由后端安全判定。</span>
+        <span>单批最多 20 份；先在本地检查内容，后端确认已有时不会重复上传。</span>
       </div>
       <div class="import-actions">
         <label class="file-picker" for="document-files">
@@ -194,6 +209,15 @@ function itemStatusLabel(item: DocumentImportItem): string {
           <div class="file-copy">
             <strong :title="item.file.name">{{ item.file.name }}</strong>
             <span>{{ formatFileSize(item.file.size) }}</span>
+            <span v-if="item.state === 'hashing'"> 本地检查 {{ hashProgressPercent(item) }}% </span>
+            <span
+              v-if="
+                item.duplicate && item.document && item.document.originalName !== item.file.name
+              "
+              :title="item.document.originalName"
+            >
+              已有文件：{{ item.document.originalName }}
+            </span>
             <span v-if="item.document">文档 #{{ item.document.id }}</span>
             <span v-if="item.job">任务 #{{ item.job.id }}</span>
           </div>
@@ -203,6 +227,10 @@ function itemStatusLabel(item: DocumentImportItem): string {
           <div v-if="item.errorMessage" class="item-error" role="status">
             <span>{{ item.errorMessage }}</span>
             <small v-if="item.requestId">请求编号：{{ item.requestId }}</small>
+          </div>
+          <div v-if="item.warningMessage" class="item-warning" role="status">
+            <span>{{ item.warningMessage }}</span>
+            <small v-if="item.warningRequestId">请求编号：{{ item.warningRequestId }}</small>
           </div>
           <div class="item-actions">
             <button
@@ -227,7 +255,7 @@ function itemStatusLabel(item: DocumentImportItem): string {
       </ol>
 
       <p class="stop-help">
-        “停止剩余”会取消尚未完成的浏览器请求；后端已经创建的解析任务仍会继续运行。
+        “停止剩余”会取消本地哈希和尚未完成的浏览器请求；后端已经创建的解析任务仍会继续运行。
       </p>
     </template>
   </section>
@@ -339,6 +367,11 @@ function itemStatusLabel(item: DocumentImportItem): string {
 .selection-message,
 .item-error {
   color: var(--color-danger);
+  font-size: 12px;
+}
+
+.item-warning {
+  color: var(--color-text-muted);
   font-size: 12px;
 }
 
@@ -457,6 +490,8 @@ function itemStatusLabel(item: DocumentImportItem): string {
 }
 
 .import-status--uploading,
+.import-status--hashing,
+.import-status--checking,
 .import-status--queueing,
 .import-status--queued,
 .import-status--processing {
@@ -464,25 +499,30 @@ function itemStatusLabel(item: DocumentImportItem): string {
   color: #4c5e7a;
 }
 
-.import-status--ready {
+.import-status--ready,
+.import-status--duplicate {
   background: var(--color-accent-soft);
   color: var(--color-accent);
 }
 
 .import-status--upload-failed,
+.import-status--hash-failed,
+.import-status--check-failed,
 .import-status--queue-failed,
 .import-status--process-failed {
   background: var(--color-danger-soft);
   color: var(--color-danger);
 }
 
-.item-error {
+.item-error,
+.item-warning {
   display: grid;
   grid-column: 1 / -1;
   gap: 3px;
 }
 
-.item-error small {
+.item-error small,
+.item-warning small {
   color: var(--color-text-subtle);
   font-size: 10px;
 }

@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ResearchDocument } from '../../entities/document/model/document'
 import { ApiError } from '../../shared/api/api-error'
 import { getDocument, uploadDocument } from './api/document-api'
+import { preflightDocument } from './api/document-preflight-api'
 import { getProcessingJob, queueDocumentProcessing } from './api/processing-api'
+import { createFileHashWorkerClient } from './model/file-hash-worker-client'
 import DocumentBatchImportPanel from './ui/DocumentBatchImportPanel.vue'
 
 vi.mock('./api/document-api', () => ({
@@ -11,24 +13,37 @@ vi.mock('./api/document-api', () => ({
   uploadDocument: vi.fn(),
 }))
 
+vi.mock('./api/document-preflight-api', () => ({
+  preflightDocument: vi.fn(),
+}))
+
 vi.mock('./api/processing-api', () => ({
   getProcessingJob: vi.fn(),
   queueDocumentProcessing: vi.fn(),
 }))
 
+vi.mock('./model/file-hash-worker-client', () => ({
+  createFileHashWorkerClient: vi.fn(),
+}))
+
 const getDocumentMock = vi.mocked(getDocument)
 const uploadDocumentMock = vi.mocked(uploadDocument)
+const preflightDocumentMock = vi.mocked(preflightDocument)
 const getProcessingJobMock = vi.mocked(getProcessingJob)
 const queueDocumentProcessingMock = vi.mocked(queueDocumentProcessing)
+const createFileHashWorkerClientMock = vi.mocked(createFileHashWorkerClient)
+const hashFileMock = vi.fn()
+const disposeHashClientMock = vi.fn()
+const fileSha256 = 'a'.repeat(64)
 
-function readyDocument(id: number, name: string): ResearchDocument {
+function readyDocument(id: number, name: string, sizeBytes = 3): ResearchDocument {
   return {
     id,
     title: null,
     originalName: name,
     mimeType: 'application/pdf',
-    sizeBytes: 1024,
-    sha256: id.toString(16).padStart(64, 'a').slice(-64),
+    sizeBytes,
+    sha256: fileSha256,
     status: 'ready',
     errorMessage: null,
     createdAt: new Date('2026-08-18T02:00:00Z'),
@@ -48,8 +63,22 @@ async function selectFiles(wrapper: ReturnType<typeof mount>, files: File[]): Pr
 beforeEach(() => {
   getDocumentMock.mockReset()
   uploadDocumentMock.mockReset()
+  preflightDocumentMock.mockReset()
   getProcessingJobMock.mockReset()
   queueDocumentProcessingMock.mockReset()
+  createFileHashWorkerClientMock.mockReset()
+  hashFileMock.mockReset()
+  disposeHashClientMock.mockReset()
+
+  hashFileMock.mockImplementation(async (file: File, options) => {
+    options.onProgress?.({ processedBytes: file.size, totalBytes: file.size })
+    return fileSha256
+  })
+  createFileHashWorkerClientMock.mockReturnValue({
+    hash: hashFileMock,
+    dispose: disposeHashClientMock,
+  })
+  preflightDocumentMock.mockResolvedValue({ exists: false, document: null })
 })
 
 describe('DocumentBatchImportPanel', () => {
@@ -57,7 +86,7 @@ describe('DocumentBatchImportPanel', () => {
     let nextId = 40
     uploadDocumentMock.mockImplementation(async (file) => {
       nextId += 1
-      return { document: readyDocument(nextId, file.name), duplicate: true }
+      return { document: readyDocument(nextId, file.name, file.size), duplicate: true }
     })
     const wrapper = mount(DocumentBatchImportPanel)
     const files = [
@@ -109,6 +138,26 @@ describe('DocumentBatchImportPanel', () => {
     expect(wrapper.text()).toContain('文件内容不受支持')
     expect(wrapper.text()).toContain('请求编号：batch-upload-1')
     expect(wrapper.text()).toContain('重试失败项')
+    wrapper.unmount()
+  })
+
+  it('预检发现已有内容时展示原文档并跳过上传', async () => {
+    preflightDocumentMock.mockResolvedValue({
+      exists: true,
+      document: readyDocument(90, 'original.pdf'),
+    })
+    const wrapper = mount(DocumentBatchImportPanel)
+
+    await selectFiles(wrapper, [new File(['one'], 'renamed.pdf', { type: 'application/pdf' })])
+    await wrapper.get('.primary-button').trigger('click')
+    await flushPromises()
+
+    expect(preflightDocumentMock).toHaveBeenCalledTimes(1)
+    expect(uploadDocumentMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('已有内容 · 可用')
+    expect(wrapper.text()).toContain('已有文件：original.pdf')
+    expect(wrapper.text()).toContain('文档 #90')
+    expect(wrapper.text()).toContain('查看文档')
     wrapper.unmount()
   })
 })
