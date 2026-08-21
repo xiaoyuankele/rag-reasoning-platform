@@ -191,6 +191,15 @@ func writeAnswerError(c *gin.Context, err error) bool {
 		c.JSON(http.StatusBadRequest, errorResponse{
 			Error: "response_language must be auto, zh, or en",
 		})
+	case errors.Is(err, answerapplication.ErrAnswerCapacityExhausted):
+		// Retry-After 使用秒数，提示客户端短暂退避后再提交，而不是立即重试。
+		c.Header("Retry-After", "2")
+		writeErrorResponse(
+			c,
+			http.StatusServiceUnavailable,
+			errorCodeAnswerCapacityExhausted,
+			"answer service is busy; try again later",
+		)
 
 	case errors.Is(err, embeddingdomain.ErrEmbeddingAuthentication),
 		errors.Is(err, embeddingdomain.ErrEmbeddingRateLimited),

@@ -24,7 +24,9 @@ func TestLoadGenerationUsesSafeDefaults(t *testing.T) {
 		generationConfig.HTTPTimeout != defaultGenerationHTTPTimeout ||
 		generationConfig.MaxOutputTokens != defaultGenerationMaxOutputTokens ||
 		generationConfig.Temperature != defaultGenerationTemperature ||
-		generationConfig.ThinkingEnabled {
+		generationConfig.ThinkingEnabled ||
+		generationConfig.MaxConcurrency != defaultAnswerMaxConcurrency ||
+		generationConfig.QueueWaitTimeout != defaultAnswerQueueWaitTimeout {
 		t.Fatalf("default generation config = %+v", generationConfig)
 	}
 }
@@ -39,6 +41,8 @@ func TestLoadGenerationUsesEnvironment(t *testing.T) {
 	t.Setenv("GENERATION_MAX_OUTPUT_TOKENS", "2048")
 	t.Setenv("GENERATION_TEMPERATURE", "0.25")
 	t.Setenv("GENERATION_THINKING_ENABLED", "true")
+	t.Setenv("ANSWER_MAX_CONCURRENCY", "4")
+	t.Setenv("ANSWER_QUEUE_WAIT_TIMEOUT", "5s")
 
 	generationConfig, err := LoadGeneration()
 	if err != nil {
@@ -51,7 +55,9 @@ func TestLoadGenerationUsesEnvironment(t *testing.T) {
 		generationConfig.HTTPTimeout != 25*time.Second ||
 		generationConfig.MaxOutputTokens != 2048 ||
 		generationConfig.Temperature != 0.25 ||
-		!generationConfig.ThinkingEnabled {
+		!generationConfig.ThinkingEnabled ||
+		generationConfig.MaxConcurrency != 4 ||
+		generationConfig.QueueWaitTimeout != 5*time.Second {
 		t.Fatalf("generation config = %+v, want environment values", generationConfig)
 	}
 }
@@ -79,6 +85,10 @@ func TestLoadGenerationRejectsInvalidValues(t *testing.T) {
 		{name: "output above maximum", environment: "GENERATION_MAX_OUTPUT_TOKENS", value: "8193"},
 		{name: "invalid temperature", environment: "GENERATION_TEMPERATURE", value: "hot"},
 		{name: "invalid thinking enabled", environment: "GENERATION_THINKING_ENABLED", value: "sometimes"},
+		{name: "zero answer concurrency", environment: "ANSWER_MAX_CONCURRENCY", value: "0"},
+		{name: "answer concurrency above maximum", environment: "ANSWER_MAX_CONCURRENCY", value: "17"},
+		{name: "invalid answer wait timeout", environment: "ANSWER_QUEUE_WAIT_TIMEOUT", value: "soon"},
+		{name: "zero answer wait timeout", environment: "ANSWER_QUEUE_WAIT_TIMEOUT", value: "0s"},
 		{name: "negative temperature", environment: "GENERATION_TEMPERATURE", value: "-0.1", wantedError: ErrInvalidGenerationTemperature},
 		{name: "temperature above two", environment: "GENERATION_TEMPERATURE", value: "2.1", wantedError: ErrInvalidGenerationTemperature},
 	}
@@ -111,6 +121,8 @@ func clearGenerationEnvironment(t *testing.T) {
 		"GENERATION_MAX_OUTPUT_TOKENS",
 		"GENERATION_TEMPERATURE",
 		"GENERATION_THINKING_ENABLED",
+		"ANSWER_MAX_CONCURRENCY",
+		"ANSWER_QUEUE_WAIT_TIMEOUT",
 	} {
 		t.Setenv(name, "")
 	}
