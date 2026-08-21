@@ -31,6 +31,15 @@ const readyDocument: ResearchDocument = {
   updatedAt: new Date('2026-08-21T01:00:00Z'),
 }
 
+const uploadedDocument: ResearchDocument = {
+  ...readyDocument,
+  id: 43,
+  title: 'Waiting study',
+  originalName: 'waiting.pdf',
+  sha256: 'b'.repeat(64),
+  status: 'uploaded',
+}
+
 const documentPage: DocumentPage = {
   documents: [readyDocument],
   pagination: { page: 1, pageSize: 100, total: 1, totalPages: 1 },
@@ -74,7 +83,7 @@ describe('EmbeddingWorkspacePanel', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('Maglev study')
-    expect(wrapper.text()).toContain('当前会话尚未跟踪向量任务')
+    expect(wrapper.text()).toContain('向量：当前会话未跟踪')
 
     await wrapper.get('input[type="checkbox"]').setValue(true)
     expect(wrapper.get('.primary-button').text()).toContain('开始向量化（1）')
@@ -106,6 +115,60 @@ describe('EmbeddingWorkspacePanel', () => {
     await wrapper.get('input[type="search"]').setValue('maglev')
     expect(wrapper.text()).toContain('Maglev study')
     expect(queueEmbeddingJobsMock).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('明确区分文本未解析与向量状态，并支持提交全部文档', async () => {
+    listDocumentsMock.mockResolvedValue({
+      documents: [readyDocument, uploadedDocument],
+      pagination: { page: 1, pageSize: 100, total: 2, totalPages: 1 },
+    })
+    queueEmbeddingJobsMock.mockResolvedValue([
+      {
+        documentId: 42,
+        outcome: 'created',
+        job: queuedJob,
+        errorMessage: null,
+        errorCode: null,
+      },
+      {
+        documentId: 43,
+        outcome: 'created',
+        job: { ...queuedJob, id: 143, documentId: 43, status: 'waiting_document' },
+        errorMessage: null,
+        errorCode: null,
+      },
+    ])
+
+    const wrapper = mount(EmbeddingWorkspacePanel, {
+      props: { loadDocumentPage: listDocumentsMock },
+      global: {
+        stubs: { RouterLink: { template: '<a><slot /></a>' } },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('文本已解析')
+    expect(wrapper.text()).toContain('文本未解析')
+    expect(wrapper.get('select').text()).toContain('未解析（1）')
+    expect(wrapper.findAll('select')[1]?.text()).toContain('未跟踪（2）')
+
+    const bulkButton = wrapper.get('.bulk-button')
+    expect(bulkButton.text()).toContain('全部文档向量化（2）')
+    await bulkButton.trigger('click')
+    expect(wrapper.get('[role="alertdialog"]').text()).toContain('其中 1 份尚未完成文本解析')
+    await wrapper.get('[role="alertdialog"] .primary-button').trigger('click')
+    await flushPromises()
+
+    expect(queueEmbeddingJobsMock).toHaveBeenCalledWith([42, 43], expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('全部文档处理完成')
+    expect(wrapper.findAll('select')[1]?.text()).toContain('等待文本（1）')
+    expect(wrapper.findAll('select')[1]?.text()).toContain('排队中（1）')
+
+    await wrapper.findAll('select')[1]?.setValue('waiting_document')
+    expect(wrapper.findAll('.document-row')).toHaveLength(1)
+    expect(wrapper.text()).toContain('Waiting study')
+    expect(wrapper.text()).not.toContain('Maglev study')
     wrapper.unmount()
   })
 })
