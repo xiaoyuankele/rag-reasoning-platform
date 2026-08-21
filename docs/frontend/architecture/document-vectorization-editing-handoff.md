@@ -1,17 +1,20 @@
 # 前端交接：用户可选向量化与文档编辑
 
-> 状态：2026-08-19 部分可实施。后端提交 `c4696bc` 已提供单份/批量向量申请、任务查询和取消；
-> 原文件读取、按 document 恢复任务和 Markdown 保存接口仍未实现。跨端决策以
+> 状态：2026-08-21 基础向量化页面已实现。后端提交 `c4696bc` 已提供单份/批量向量申请、任务查询和取消；
+> 前端已经接入独立向量化页面、逐项状态、集中轮询、取消和当前浏览器会话恢复。原文件读取、按 document 永久恢复任务和
+> Markdown 保存接口仍未实现。跨端决策以
 > [文档向量化、在线编辑、并发与缓存设计复盘](../../shared/architecture/document-vectorization-editing-concurrency-review.md)
 > 为准。
 
 ## 1. 前端目标与非目标
 
-下一阶段在现有上传、解析、chunks 和删除闭环上增加：
+本阶段在现有上传、解析、chunks 和删除闭环上增加：
 
-- 本批次不向量化、选中文档向量化、本批次全部向量化；
-- 文档解析状态和向量状态的独立展示；
-- 刷新后恢复向量任务；
+- [x] 在独立页面选择单篇或多篇文档申请向量化；
+- [x] 文档解析状态和向量状态的独立展示；
+- [x] 当前浏览器会话刷新后按已知 job ID 恢复向量任务；
+- [ ] 批量导入结束后提供“不向量化 / 选中 / 本批次全部”入口；
+- [ ] 后端提供按 document 查询或列表接口后完成跨设备永久恢复；
 - PDF 受保护打开和可选 annotation；
 - Markdown 内容查看、编辑、本地草稿和版本冲突处理。
 
@@ -30,6 +33,9 @@ DocumentBatchImportPanel
   → 单项向量失败不回滚已经成功的上传和解析
 ```
 
+当前实现保持两个 feature 解耦：`features/documents` 不导入向量模块，用户通过 `/embeddings` 独立管理文档选择与任务。
+后续若在批量导入完成后增加快捷入口，由页面层只传递成功 document IDs，不把两套状态机合并。
+
 前端不能把“全部向量化”解释成同时在浏览器直接调用多个模型。它只提交持久任务意图，实际并发由后端 Worker、
 用户配额和全局背压控制。
 
@@ -46,45 +52,41 @@ DocumentBatchImportPanel
 
 文档列表或详情需要同时展示两套状态：
 
-| 解析状态 | 向量状态 | 用户看到的说明 | 可用操作 |
-| --- | --- | --- | --- |
-| uploaded | none | 等待解析，尚未申请向量化 | 开始解析、申请向量化 |
-| processing | waiting_document | 解析中，解析成功后进入向量队列 | 取消向量意图 |
-| ready | none | 文本可浏览，尚未向量化 | 向量化 |
-| ready | queued | 已进入向量队列 | 取消 |
-| ready | processing | 正在向量化 | 查看进度；第一版不可强制取消 |
-| ready | succeeded | 当前版本向量已就绪 | 进入语义检索/问答 |
-| ready | failed | 向量化失败 | 查看安全错误、重试 |
-| failed | waiting_document | 解析失败，向量任务等待前置条件 | 重试解析或取消向量意图 |
-| 任意现存解析状态 | canceled | 用户已经取消当前向量任务 | 需要时重新申请向量化 |
+| 解析状态         | 向量状态         | 用户看到的说明                 | 可用操作                     |
+| ---------------- | ---------------- | ------------------------------ | ---------------------------- |
+| uploaded         | none             | 等待解析，尚未申请向量化       | 开始解析、申请向量化         |
+| processing       | waiting_document | 解析中，解析成功后进入向量队列 | 取消向量意图                 |
+| ready            | none             | 文本可浏览，尚未向量化         | 向量化                       |
+| ready            | queued           | 已进入向量队列                 | 取消                         |
+| ready            | processing       | 正在向量化                     | 查看进度；第一版不可强制取消 |
+| ready            | succeeded        | 当前版本向量已就绪             | 进入语义检索/问答            |
+| ready            | failed           | 向量化失败                     | 查看安全错误、重试           |
+| failed           | waiting_document | 解析失败，向量任务等待前置条件 | 重试解析或取消向量意图       |
+| 任意现存解析状态 | canceled         | 用户已经取消当前向量任务       | 需要时重新申请向量化         |
 
 页面不得仅凭解析 `ready` 开放语义问答；必须由后端提供的当前 revision 向量就绪事实决定。
 
-## 4. 建议前端分层
+## 4. 当前基础向量化分层
 
 ```text
 entities/
-├─ document/                  文档、解析状态、currentRevision
-├─ embedding-job/             向量任务状态与 DTO
-└─ document-revision/         可编辑内容版本
+├─ document/                  文档与解析状态
+└─ embedding-job/             向量任务状态、活动判断与可取消规则
 
-features/documents/
+features/embeddings/
 ├─ api/
-│  ├─ embedding-job-api       单个、批量、取消、恢复
-│  └─ document-content-api    Range/ETag 读取和带版本保存
+│  └─ embedding-api           单个、批量、按 ID 查询与取消；运行时 DTO 校验
 ├─ model/
-│  ├─ use-embedding-job       轮询、终态、卸载清理
-│  ├─ use-batch-vectorization 批量逐项结果和重试
-│  ├─ use-document-content    内容加载和 revision
-│  └─ use-local-draft         IndexedDB 草稿
+│  └─ use-embedding-workspace 文档选择、逐项结果、有界轮询、取消和会话恢复
 └─ ui/
-   ├─ VectorizationControls
-   ├─ PdfViewer
-   └─ MarkdownEditor
+   └─ EmbeddingWorkspacePanel 独立工作区
+
+pages/
+└─ EmbeddingsPage             路由组合层，向 UI 注入 documents 分页函数
 ```
 
-API 层继续把响应先作为 `unknown` 校验，不允许 UI 直接解释 snake_case 或英文错误文本。页面只保存选择 ID，
-任务、内容和草稿编排留在 feature model。
+API 层把响应先作为 `unknown` 校验，不允许 UI 直接解释 snake_case 或英文错误文本。单篇响应校验 document ID，
+批量响应校验每个请求 ID 都有且只有一个结果。页面只保存筛选输入；选择 ID、任务和轮询编排留在 feature model。
 
 ## 5. 批量向量化前端规则
 
@@ -97,6 +99,10 @@ API 层继续把响应先作为 `unknown` 校验，不允许 UI 直接解释 sna
 - `429` 展示用户配额或频率提示并遵守 `Retry-After`；`503` 表示系统暂时饱和；
 - 取消调用 `POST /embedding-jobs/:id/cancel`。成功和重复取消返回 `200`；收到 `409` 时重新查询任务，
   说明 Worker 已经领取或任务已经终结，不在客户端强行改为 canceled。
+- 当前轮询使用一个调度器，单轮最多 4 路查询并发，不为每一行创建独立定时器；页面隐藏时暂停，恢复可见后立即同步。
+- 当前 `sessionStorage` 只保存 document ID 到最近 job ID 的映射。换账户时后端 OwnerScope 会使旧任务返回 404，
+  前端随即清理映射；该存储不承担权限判断或永久任务历史。
+- 后端目前只复用活动任务，无法让前端先发现历史 succeeded 任务；提交确认必须提示可能重新生成向量并消耗远程模型额度。
 
 ## 6. PDF 打开与缓存
 
@@ -173,7 +179,7 @@ draft:{userId}:{documentId}:{baseRevision}
 
 前端开发期间仍需避免猜测以下计划契约：
 
-1. 按 document ID 恢复当前/最近向量任务的接口；
+1. 按 document ID 恢复当前/最近向量任务或分页列出任务的接口；当前页面只能恢复本浏览器会话已知 job ID；
 2. PDF/MD 内容读取的 MIME、Range、ETag 与缓存头；
 3. Markdown revision DTO、保存成功和冲突响应；
 4. 内容变化后 chunks/embeddings 的 stale 表达；
@@ -181,9 +187,11 @@ draft:{userId}:{documentId}:{baseRevision}
 
 ## 10. 前端验收矩阵
 
-- 手动、选中和本批次全部三种向量选择路径；
-- 重复点击、批量重复 ID、单项失败和整批网络失败；
-- waiting → queued → processing → terminal 的刷新恢复；
+- [x] 独立页面手动选择单篇和多篇向量化；
+- [x] 单项失败、整批失败、创建和复用的前端自动化分支；
+- [x] 已知 job ID 的刷新恢复、waiting/queued 集中轮询和取消；
+- [ ] 批量导入后的选中/本批次全部快捷路径；
+- [ ] waiting → queued → processing → terminal 的真实后端与真实模型纵向验收；
 - 取消与 Worker 领取竞态返回后的界面重新同步；
 - 两个用户不能在列表、任务、PDF 内容、IndexedDB 草稿和请求缓存中串数据；
 - PDF 大文件不进入 Pinia/Base64，Range 失败有安全降级；
