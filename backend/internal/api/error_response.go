@@ -19,6 +19,7 @@ const (
 	errorCodeEmbeddingJobProcessing         = "embedding_job_processing"
 	errorCodeEmbeddingJobTerminal           = "embedding_job_terminal"
 	errorCodeInvalidEmbeddingBatch          = "invalid_embedding_batch"
+	errorCodeInvalidEmbeddingJobLookup      = "invalid_embedding_job_lookup"
 	errorCodeInvalidProcessingJobID         = "invalid_processing_job_id"
 	errorCodeProcessingJobNotFound          = "processing_job_not_found"
 	errorCodeInvalidVerificationRequest     = "invalid_verification_request"

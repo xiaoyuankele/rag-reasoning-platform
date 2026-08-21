@@ -280,6 +280,69 @@ func TestEmbeddingOwnerHTTPWithPostgreSQL(t *testing.T) {
 	)
 	assertProcessingOwnerStatus(t, ownerAJob.Code, http.StatusOK, ownerAJob.Body.String())
 
+	// 批量发现接口在一次请求中恢复每份文档的最新任务。Owner B 对相同
+	// document IDs 只会看到 null，不能据此判断 Owner A 的资源是否存在。
+	latestLookupBody := fmt.Sprintf(
+		`{"document_ids":[%d,%d,999999999]}`,
+		readyDocument.ID,
+		uploadedDocument.ID,
+	)
+	ownerALatest := performDocumentOwnerRequest(
+		router,
+		http.MethodPost,
+		"/embedding-jobs/latest",
+		strings.NewReader(latestLookupBody),
+		ownerACookie,
+		"application/json",
+	)
+	assertProcessingOwnerStatus(t, ownerALatest.Code, http.StatusOK, ownerALatest.Body.String())
+	var latestResult struct {
+		Items []struct {
+			DocumentID int64 `json:"document_id"`
+			Job        *struct {
+				ID     int64                     `json:"id"`
+				Status embeddingdomain.JobStatus `json:"status"`
+			} `json:"job"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(ownerALatest.Body.Bytes(), &latestResult); err != nil {
+		t.Fatalf("decode latest embedding jobs: %v", err)
+	}
+	if len(latestResult.Items) != 3 ||
+		latestResult.Items[0].DocumentID != readyDocument.ID ||
+		latestResult.Items[0].Job == nil || latestResult.Items[0].Job.ID != queuedJob.ID ||
+		latestResult.Items[1].DocumentID != uploadedDocument.ID ||
+		latestResult.Items[1].Job == nil || latestResult.Items[1].Job.ID != waitingJob.ID ||
+		latestResult.Items[2].Job != nil {
+		t.Fatalf("unexpected latest embedding response: %+v", latestResult.Items)
+	}
+
+	ownerBLatest := performDocumentOwnerRequest(
+		router,
+		http.MethodPost,
+		"/embedding-jobs/latest",
+		strings.NewReader(latestLookupBody),
+		ownerBCookie,
+		"application/json",
+	)
+	assertProcessingOwnerStatus(t, ownerBLatest.Code, http.StatusOK, ownerBLatest.Body.String())
+	var ownerBLatestResult struct {
+		Items []struct {
+			Job *json.RawMessage `json:"job"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(ownerBLatest.Body.Bytes(), &ownerBLatestResult); err != nil {
+		t.Fatalf("decode owner B latest embedding jobs: %v", err)
+	}
+	if len(ownerBLatestResult.Items) != 3 {
+		t.Fatalf("owner B latest item count = %d, want 3", len(ownerBLatestResult.Items))
+	}
+	for index, item := range ownerBLatestResult.Items {
+		if item.Job != nil {
+			t.Fatalf("owner B latest item %d exposed a job: %s", index, string(*item.Job))
+		}
+	}
+
 	// 其他用户不能取消任务；所有者可以取消 waiting_document，重复取消保持幂等。
 	cancelPath := fmt.Sprintf("/embedding-jobs/%d/cancel", waitingJob.ID)
 	ownerBCancel := performDocumentOwnerRequest(router, http.MethodPost, cancelPath, nil, ownerBCookie, "")
