@@ -52,6 +52,24 @@ class PageText:
 
 
 @dataclass(frozen=True)
+class ExtractedDocument:
+    """格式提取器完成一次源文件读取后返回的统一中间结果。
+
+    Attributes:
+        pages: 按物理页顺序排列的原始页面文字。
+        detected_title: 从源文件元数据中尽力识别的可选标题。
+
+    Notes:
+        本模型只保存 Application 后续真正需要的数据，不保留文件句柄、
+        ``PdfReader`` 或具体解析库对象。因此 Infrastructure 可以在返回前
+        安全关闭源文件，Application 也不会依赖 pypdf。
+    """
+
+    pages: list[PageText]
+    detected_title: str | None = None
+
+
+@dataclass(frozen=True)
 class TextChunk:
     """应用层生成、尚未转换为传输协议的一条统一文本块。
 

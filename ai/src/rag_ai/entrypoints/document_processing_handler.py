@@ -27,7 +27,7 @@ def process_request(
 
     Args:
         request: 已由契约层完成字段、类型和范围校验的 v1 请求。
-        service: 已经注入页面提取器和文本切分器的应用服务。
+        service: 已经注入统一文档提取器和文本切分器的应用服务。
 
     Returns:
         可以直接序列化到标准输出的 v1 成功响应字典。
