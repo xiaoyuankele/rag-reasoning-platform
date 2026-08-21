@@ -16,8 +16,7 @@ from rag_ai.contracts.document_processing_v1 import (
 from rag_ai.domain.errors import DocumentProcessingError
 from rag_ai.entrypoints.document_processing_handler import process_request
 from rag_ai.infrastructure.parsing.pypdf_extractor import (
-    PyPDFPageExtractor,
-    PyPDFTitleExtractor,
+    PyPDFDocumentExtractor,
 )
 from rag_ai.infrastructure.splitting.simple_text_splitter import (
     SimpleTextSplitter,
@@ -56,8 +55,7 @@ def build_service() -> ProcessDocumentService:
     """
 
     return ProcessDocumentService(
-        page_extractor=PyPDFPageExtractor(),
-        title_extractor=PyPDFTitleExtractor(),
+        document_extractor=PyPDFDocumentExtractor(),
         text_splitter=SimpleTextSplitter(),
     )
 

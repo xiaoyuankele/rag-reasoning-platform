@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from rag_ai.application.ports import (
-    DocumentTitleExtractor,
-    PageTextExtractor,
+    DocumentExtractor,
     TextSplitter,
 )
 from rag_ai.domain.errors import DocumentProcessingError
@@ -25,14 +24,12 @@ class ProcessDocumentService:
 
     def __init__(
         self,
-        page_extractor: PageTextExtractor,
-        title_extractor: DocumentTitleExtractor,
+        document_extractor: DocumentExtractor,
         text_splitter: TextSplitter,
     ) -> None:
-        """注入页面、标题提取器和文本分块器，不在应用层创建具体工具。"""
+        """注入统一文档提取器和文本分块器，不创建具体解析工具。"""
 
-        self._page_extractor = page_extractor
-        self._title_extractor = title_extractor
+        self._document_extractor = document_extractor
         self._text_splitter = text_splitter
 
     def process(
@@ -60,22 +57,20 @@ class ProcessDocumentService:
                 f"no Python processor is registered for {source.mime_type!r}",
             )
 
-        extracted_pages = self._page_extractor.extract(
+        extracted_document = self._document_extractor.extract(
             source.source_path,
             max_file_bytes=limits.max_file_bytes,
             max_pages=limits.max_pages,
         )
-        normalized_pages = prepare_pages(extracted_pages)
+        normalized_pages = prepare_pages(extracted_document.pages)
         chunks = build_chunks(
             normalized_pages,
             self._text_splitter,
             max_chunk_characters=limits.max_chunk_characters,
         )
-        detected_title = self._title_extractor.extract_title(source.source_path)
-
         return ProcessingResult(
             chunks=chunks,
-            detected_title=detected_title,
+            detected_title=extracted_document.detected_title,
         )
 
 

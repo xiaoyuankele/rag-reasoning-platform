@@ -1,8 +1,7 @@
-"""使用 pypdf 完成 PDF 安全预检与逐页文字提取。"""
+"""使用一个 pypdf Reader 完成 PDF 安全校验、标题和正文提取。"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 from pypdf import PasswordType, PdfReader
@@ -10,29 +9,15 @@ from pypdf.constants import UserAccessPermissions
 from pypdf.errors import EmptyFileError, LimitReachedError, PdfReadError
 
 from rag_ai.domain.errors import DocumentProcessingError
-from rag_ai.domain.models import PageText
+from rag_ai.domain.models import ExtractedDocument, PageText
 
 
 PDF_HEADER_PREFIX = b"%PDF-"
 MAX_DETECTED_TITLE_CHARACTERS = 500
 
 
-@dataclass(frozen=True)
-class PDFPreflightResult:
-    """PDF 通过预检后交给文字提取阶段使用的安全元数据。
-
-    Attributes:
-        page_count: PDF 的物理页数。
-        encrypted: PDF 是否带有加密标记；能通过预检的加密 PDF 只能
-            使用空密码打开，并且必须允许提取文字。
-    """
-
-    page_count: int
-    encrypted: bool
-
-
-class PyPDFPageExtractor:
-    """通过 pypdf 实现应用层 ``PageTextExtractor`` 端口。"""
+class PyPDFDocumentExtractor:
+    """通过 pypdf 实现应用层统一 DocumentExtractor 端口。"""
 
     def extract(
         self,
@@ -40,8 +25,8 @@ class PyPDFPageExtractor:
         *,
         max_file_bytes: int,
         max_pages: int,
-    ) -> list[PageText]:
-        """安全预检 PDF，逐页提取原始文字并保留物理页码。
+    ) -> ExtractedDocument:
+        """一次打开 PDF，完成安全校验、标题读取和逐页文字提取。
 
         Args:
             source_path: Go 文件存储层解析出的可信 PDF 绝对路径。
@@ -49,7 +34,8 @@ class PyPDFPageExtractor:
             max_pages: 本次任务允许处理的最大物理页数。
 
         Returns:
-            按物理页顺序排列的 ``PageText``；空白页仍以空字符串保留。
+            与 pypdf 解耦的页面文字和可选标题。文件句柄与 PdfReader
+            都会在本方法返回前释放。
 
         Raises:
             ValueError: 资源限制不是正整数。
@@ -57,89 +43,23 @@ class PyPDFPageExtractor:
                 超过资源限制，或者页面文字提取失败。
         """
 
-        return extract_pdf_pages(
+        return extract_pdf_document(
             source_path,
             max_file_bytes=max_file_bytes,
             max_pages=max_pages,
         )
 
 
-class PyPDFTitleExtractor:
-    """从 pypdf 文档元数据中尽力读取可选文献标题。"""
-
-    def extract_title(self, source_path: Path) -> str | None:
-        """返回规范化的 PDF 元数据标题，无法可靠读取时返回 ``None``。
-
-        标题属于可选增强信息，因此元数据缺失或损坏不会让正文处理失败。
-        正文读取、密码和权限错误仍由 ``PyPDFPageExtractor`` 负责报告。
-        """
-
-        try:
-            with source_path.open("rb") as source:
-                reader = PdfReader(source, strict=False)
-                if reader.is_encrypted and reader.decrypt("") == PasswordType.NOT_DECRYPTED:
-                    return None
-
-                metadata = reader.metadata
-                raw_title = metadata.title if metadata is not None else None
-                return normalize_pdf_title(raw_title)
-        except (
-            FileNotFoundError,
-            PermissionError,
-            IsADirectoryError,
-            OSError,
-            EmptyFileError,
-            LimitReachedError,
-            PdfReadError,
-            KeyError,
-            TypeError,
-            ValueError,
-        ):
-            return None
-
-
-def normalize_pdf_title(value: object) -> str | None:
-    """把不可信 PDF 元数据值转换成可落库的可选标题。
-
-    这是本阶段留给学习者实现的边界函数。测试已经定义空值、类型、空白折叠
-    和长度限制，函数完成后不得抛出异常。
-    """
-
-    if not isinstance(value, str):
-        return None
-
-    # split() 不传参数时会折叠空格、换行和制表符等连续空白。
-    normalized = " ".join(value.split())
-
-    if not normalized:
-        return None
-
-    if len(normalized) > MAX_DETECTED_TITLE_CHARACTERS:
-        return None
-
-    return normalized
-
-
-def preflight_pdf(
+def extract_pdf_document(
     source_path: Path,
     *,
     max_file_bytes: int,
     max_pages: int,
-) -> PDFPreflightResult:
-    """在提取正文前检查 PDF 是否安全且适合当前处理策略。
+) -> ExtractedDocument:
+    """使用一个文件句柄和一个 PdfReader 提取完整 PDF 中间结果。
 
-    Args:
-        source_path: Go 文件存储层解析出的可信 PDF 绝对路径。
-        max_file_bytes: 当前任务允许处理的最大 PDF 文件字节数。
-        max_pages: 当前任务允许处理的最大 PDF 页数。
-
-    Returns:
-        包含页数和加密状态的 ``PDFPreflightResult``。
-
-    Raises:
-        ValueError: 文件或页数限制不是正整数。
-        DocumentProcessingError: 文件不存在、不可读、损坏、需要密码、禁止
-            提取，或者超过资源限制。错误消息不会包含绝对路径或正文。
+    安全预检仍然先于正文读取，但不再为了阶段分工重复打开文件。标题属于
+    可选增强信息，损坏或缺失不会让正文处理失败。
     """
 
     _require_positive_limit(max_file_bytes, "max_file_bytes")
@@ -162,8 +82,7 @@ def preflight_pdf(
             source.seek(0)
 
             reader = PdfReader(source, strict=False)
-            encrypted = reader.is_encrypted
-            if encrypted:
+            if reader.is_encrypted:
                 password_type = reader.decrypt("")
                 if password_type == PasswordType.NOT_DECRYPTED:
                     raise DocumentProcessingError(
@@ -174,10 +93,28 @@ def preflight_pdf(
 
             page_count = len(reader.pages)
             _validate_page_count(page_count, max_pages)
+            detected_title = _extract_optional_title(reader)
 
-            return PDFPreflightResult(
-                page_count=page_count,
-                encrypted=encrypted,
+            pages: list[PageText] = []
+            for page_number, page in enumerate(reader.pages, start=1):
+                try:
+                    text = page.extract_text()
+                except (KeyError, TypeError, ValueError, PdfReadError) as error:
+                    raise DocumentProcessingError(
+                        "parse_failed",
+                        f"PDF page {page_number} text extraction failed",
+                    ) from error
+
+                pages.append(
+                    PageText(
+                        page_number=page_number,
+                        text=text or "",
+                    )
+                )
+
+            return ExtractedDocument(
+                pages=pages,
+                detected_title=detected_title,
             )
 
     except DocumentProcessingError:
@@ -214,92 +151,48 @@ def preflight_pdf(
         ) from error
 
 
-def extract_pdf_pages(
-    source_path: Path,
-    *,
-    max_file_bytes: int,
-    max_pages: int,
-) -> list[PageText]:
-    """预检 PDF 后逐页提取原始文字，并保留物理页边界。
+def normalize_pdf_title(value: object) -> str | None:
+    """把不可信 PDF 元数据值转换成可落库的可选标题。
 
     Args:
-        source_path: Go 文件存储层解析出的可信 PDF 绝对路径。
-        max_file_bytes: 当前任务允许处理的最大 PDF 文件字节数。
-        max_pages: 当前任务允许处理的最大 PDF 页数。
+        value: pypdf 元数据中读取出的不可信标题值。
 
     Returns:
-        按物理页顺序排列的 ``PageText``。空白页仍然保留，文字为空字符串。
-
-    Raises:
-        ValueError: 文件或页数限制不是正整数。
-        DocumentProcessingError: 预检失败、文件在处理期间不可读，或者某页
-            文字提取失败。
+        已折叠连续空白且不超过长度上限的标题；无可靠标题时返回 None。
     """
 
-    preflight = preflight_pdf(
-        source_path,
-        max_file_bytes=max_file_bytes,
-        max_pages=max_pages,
-    )
+    if not isinstance(value, str):
+        return None
+
+    normalized = " ".join(value.split())
+
+    if not normalized:
+        return None
+
+    if len(normalized) > MAX_DETECTED_TITLE_CHARACTERS:
+        return None
+
+    return normalized
+
+
+def _extract_optional_title(reader: PdfReader) -> str | None:
+    """从已经完成安全校验的 Reader 中尽力读取可选标题。"""
 
     try:
-        with source_path.open("rb") as source:
-            reader = PdfReader(source, strict=False)
-            if reader.is_encrypted:
-                reader.decrypt("")
-
-            pages: list[PageText] = []
-            for page_number, page in enumerate(reader.pages, start=1):
-                try:
-                    text = page.extract_text()
-                except (KeyError, TypeError, ValueError, PdfReadError) as error:
-                    raise DocumentProcessingError(
-                        "parse_failed",
-                        f"PDF page {page_number} text extraction failed",
-                    ) from error
-
-                pages.append(
-                    PageText(
-                        page_number=page_number,
-                        text=text or "",
-                    )
-                )
-
-            if len(pages) != preflight.page_count:
-                raise DocumentProcessingError(
-                    "parse_failed",
-                    "PDF page count changed during text extraction",
-                )
-
-            return pages
-
-    except DocumentProcessingError:
-        raise
-    except FileNotFoundError as error:
-        raise DocumentProcessingError(
-            "source_not_found",
-            "source document was not found",
-        ) from error
-    except PermissionError as error:
-        raise DocumentProcessingError(
-            "source_access_denied",
-            "source document cannot be read",
-        ) from error
-    except LimitReachedError as error:
-        raise DocumentProcessingError(
-            "resource_limit_exceeded",
-            "PDF parser reached a safety limit",
-        ) from error
-    except (EmptyFileError, PdfReadError, ValueError) as error:
-        raise DocumentProcessingError(
-            "parse_failed",
-            "PDF text extraction failed",
-        ) from error
-    except OSError as error:
-        raise DocumentProcessingError(
-            "source_access_denied",
-            "source document cannot be read",
-        ) from error
+        metadata = reader.metadata
+        raw_title = metadata.title if metadata is not None else None
+        return normalize_pdf_title(raw_title)
+    except (
+        LimitReachedError,
+        PdfReadError,
+        AttributeError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+    ):
+        # 标题是可选增强字段，元数据损坏不能让正文处理失败。
+        return None
 
 
 def _require_positive_limit(value: int, name: str) -> None:
@@ -326,14 +219,7 @@ def _validate_page_count(page_count: int, max_pages: int) -> None:
 
 
 def _require_text_extraction_permission(reader: PdfReader) -> None:
-    """确认已打开的加密 PDF 明确允许提取文字。
-
-    Args:
-        reader: 已使用空密码成功解密的 pypdf ``PdfReader``。
-
-    Raises:
-        DocumentProcessingError: PDF 权限无效或禁止提取文字。
-    """
+    """确认已打开的加密 PDF 明确允许提取文字。"""
 
     permissions = reader.user_access_permissions
     permissions_are_valid = reader.are_permissions_valid

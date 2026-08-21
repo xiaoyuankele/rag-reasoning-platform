@@ -1,7 +1,7 @@
 # PDF 文献处理架构与分阶段路线
 
-> 状态：PDF-1、PDF-2、PDF-3 已完成；下一阶段是 PDF-4 学术文献质量改进。
-> 最近更新：2026-08-19。
+> 状态：PDF-1、PDF-2、PDF-3 已完成；单次打开提取重构已完成，下一阶段是 PDF-4 学术文献质量改进。
+> 最近更新：2026-08-21。
 
 ## 1. 目标
 
@@ -44,12 +44,14 @@ Worker
 
 ```text
 可信 PDF 绝对路径
-  -> PDF 预检
+  -> 统一 PDF 提取会话（文件只打开一次）
+     -> PDF 预检
      -> 文件可读性
      -> 加密与密码状态
      -> 文字提取权限
      -> 页数和资源限制
-  -> 逐页提取
+     -> 可选元数据标题
+     -> 逐页提取
   -> 扫描件判断
   -> 文本规范化
   -> 带页码分块
@@ -137,7 +139,7 @@ ai/src/rag_ai/
 │  ├─ document_processing_cli.py   # stdin/stdout 进程入口与组合根
 │  └─ document_processing_handler.py # 契约 DTO 与领域对象转换
 └─ infrastructure/
-   ├─ parsing/pypdf_extractor.py   # pypdf 页面提取适配器
+   ├─ parsing/pypdf_extractor.py   # 单次打开的 pypdf 文档提取适配器
    └─ splitting/simple_text_splitter.py # 轻量文本分块适配器
 ```
 
@@ -147,8 +149,10 @@ ai/src/rag_ai/
 - `entrypoints/document_processing_cli.py`：只负责 stdin、stdout、依赖组装和最终异常边界；
 - `entrypoints/document_processing_handler.py`：负责契约 DTO 与领域对象的双向转换；
 - `application/document_processor.py`：编排提取、规范化和分块，不认识 JSON 或 pypdf；
-- `application/ports.py`：定义入站用例与出站提取、切分端口；
+- `application/ports.py`：定义入站用例与统一文档提取、切分端口；
 - `infrastructure/`：实现 pypdf 和具体文本切分能力。
+
+原先页面正文和可选标题分别使用两个端口，基础设施还会为了预检再次打开 PDF，导致同一文件在一次任务中打开三次。现在 Application 只依赖一个 `DocumentExtractor`，Infrastructure 在同一个文件句柄和 `PdfReader` 生命周期内完成安全校验、标题读取与逐页正文提取，再返回不含 pypdf 对象的 `ExtractedDocument`。这既没有让 Application 依赖具体解析库，也避免了三个独立 Reader 看到不同文件状态的时间窗口。
 
 依赖方向保持为 `entrypoints -> application -> domain`，基础设施通过 application 定义的
 Protocol 插入用例。未来加入 OCR、DOCX 或 LangChain 时优先增加适配器，不让框架对象渗透
@@ -183,6 +187,8 @@ Protocol 插入用例。未来加入 OCR、DOCX 或 LangChain 时优先增加适
 - Worker 并发数：默认 1，可通过 `DOCUMENT_WORKER_CONCURRENCY` 配置为 1～4；并发 2 已完成基础验收；
 - Python 执行模式：默认 `oneshot`；可选固定大小 `pool`，默认 2 个槽位、每个进程处理 20 份文档后回收；
 - 逐页提取和分块，不在 Python 中长期保留所有页面布局对象。
+
+统一提取中的 `PdfReader`、文件句柄和解析库内部对象只在一次 `with` 作用域内存活，返回前会释放。`ExtractedDocument` 暂时保存页面字符串供 Application 规范化和分块，这是单任务内的中间结果，不是跨任务缓存，也不会落入 Redis 或 PostgreSQL。后续若指标证明大文档的峰值内存有问题，再讨论流式页面处理；当前不为尚未出现的内存瓶颈增加复杂协议。
 
 这些值应进入配置并经过测试，而不是散落在解析函数中。完成真实样本测量后再调整。
 
@@ -261,6 +267,8 @@ pypdf 官方说明某些大型解压内容流可能消耗远高于文件体积�
 - 已用真实英文文献完成 HTTP 上传、排队、异步处理、126 个文本块入库与 `ready` 状态验收；
 - 已用真实中文文献完成同一纵向链路，14 页生成 42 个文本块，页码范围与文件哈希均通过核对；
 - Windows 非 UTF-8 默认代码页问题已经通过 Python CLI 强制 UTF-8 边界和回归测试解决；
+- 已将预检、可选标题和正文提取合并到单一 `DocumentExtractor`，自动化测试确认每份 PDF 只打开一次；
+- 2026-08-21 使用固定 8 篇、51.28 MiB、515 页样本复测，统一提取与分块共耗时 71.78 秒。此前三次打开版本的一次基线为 92.43 秒，但两轮不是同一时刻的严格 A/B，不能把全部差值归因于重构；可以确认正文 `extract_text()` 仍占绝对主要耗时；
 - 已确认连字、重复页眉页脚、断词、双栏及表格阅读顺序属于 PDF-4 质量改进，不阻塞 PDF-3 验收。
 
 ### PDF-4：学术文献质量改进
