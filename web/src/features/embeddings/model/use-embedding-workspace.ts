@@ -293,66 +293,76 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
     selectedDocumentIds.value = next
   }
 
-  /** 单篇走幂等接口，多篇走逐项返回的批量接口。 */
-  async function queueSelected(): Promise<void> {
-    const documentIds = [...selectedDocumentIds.value]
-    if (documentIds.length === 0 || isSubmitting.value) {
-      if (documentIds.length === 0) {
-        workspaceMessage.value = { kind: 'error', message: '请先选择需要向量化的文档。' }
-      }
-      return
-    }
+  /**
+   * 单篇走幂等接口，多篇按后端上限顺序拆批。
+   * 顺序拆批可以避免一次制造过多请求，同时允许“全部文档”超过单批 100 份。
+   */
+  async function queueDocuments(documentIds: number[], submissionLabel: string): Promise<void> {
+    const uniqueDocumentIds = [...new Set(documentIds)]
+    if (uniqueDocumentIds.length === 0 || isSubmitting.value) return
 
     const controller = createController()
     workspaceMessage.value = null
-    for (const documentId of documentIds) {
+    for (const documentId of uniqueDocumentIds) {
       setAction(documentId, 'submitting')
       setFeedback(documentId, null)
     }
 
+    const successfulIds: number[] = []
+    let created = 0
+    let alreadyActive = 0
+    let failed = 0
+    let completed = 0
+
     try {
-      if (documentIds.length === 1) {
-        const documentId = documentIds[0]
+      if (uniqueDocumentIds.length === 1) {
+        const documentId = uniqueDocumentIds[0]
         const result = await queueEmbeddingJob(documentId, controller.signal)
         if (controller.signal.aborted || disposed) return
         rememberJob(result.job)
+        successfulIds.push(documentId)
+        created += result.created ? 1 : 0
+        alreadyActive += result.created ? 0 : 1
+        completed = 1
         setFeedback(documentId, {
           kind: 'success',
           message: result.created ? '向量任务已创建。' : '已有活动任务，已恢复跟踪。',
         })
-        clearSuccessfulSelections([documentId])
-        workspaceMessage.value = { kind: 'success', message: '已提交 1 份文档。' }
       } else {
-        const results = await queueEmbeddingJobs(documentIds, controller.signal)
-        if (controller.signal.aborted || disposed) return
-        const successfulIds: number[] = []
-        let created = 0
-        let alreadyActive = 0
+        for (let index = 0; index < uniqueDocumentIds.length; index += maximumBatchSize) {
+          const batchIds = uniqueDocumentIds.slice(index, index + maximumBatchSize)
+          const results = await queueEmbeddingJobs(batchIds, controller.signal)
+          if (controller.signal.aborted || disposed) return
 
-        for (const item of results) {
-          if (item.job) {
-            rememberJob(item.job)
-            successfulIds.push(item.documentId)
-            if (item.outcome === 'created') created += 1
-            if (item.outcome === 'already_active') alreadyActive += 1
-            setFeedback(item.documentId, {
-              kind: 'success',
-              message:
-                item.outcome === 'created' ? '向量任务已创建。' : '已有活动任务，已恢复跟踪。',
-            })
-          } else {
-            setFeedback(item.documentId, {
-              kind: 'error',
-              message: item.errorMessage ?? '该文档未能创建向量任务。',
-            })
+          for (const item of results) {
+            if (item.job) {
+              rememberJob(item.job)
+              successfulIds.push(item.documentId)
+              if (item.outcome === 'created') created += 1
+              if (item.outcome === 'already_active') alreadyActive += 1
+              setFeedback(item.documentId, {
+                kind: 'success',
+                message:
+                  item.outcome === 'created' ? '向量任务已创建。' : '已有活动任务，已恢复跟踪。',
+              })
+            } else {
+              failed += 1
+              setFeedback(item.documentId, {
+                kind: 'error',
+                message: item.errorMessage ?? '该文档未能创建向量任务。',
+              })
+            }
           }
-        }
 
-        clearSuccessfulSelections(successfulIds)
-        workspaceMessage.value = {
-          kind: results.length === successfulIds.length ? 'success' : 'error',
-          message: `批量处理完成：新建 ${created}，复用 ${alreadyActive}，失败 ${results.length - successfulIds.length}。`,
+          completed += results.length
+          clearSuccessfulSelections(successfulIds)
         }
+      }
+
+      clearSuccessfulSelections(successfulIds)
+      workspaceMessage.value = {
+        kind: failed === 0 ? 'success' : 'error',
+        message: `${submissionLabel}处理完成：新建 ${created}，复用 ${alreadyActive}，失败 ${failed}。`,
       }
       schedulePoll()
     } catch (error) {
@@ -360,13 +370,34 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
       const apiError = toApiError(error)
       workspaceMessage.value = {
         kind: 'error',
-        message: apiError.message,
+        message:
+          completed > 0
+            ? `已处理 ${completed}/${uniqueDocumentIds.length} 份文档，后续批次提交失败：${apiError.message}`
+            : apiError.message,
         requestId: apiError.requestId,
       }
+      if (successfulIds.length > 0) schedulePoll()
     } finally {
-      for (const documentId of documentIds) setAction(documentId, null)
+      for (const documentId of uniqueDocumentIds) setAction(documentId, null)
       releaseController(controller)
     }
+  }
+
+  async function queueSelected(): Promise<void> {
+    const documentIds = [...selectedDocumentIds.value]
+    if (documentIds.length === 0) {
+      workspaceMessage.value = { kind: 'error', message: '请先选择需要向量化的文档。' }
+      return
+    }
+    await queueDocuments(documentIds, documentIds.length === 1 ? '' : '批量')
+  }
+
+  async function queueAll(documentIds: number[]): Promise<void> {
+    if (documentIds.length === 0) {
+      workspaceMessage.value = { kind: 'error', message: '当前没有可提交的文档。' }
+      return
+    }
+    await queueDocuments(documentIds, '全部文档')
   }
 
   /** 请求取消后使用服务端返回的新状态覆盖本地状态。 */
@@ -496,6 +527,7 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
     isSubmitting,
     jobsByDocumentId,
     load,
+    queueAll,
     queueSelected,
     requestId,
     selectDocuments,

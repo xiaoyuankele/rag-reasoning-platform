@@ -163,6 +163,39 @@ describe('useEmbeddingWorkspace', () => {
     scope.stop()
   })
 
+  it('全部文档向量化按每批 100 份顺序拆分请求', async () => {
+    const storage = createMemoryStorage()
+    const documentIds = Array.from({ length: 201 }, (_, index) => index + 1)
+    listDocumentsMock.mockResolvedValue(createPage(documentIds.map((id) => createDocument(id))))
+    queueEmbeddingJobsMock.mockImplementation(async (batchIds) =>
+      batchIds.map((documentId) => ({
+        documentId,
+        outcome: 'created' as const,
+        job: createJob(documentId),
+        errorMessage: null,
+        errorCode: null,
+      })),
+    )
+
+    const scope = effectScope()
+    const workspace = scope.run(() =>
+      useEmbeddingWorkspace({ loadDocumentPage: listDocumentsMock, storage }),
+    )
+    if (!workspace) throw new Error('embedding workspace was not created')
+
+    await workspace.initialize()
+    await workspace.queueAll(documentIds)
+
+    expect(queueEmbeddingJobsMock).toHaveBeenCalledTimes(3)
+    expect(queueEmbeddingJobsMock.mock.calls[0]?.[0]).toEqual(documentIds.slice(0, 100))
+    expect(queueEmbeddingJobsMock.mock.calls[1]?.[0]).toEqual(documentIds.slice(100, 200))
+    expect(queueEmbeddingJobsMock.mock.calls[2]?.[0]).toEqual(documentIds.slice(200))
+    expect(workspace.workspaceMessage.value?.message).toContain(
+      '全部文档处理完成：新建 201，复用 0，失败 0',
+    )
+    scope.stop()
+  })
+
   it('刷新时恢复已知任务并允许取消排队任务', async () => {
     const storage = createMemoryStorage({ [storedJobsKey]: JSON.stringify({ 42: 142 }) })
     const queuedJob = createJob(42)
