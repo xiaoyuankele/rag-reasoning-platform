@@ -104,7 +104,7 @@ services:
       - ${STORAGE_HOST_PATH:-./storage}:/app/storage
 
     mem_limit: 768m
-    cpus: 1.5
+    cpus: ${BACKEND_CPUS:-2.0}
 
   postgres:
     # 保持 PostgreSQL 主版本 15，并固定 pgvector 扩展版本，避免 latest 漂移。
