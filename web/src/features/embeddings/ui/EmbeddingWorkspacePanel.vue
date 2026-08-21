@@ -4,6 +4,7 @@ import {
   canCancelEmbeddingJob,
   embeddingJobStatusLabels,
   type EmbeddingJob,
+  type EmbeddingJobStatus,
 } from '../../../entities/embedding-job/model/embedding-job'
 import type { DocumentStatus, ResearchDocument } from '../../../entities/document/model/document'
 import { maximumBatchSize, useEmbeddingWorkspace } from '../model/use-embedding-workspace'
@@ -14,8 +15,9 @@ const props = defineProps<{
 }>()
 
 const searchQuery = ref('')
-const statusFilter = ref<DocumentStatus | 'all'>('all')
-const isConfirmingSubmission = ref(false)
+const documentStatusFilter = ref<DocumentStatus | 'all'>('all')
+const embeddingStatusFilter = ref<EmbeddingJobStatus | 'untracked' | 'all'>('all')
+const pendingSubmission = ref<{ mode: 'selected' | 'all'; documentIds: number[] } | null>(null)
 
 const {
   actionsByDocumentId,
@@ -28,6 +30,7 @@ const {
   isSubmitting,
   jobsByDocumentId,
   load,
+  queueAll,
   queueSelected,
   requestId,
   selectDocuments,
@@ -39,16 +42,60 @@ const {
 } = useEmbeddingWorkspace({ loadDocumentPage: props.loadDocumentPage })
 
 const documentStatusLabels: Record<DocumentStatus, string> = {
-  uploaded: '等待解析',
-  processing: '解析中',
-  ready: '已解析',
-  failed: '解析失败',
+  uploaded: '文本未解析',
+  processing: '文本解析中',
+  ready: '文本已解析',
+  failed: '文本解析失败',
 }
+
+const documentStatusCounts = computed(() => {
+  const counts: Record<DocumentStatus, number> = {
+    uploaded: 0,
+    processing: 0,
+    ready: 0,
+    failed: 0,
+  }
+  for (const document of documents.value) counts[document.status] += 1
+  return counts
+})
+
+type EmbeddingDisplayStatus = EmbeddingJobStatus | 'untracked'
+
+const embeddingDisplayStatusLabels: Record<EmbeddingDisplayStatus, string> = {
+  untracked: '当前会话未跟踪',
+  ...embeddingJobStatusLabels,
+}
+
+function embeddingDisplayStatus(documentId: number): EmbeddingDisplayStatus {
+  return jobsByDocumentId.value.get(documentId)?.status ?? 'untracked'
+}
+
+const embeddingStatusCounts = computed(() => {
+  const counts: Record<EmbeddingDisplayStatus, number> = {
+    untracked: 0,
+    waiting_document: 0,
+    queued: 0,
+    processing: 0,
+    succeeded: 0,
+    failed: 0,
+    canceled: 0,
+  }
+  for (const document of documents.value) counts[embeddingDisplayStatus(document.id)] += 1
+  return counts
+})
 
 const filteredDocuments = computed(() => {
   const normalizedQuery = searchQuery.value.trim().toLocaleLowerCase()
   return documents.value.filter((document) => {
-    if (statusFilter.value !== 'all' && document.status !== statusFilter.value) return false
+    if (documentStatusFilter.value !== 'all' && document.status !== documentStatusFilter.value) {
+      return false
+    }
+    if (
+      embeddingStatusFilter.value !== 'all' &&
+      embeddingDisplayStatus(document.id) !== embeddingStatusFilter.value
+    ) {
+      return false
+    }
     if (!normalizedQuery) return true
     return `${document.title ?? ''} ${document.originalName} ${document.id}`
       .toLocaleLowerCase()
@@ -59,6 +106,7 @@ const filteredDocuments = computed(() => {
 const selectableFilteredDocuments = computed(() =>
   filteredDocuments.value.filter(canSelectForQueue),
 )
+const queueableDocuments = computed(() => documents.value.filter(canSelectForQueue))
 const allFilteredSelected = computed(
   () =>
     selectableFilteredDocuments.value.length > 0 &&
@@ -76,14 +124,6 @@ function canSelectForQueue(document: ResearchDocument): boolean {
   return !job || job.status === 'failed' || job.status === 'canceled'
 }
 
-function selectionHint(document: ResearchDocument): string {
-  const job = jobsByDocumentId.value.get(document.id)
-  if (!job) return '当前会话尚未跟踪向量任务'
-  if (job.status === 'succeeded') return '已在当前会话完成向量化'
-  if (job.status === 'failed' || job.status === 'canceled') return '可以重新申请向量化'
-  return '已有活动任务，正在自动跟踪'
-}
-
 function toggleFilteredSelection(): void {
   if (allFilteredSelected.value) {
     for (const document of selectableFilteredDocuments.value) toggleDocument(document.id, false)
@@ -92,15 +132,34 @@ function toggleFilteredSelection(): void {
   selectDocuments(selectableFilteredDocuments.value.map((document) => document.id))
 }
 
-function requestQueueSubmission(): void {
-  if (selectedCount.value > 0 && !isSubmitting.value) isConfirmingSubmission.value = true
+function requestQueueSubmission(mode: 'selected' | 'all'): void {
+  if (isSubmitting.value) return
+  const documentIds =
+    mode === 'all'
+      ? queueableDocuments.value.map((document) => document.id)
+      : [...selectedDocumentIds.value]
+  if (documentIds.length > 0) pendingSubmission.value = { mode, documentIds }
 }
 
 function confirmQueueSubmission(): void {
-  isConfirmingSubmission.value = false
-  if (selectedCount.value === 0) return
+  const submission = pendingSubmission.value
+  pendingSubmission.value = null
+  if (!submission) return
+  if (submission.mode === 'all') {
+    void queueAll(submission.documentIds)
+    return
+  }
   void queueSelected()
 }
+
+const pendingDocumentCount = computed(() => pendingSubmission.value?.documentIds.length ?? 0)
+const pendingBatchCount = computed(() => Math.ceil(pendingDocumentCount.value / maximumBatchSize))
+const pendingNonReadyCount = computed(() => {
+  const pendingIds = new Set(pendingSubmission.value?.documentIds ?? [])
+  return documents.value.filter(
+    (document) => pendingIds.has(document.id) && document.status !== 'ready',
+  ).length
+})
 
 function formatDate(value: Date): string {
   return new Intl.DateTimeFormat('zh-CN', {
@@ -127,12 +186,12 @@ onMounted(() => void initialize())
         <p class="section-kicker">Vector preparation</p>
         <h2 id="embedding-workspace-title">选择需要进入语义检索的文档</h2>
         <p>
-          向量化会把解析后的文本块转换成可比较的数值表示。任务由后端异步执行，关闭本页不会中断任务。
+          “文本解析”与“向量化”是两个阶段：先提取文本块，再把文本块转换成可比较的数值表示。任务由后端异步执行，关闭本页不会中断任务。
         </p>
       </div>
       <dl>
         <div>
-          <dt>单次上限</dt>
+          <dt>每批上限</dt>
           <dd>{{ maximumBatchSize }} 份</dd>
         </div>
         <div>
@@ -162,13 +221,28 @@ onMounted(() => void initialize())
         <input v-model="searchQuery" type="search" placeholder="输入标题、文件名或文档 ID" />
       </label>
       <label class="status-field">
-        <span>解析状态</span>
-        <select v-model="statusFilter">
-          <option value="all">全部状态</option>
-          <option value="ready">已解析</option>
-          <option value="processing">解析中</option>
-          <option value="uploaded">等待解析</option>
-          <option value="failed">解析失败</option>
+        <span>文本解析状态</span>
+        <select v-model="documentStatusFilter">
+          <option value="all">全部状态（{{ documents.length }}）</option>
+          <option value="uploaded">未解析（{{ documentStatusCounts.uploaded }}）</option>
+          <option value="processing">解析中（{{ documentStatusCounts.processing }}）</option>
+          <option value="ready">已解析（{{ documentStatusCounts.ready }}）</option>
+          <option value="failed">解析失败（{{ documentStatusCounts.failed }}）</option>
+        </select>
+      </label>
+      <label class="status-field">
+        <span>向量任务状态（当前会话）</span>
+        <select v-model="embeddingStatusFilter">
+          <option value="all">全部状态（{{ documents.length }}）</option>
+          <option value="untracked">未跟踪（{{ embeddingStatusCounts.untracked }}）</option>
+          <option value="waiting_document">
+            等待文本（{{ embeddingStatusCounts.waiting_document }}）
+          </option>
+          <option value="queued">排队中（{{ embeddingStatusCounts.queued }}）</option>
+          <option value="processing">向量化中（{{ embeddingStatusCounts.processing }}）</option>
+          <option value="succeeded">已完成（{{ embeddingStatusCounts.succeeded }}）</option>
+          <option value="failed">失败（{{ embeddingStatusCounts.failed }}）</option>
+          <option value="canceled">已取消（{{ embeddingStatusCounts.canceled }}）</option>
         </select>
       </label>
       <div class="toolbar-actions">
@@ -184,10 +258,18 @@ onMounted(() => void initialize())
           清空选择
         </button>
         <button
+          class="bulk-button"
+          type="button"
+          :disabled="queueableDocuments.length === 0 || isSubmitting"
+          @click="requestQueueSubmission('all')"
+        >
+          全部文档向量化（{{ queueableDocuments.length }}）
+        </button>
+        <button
           class="primary-button"
           type="button"
           :disabled="selectedCount === 0 || isSubmitting"
-          @click="requestQueueSubmission"
+          @click="requestQueueSubmission('selected')"
         >
           {{ isSubmitting ? '正在提交…' : `开始向量化（${selectedCount}）` }}
         </button>
@@ -195,21 +277,28 @@ onMounted(() => void initialize())
     </div>
 
     <div
-      v-if="isConfirmingSubmission"
+      v-if="pendingSubmission"
       class="confirmation-card"
       role="alertdialog"
       aria-labelledby="embedding-confirmation-title"
       aria-describedby="embedding-confirmation-description"
     >
       <div>
-        <strong id="embedding-confirmation-title">确认提交 {{ selectedCount }} 份文档？</strong>
+        <strong id="embedding-confirmation-title">
+          确认提交{{ pendingSubmission.mode === 'all' ? '全部可操作的' : '' }}
+          {{ pendingDocumentCount }} 份文档？
+        </strong>
         <p id="embedding-confirmation-description">
+          前端将按每批最多 {{ maximumBatchSize }} 份顺序提交，共 {{ pendingBatchCount }} 批。
+          <template v-if="pendingNonReadyCount > 0">
+            其中 {{ pendingNonReadyCount }} 份尚未完成文本解析，将由后端保存为等待文档的向量任务。
+          </template>
           向量任务可能调用远程模型并消耗额度。后端尚不能按文档返回历史成功任务；当前会话未跟踪的文档如果过去已经完成向量化，
           本次可能重新生成。
         </p>
       </div>
       <div class="confirmation-actions">
-        <button class="secondary-button" type="button" @click="isConfirmingSubmission = false">
+        <button class="secondary-button" type="button" @click="pendingSubmission = null">
           返回检查
         </button>
         <button class="primary-button" type="button" @click="confirmQueueSubmission">
@@ -246,7 +335,7 @@ onMounted(() => void initialize())
     <div v-else-if="filteredDocuments.length === 0" class="state-card state-card--quiet">
       <div>
         <strong>没有符合筛选条件的文档</strong>
-        <p>可以修改关键词或解析状态筛选。</p>
+        <p>可以修改关键词、文本解析状态或向量任务状态筛选。</p>
       </div>
     </div>
 
@@ -272,14 +361,21 @@ onMounted(() => void initialize())
               <h3>{{ displayTitle(document) }}</h3>
               <p v-if="document.title">{{ document.originalName }}</p>
             </div>
-            <span class="document-status" :class="`document-status--${document.status}`">
-              {{ documentStatusLabels[document.status] }}
-            </span>
+            <div class="status-group">
+              <span class="document-status" :class="`document-status--${document.status}`">
+                {{ documentStatusLabels[document.status] }}
+              </span>
+              <span
+                class="vector-status"
+                :class="`vector-status--${embeddingDisplayStatus(document.id)}`"
+              >
+                向量：{{ embeddingDisplayStatusLabels[embeddingDisplayStatus(document.id)] }}
+              </span>
+            </div>
           </div>
           <div class="document-meta">
             <span>#{{ document.id }}</span>
             <span>更新于 {{ formatDate(document.updatedAt) }}</span>
-            <span>{{ selectionHint(document) }}</span>
           </div>
 
           <div v-if="jobsByDocumentId.get(document.id)" class="job-card">
@@ -447,7 +543,7 @@ onMounted(() => void initialize())
 
 .workspace-toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(130px, 160px);
+  grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(150px, 180px));
   align-items: end;
   gap: 12px;
   padding: 16px;
@@ -491,6 +587,7 @@ onMounted(() => void initialize())
 }
 
 .primary-button,
+.bulk-button,
 .secondary-button,
 .secondary-link {
   display: inline-flex;
@@ -511,6 +608,12 @@ onMounted(() => void initialize())
   color: #fff;
 }
 
+.bulk-button {
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+
 .secondary-button,
 .secondary-link {
   border: 1px solid var(--color-border-strong);
@@ -519,6 +622,7 @@ onMounted(() => void initialize())
 }
 
 .primary-button:disabled,
+.bulk-button:disabled,
 .secondary-button:disabled,
 .text-button:disabled {
   cursor: not-allowed;
@@ -639,6 +743,7 @@ onMounted(() => void initialize())
 }
 
 .document-status,
+.vector-status,
 .job-status {
   display: inline-flex;
   width: fit-content;
@@ -652,22 +757,35 @@ onMounted(() => void initialize())
 }
 
 .document-status--ready,
+.vector-status--succeeded,
 .job-status--succeeded {
   background: var(--color-accent-soft);
   color: var(--color-accent);
 }
 
 .document-status--failed,
+.vector-status--failed,
 .job-status--failed {
   background: var(--color-danger-soft);
   color: var(--color-danger);
 }
 
+.vector-status--processing,
+.vector-status--queued,
+.vector-status--waiting_document,
 .job-status--processing,
 .job-status--queued,
 .job-status--waiting_document {
   background: #eef1f7;
   color: #4c5e7a;
+}
+
+.status-group {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .document-meta {
