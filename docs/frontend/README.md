@@ -7,10 +7,13 @@
 > 上传前重复预检正式契约已经接入：浏览器在单路 Web Worker 中分块计算 SHA-256，命中当前用户已有文档时跳过正文上传；
 > 网络、超时和 5xx 按契约降级到原上传接口，后端哈希与数据库唯一约束继续承担最终一致性。
 > 独立的文档向量化页面已经接入单篇/批量申请、活动任务查询与等待/排队取消；向量模块使用自己的领域模型、API、
-> composable 和 UI，不侵入文档库页面。当前浏览器会话可按任务 ID 恢复最近状态；跨设备和清理会话后的历史任务发现
-> 仍等待后端提供按文档查询或任务列表接口。
+> composable 和 UI，不侵入文档库页面。页面初始化会按每批最多 100 个文档调用 `POST /embedding-jobs/latest` 发现最近任务，
+> 再只对 waiting_document/queued/processing 任务继续轮询；刷新和换设备后的历史任务发现已完成，但最近 succeeded 尚不能
+> 证明它匹配当前 document revision。
 > F2-C 第一阶段“单篇 / 全部文档”共享检索范围选择器已经接入，F3 关键词检索不再要求手填文档 ID，
-> 并已完成真实后端结果联调、零命中辨识和文本块关键词安全高亮；
+> 并已完成真实后端结果联调、零命中辨识、文本块关键词安全高亮，以及 2～8 个关键词的 all/any + within=chunk 检索；
+> F4 带来源问答基础页已经按正式 `/answers` 契约接入全部/单篇范围、语言、top_k、来源、Token、重试和安全错误状态。
+> 当前 `ANSWER_ENABLED=false`，真实 Generation 与费用链路等待用户显式启用。
 > P6 前端第一批认证基础、公共页面和受保护应用外壳已经实现，并通过真实 Go 后端、PostgreSQL、Mailpit、
 > Vite `/api` 代理和浏览器表单纵向联调。
 > Vue 3 + TypeScript + Vite、
@@ -42,7 +45,9 @@
 15. [F3 检索对 Chunk 质量的依赖](architecture/f3-chunk-quality-dependency.md)；
 16. [F3 文档解析器替换与并行评估](architecture/f3-document-parser-package-evaluation.md)；
 17. [用户可选向量化与文档编辑前端交接](architecture/document-vectorization-editing-handoff.md)（基础向量化页面已实现）；
-18. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
+18. [F4 带来源问答基础页面](architecture/f4-grounded-answer-handoff.md)；
+19. [100 人在线并发前端交接](architecture/100-user-concurrency-handoff.md)；
+20. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
 
 ## 文档边界
 
