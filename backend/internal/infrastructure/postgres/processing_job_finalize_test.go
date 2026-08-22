@@ -92,7 +92,7 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 
 		// 用户可以在解析尚未结束时先表达“完成后向量化”的意图。
 		// 此时任务必须等待，不能被 Embedding Worker 提前领取。
-		embeddingJobs := postgresrepository.NewScopedEmbeddingJobRepository(pool)
+		embeddingJobs := postgresrepository.NewScopedEmbeddingJobRepository(pool, testEmbeddingAdmissionLimits())
 		waitingEmbeddingResult, err := embeddingJobs.RequestEmbeddingJob(
 			ctx,
 			documentRepository.scope,
@@ -244,7 +244,7 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			createdDocument.ID,
 		)
 
-		embeddingJobs := postgresrepository.NewScopedEmbeddingJobRepository(pool)
+		embeddingJobs := postgresrepository.NewScopedEmbeddingJobRepository(pool, testEmbeddingAdmissionLimits())
 		waitingEmbeddingResult, err := embeddingJobs.RequestEmbeddingJob(
 			ctx,
 			documentRepository.scope,

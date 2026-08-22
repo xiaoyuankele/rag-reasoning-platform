@@ -17,6 +17,12 @@ func TestSummarizeAggregatesEmbeddingAndGenerationEvents(t *testing.T) {
 		`{"event":"answer_generation_succeeded","model_name":"qwen3.6-flash","response_language":"zh","evidence_count":4,"provider_duration_ms":900,"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}`,
 		`{"event":"answer_generation_failed","model_name":"qwen3.6-flash","response_language":"en","evidence_count":3,"provider_duration_ms":400,"error_category":"provider_unavailable"}`,
 		`{"event":"answer_generation_skipped","model_name":"qwen3.6-flash","response_language":"zh","evidence_count":0,"skip_reason":"insufficient_evidence"}`,
+		`{"event":"answer_request_admitted","wait_duration_ms":10,"in_flight":1,"max_concurrency":2}`,
+		`{"event":"answer_request_admitted","wait_duration_ms":20,"in_flight":2,"max_concurrency":2}`,
+		`{"event":"answer_request_released","outcome":"succeeded","wait_duration_ms":10,"execution_duration_ms":1000,"in_flight":1,"max_concurrency":2}`,
+		`{"event":"answer_request_rejected","outcome":"capacity_timeout","wait_duration_ms":3000,"in_flight":2,"max_concurrency":2}`,
+		`{"event":"answer_request_released","outcome":"downstream_error","wait_duration_ms":20,"execution_duration_ms":400,"in_flight":0,"max_concurrency":2}`,
+		`{"event":"answer_request_rejected","outcome":"canceled","wait_duration_ms":500,"in_flight":2,"max_concurrency":2}`,
 	}, "\n")
 	generatedAt := time.Date(2026, time.August, 15, 12, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 
@@ -25,11 +31,11 @@ func TestSummarizeAggregatesEmbeddingAndGenerationEvents(t *testing.T) {
 		t.Fatalf("Summarize() error = %v, want nil", err)
 	}
 
-	if report.SchemaVersion != 1 ||
+	if report.SchemaVersion != 2 ||
 		report.GeneratedAt != "2026-08-15T04:00:00Z" ||
-		report.ScannedLineCount != 9 ||
-		report.JSONLineCount != 8 ||
-		report.AggregatedEventCount != 5 ||
+		report.ScannedLineCount != 15 ||
+		report.JSONLineCount != 14 ||
+		report.AggregatedEventCount != 11 ||
 		report.IgnoredNonJSONLineCount != 1 ||
 		report.IgnoredJSONEventCount != 3 {
 		t.Fatalf("report metadata = %+v, want stable line counts", report)
@@ -68,6 +74,22 @@ func TestSummarizeAggregatesEmbeddingAndGenerationEvents(t *testing.T) {
 		t.Fatalf("generation summary = %+v, want calls, skips and cost", generation)
 	}
 	assertDurationSummary(t, generation.ProviderDuration, 2, 1300, 650, 400, 400, 900, 900)
+
+	admission := report.AnswerAdmission
+	if admission.Events["answer_request_admitted"] != 2 ||
+		admission.Events["answer_request_rejected"] != 2 ||
+		admission.Events["answer_request_released"] != 2 ||
+		admission.Outcomes["succeeded"] != 1 ||
+		admission.Outcomes["downstream_error"] != 1 ||
+		admission.Outcomes["capacity_timeout"] != 1 ||
+		admission.Outcomes["canceled"] != 1 ||
+		admission.CapacityTimeoutCount != 1 ||
+		admission.CanceledWaitCount != 1 ||
+		admission.MaxObservedInFlight != 2 {
+		t.Fatalf("answer admission summary = %+v, want event and outcome counts", admission)
+	}
+	assertDurationSummary(t, admission.WaitDuration, 4, 3530, 882.5, 10, 20, 3000, 3000)
+	assertDurationSummary(t, admission.ExecutionDuration, 2, 1400, 700, 400, 400, 1000, 1000)
 }
 
 func TestSummarizeRejectsMalformedStructuredLog(t *testing.T) {
@@ -85,6 +107,14 @@ func TestSummarizeRejectsIncompleteCostEvent(t *testing.T) {
 	_, err := Summarize(strings.NewReader(input), time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "provider_duration_ms") {
 		t.Fatalf("Summarize() error = %v, want missing duration error", err)
+	}
+}
+
+func TestSummarizeRejectsIncompleteAnswerAdmissionEvent(t *testing.T) {
+	input := `{"event":"answer_request_released","outcome":"succeeded","wait_duration_ms":5,"in_flight":0,"max_concurrency":2}`
+	_, err := Summarize(strings.NewReader(input), time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "execution_duration_ms") {
+		t.Fatalf("Summarize() error = %v, want missing execution duration error", err)
 	}
 }
 

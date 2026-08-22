@@ -27,7 +27,7 @@ func TestEmbeddingRequestAndProcessingSuccessDoNotStrandWaitingJob(t *testing.T)
 	pool := openIsolatedDocumentTestPool(t, ctx)
 	documents := newOwnedDocumentFixture(t, ctx, pool)
 	processingJobs := postgresrepository.NewProcessingJobRepository(pool)
-	embeddingJobs := postgresrepository.NewScopedEmbeddingJobRepository(pool)
+	embeddingJobs := postgresrepository.NewScopedEmbeddingJobRepository(pool, testEmbeddingAdmissionLimits())
 
 	type embeddingRequestResult struct {
 		job embeddingdomain.Job

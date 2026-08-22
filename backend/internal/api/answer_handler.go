@@ -200,6 +200,16 @@ func writeAnswerError(c *gin.Context, err error) bool {
 			errorCodeAnswerCapacityExhausted,
 			"answer service is busy; try again later",
 		)
+	case errors.Is(err, embeddingapplication.ErrEmbeddingProviderCapacityExhausted):
+		// 问答已经进入整体并发槽位，但内部语义检索仍可能因共享的远程
+		// Embedding 容量已满而超时。该错误与问答整体容量错误分开编码。
+		c.Header("Retry-After", "2")
+		writeErrorResponse(
+			c,
+			http.StatusServiceUnavailable,
+			errorCodeEmbeddingProviderCapacity,
+			"embedding service is busy; try again later",
+		)
 
 	case errors.Is(err, embeddingdomain.ErrEmbeddingAuthentication),
 		errors.Is(err, embeddingdomain.ErrEmbeddingRateLimited),

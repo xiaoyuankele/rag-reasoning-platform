@@ -1,6 +1,6 @@
 # HTTP API 总览
 
-> 更新时间：2026-08-21。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
+> 更新时间：2026-08-22。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
 > Handler 测试和后续 OpenAPI 文件为最终校验依据。
 
 ## 1. 当前访问边界
@@ -27,13 +27,13 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `POST` | `/documents/:id/process` | Session Cookie；路径参数 `id` | `202` | 为当前用户文档创建异步解析任务 | 用户功能；已隔离 |
 | `GET` | `/processing-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的解析任务状态 | 用户功能；已隔离/轮询 |
 | `GET` | `/search` | Session Cookie；完整短语 `q`，或重复 `term` + 可选 `operator`、`within`；另可选 `document_id`、`page`、`page_size` | `200` | 在当前用户文档的同一文本块内执行短语或多关键词检索 | 用户功能；已隔离 |
-| `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | 新建 `202`；活动任务已存在 `200` | 保存当前用户的向量化意图 | 用户功能；已隔离/幂等 |
-| `POST` | `/embedding-jobs/batch` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 对多份文档逐项创建或复用向量任务 | 用户功能；已隔离/逐项结果 |
+| `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | 新建 `202`；活动任务已存在 `200`；用户满额 `429`；全局满额 `503` | 保存当前用户的向量化意图 | 用户功能；已隔离/幂等/背压 |
+| `POST` | `/embedding-jobs/batch` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 对多份文档逐项创建或复用向量任务 | 用户功能；已隔离/逐项结果/背压 |
 | `POST` | `/embedding-jobs/latest` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 按文档批量发现当前用户可见的最新向量任务 | 用户功能；已隔离/状态恢复 |
 | `GET` | `/embedding-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的向量任务状态、重试和 Token 信息 | 用户功能；已隔离/轮询 |
 | `POST` | `/embedding-jobs/:id/cancel` | Session Cookie；路径参数 `id` | `200` | 取消 waiting/queued 向量任务 | 用户功能；processing/终态返回 `409` |
-| `POST` | `/semantic-search` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k` | `200` | 在当前用户文档中进行语义检索 | 用户功能；已隔离，受功能开关控制 |
-| `POST` | `/answers` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200`；容量等待超时 `503` | 基于当前用户来源生成回答 | 用户功能；已隔离，受功能开关和并发闸门控制 |
+| `POST` | `/semantic-search` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k` | `200`；远程 Embedding 容量等待超时 `503` | 在当前用户文档中进行语义检索 | 用户功能；已隔离，受功能开关和共享闸门控制 |
+| `POST` | `/answers` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200`；问答或远程 Embedding 容量等待超时 `503` | 基于当前用户来源生成回答 | 用户功能；已隔离，受功能开关和并发闸门控制 |
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册或密码重置验证码挑战 | 认证功能；`purpose` 为 `register` 或 `password_reset` |
 | `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建用户和 Session | 认证功能；设置 `rag_session` Cookie |
 | `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 核对凭据并创建新 Session | 认证功能；设置 `rag_session` Cookie |
@@ -163,6 +163,50 @@ GET /search?term=磁悬浮&term=振动&operator=all&within=chunk&page=1&page_siz
 - “最新”第一版按 `embedding_jobs.id DESC` 定义；接口返回的是调用时刻快照，不是锁；
 - 页面初始化时调用一次，随后只对 `waiting_document/queued/processing` 任务复用 `GET /embedding-jobs/:id` 有界轮询；
 - 最新任务 `succeeded` 目前只表示最近任务成功，不等同于已经证明其向量匹配当前文档 revision。版本和 stale 语义后续单独设计。
+
+### 2.4 向量任务入队背压
+
+活动任务定义为 `waiting_document`、`queued` 或 `processing`。默认每个用户最多同时保留 100 条活动任务，
+整个系统最多 500 条；部署时可以通过 `EMBEDDING_MAX_ACTIVE_JOBS_PER_USER` 和
+`EMBEDDING_MAX_ACTIVE_JOBS_GLOBAL` 调整，但全局值不能小于单用户值。
+
+`POST /documents/:id/embeddings` 在创建新任务前原子检查容量：
+
+| 状态码 | 稳定 `code` | 含义 | 建议行为 |
+| --- | --- | --- | --- |
+| `429` | `embedding_owner_active_job_limit` | 当前用户活动任务达到上限 | 按 `Retry-After` 等待并刷新已有任务 |
+| `503` | `embedding_queue_capacity_exhausted` | 系统全局活动任务达到上限 | 按 `Retry-After` 等待，避免立即重试洪峰 |
+
+两种响应都包含 `Retry-After: 5`。同一文档已经有活动任务时仍然幂等返回原任务，不占用新名额，也不会因为
+当前队列已满而把正常的状态查询误报为限流。
+
+批量接口继续返回 `200` 和逐项结果：用户满额项使用 `outcome=rate_limited`，全局满额项使用
+`outcome=capacity_exhausted`，对应 `error.code` 与单任务接口一致。已经创建或复用的其他项不会回滚。
+容量检查和任务插入位于同一 PostgreSQL 事务，并由事务级 advisory lock 串行化最后一个名额的竞争；
+Handler 中的预检查不能替代这一数据库原子边界。
+
+### 2.5 远程 Embedding 分类隔离与全局闸门
+
+后台向量 Worker 与在线语义能力先经过独立分类闸门，再经过进程内全局闸门：Worker 默认最多占用 2 个槽位，
+`POST /semantic-search` 和 `POST /answers` 内部语义检索共享另外 2 个在线槽位，所有入口合计默认不超过 4。
+配置必须满足 `EMBEDDING_WORKER_PROVIDER_CONCURRENCY + EMBEDDING_ONLINE_PROVIDER_CONCURRENCY <=
+EMBEDDING_PROVIDER_MAX_CONCURRENCY`。该设计保证后台任务即使持续堆积，也不能占用在线预留容量。
+
+这些配置限制同时在途的 Embedding HTTP 调用，而不是任务数、每分钟请求数或 Token 额度。后台 Worker 没有本地
+等待超时，只随任务 context 取消；在线请求默认最多等待 `EMBEDDING_ONLINE_QUEUE_WAIT_TIMEOUT=2s`。
+
+在线等待超时统一返回：
+
+```http
+HTTP/1.1 503 Service Unavailable
+Retry-After: 2
+Content-Type: application/json
+
+{"error":"embedding service is busy; try again later","code":"embedding_provider_capacity_exhausted"}
+```
+
+这是可重试的本地容量错误，不等同于远程服务自己的限流、额度不足或不可用。前端应按 `Retry-After` 退避，
+不能立即循环重试。当前分类与全局闸门都只约束单个后端进程；多副本部署后的全局容量需要单独引入分布式准入机制。
 
 ## 3. P6 认证接口状态
 

@@ -107,6 +107,26 @@ func (h *DocumentEmbeddingHandler) Queue(c *gin.Context) {
 		})
 		return
 	}
+	if errors.Is(err, embeddingdomain.ErrOwnerActiveJobLimitExceeded) {
+		c.Header("Retry-After", "5")
+		writeErrorResponse(
+			c,
+			http.StatusTooManyRequests,
+			errorCodeEmbeddingOwnerJobLimit,
+			"too many active embedding jobs for this user",
+		)
+		return
+	}
+	if errors.Is(err, embeddingdomain.ErrGlobalActiveJobLimitExceeded) {
+		c.Header("Retry-After", "5")
+		writeErrorResponse(
+			c,
+			http.StatusServiceUnavailable,
+			errorCodeEmbeddingQueueCapacity,
+			"embedding queue is temporarily full",
+		)
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errorResponse{
 			Error: "internal server error",

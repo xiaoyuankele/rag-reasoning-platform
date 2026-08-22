@@ -148,6 +148,16 @@ func (h *SemanticSearchHandler) Search(c *gin.Context) {
 		})
 		return
 	}
+	if errors.Is(err, embeddingapplication.ErrEmbeddingProviderCapacityExhausted) {
+		c.Header("Retry-After", "2")
+		writeErrorResponse(
+			c,
+			http.StatusServiceUnavailable,
+			errorCodeEmbeddingProviderCapacity,
+			"embedding service is busy; try again later",
+		)
+		return
+	}
 
 	// 远程服务拒绝了本项目构造的请求，或返回了不符合契约的数据。
 	// 对客户端隐藏提供方响应细节，并用 502 表示上游响应不可用。

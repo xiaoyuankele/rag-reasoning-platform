@@ -21,7 +21,7 @@ func TestScopedEmbeddingJobRepositoryCancellation(t *testing.T) {
 	defer cancel()
 	pool := openIsolatedDocumentTestPool(t, ctx)
 	documents := newOwnedDocumentFixture(t, ctx, pool)
-	jobs := postgresrepository.NewScopedEmbeddingJobRepository(pool)
+	jobs := postgresrepository.NewScopedEmbeddingJobRepository(pool, testEmbeddingAdmissionLimits())
 
 	t.Run("waiting document can be canceled idempotently", func(t *testing.T) {
 		createdDocument, err := documents.Create(ctx, scopedDocumentInput(

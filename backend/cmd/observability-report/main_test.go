@@ -31,8 +31,11 @@ func TestRunReadsLogAndWritesReport(t *testing.T) {
 		t.Fatalf("decode output report: %v", err)
 	}
 	if report.Source != inputPath ||
+		report.SchemaVersion != 2 ||
 		report.Generation.ProviderCallCount != 1 ||
-		report.Generation.TotalTokens != 12 {
+		report.Generation.TotalTokens != 12 ||
+		report.AnswerAdmission.Events == nil ||
+		report.AnswerAdmission.Outcomes == nil {
 		t.Fatalf("report = %+v, want source and generation totals", report)
 	}
 }

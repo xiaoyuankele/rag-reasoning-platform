@@ -88,21 +88,23 @@ func TestDocumentEmbeddingBatchHandlerReturnsPerDocumentResults(t *testing.T) {
 			if scope.OwnerUserID() != testAPIOwnerUserID {
 				t.Fatalf("owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
 			}
-			if len(documentIDs) != 4 {
-				t.Fatalf("document IDs = %v, want four IDs", documentIDs)
+			if len(documentIDs) != 6 {
+				t.Fatalf("document IDs = %v, want six IDs", documentIDs)
 			}
 			return embeddingapplication.BatchQueueOutput{Items: []embeddingapplication.BatchQueueItem{
 				{DocumentID: 1, Result: embeddingdomain.JobRequestResult{Job: embeddingdomain.Job{ID: 11, DocumentID: 1, Status: embeddingdomain.JobStatusQueued}, Created: true}},
 				{DocumentID: 2, Result: embeddingdomain.JobRequestResult{Job: embeddingdomain.Job{ID: 12, DocumentID: 2, Status: embeddingdomain.JobStatusWaitingDocument}, Created: false}},
 				{DocumentID: 3, Err: documentdomain.ErrNotFound},
 				{DocumentID: 4, Err: internalErr},
+				{DocumentID: 5, Err: embeddingdomain.ErrOwnerActiveJobLimitExceeded},
+				{DocumentID: 6, Err: embeddingdomain.ErrGlobalActiveJobLimitExceeded},
 			}}, nil
 		},
 	}
 	response := httptest.NewRecorder()
 	newTestEmbeddingBatchRouter(service).ServeHTTP(
 		response,
-		httptest.NewRequest(http.MethodPost, "/embedding-jobs/batch", strings.NewReader(`{"document_ids":[1,2,3,4]}`)),
+		httptest.NewRequest(http.MethodPost, "/embedding-jobs/batch", strings.NewReader(`{"document_ids":[1,2,3,4,5,6]}`)),
 	)
 
 	if response.Code != http.StatusOK {
@@ -112,8 +114,8 @@ func TestDocumentEmbeddingBatchHandlerReturnsPerDocumentResults(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &actual); err != nil {
 		t.Fatalf("decode batch response: %v", err)
 	}
-	if len(actual.Items) != 4 {
-		t.Fatalf("items = %d, want 4", len(actual.Items))
+	if len(actual.Items) != 6 {
+		t.Fatalf("items = %d, want 6", len(actual.Items))
 	}
 	if actual.Items[0].Outcome != batchEmbeddingOutcomeCreated || actual.Items[0].Job == nil {
 		t.Fatalf("created item = %+v", actual.Items[0])
@@ -126,5 +128,14 @@ func TestDocumentEmbeddingBatchHandlerReturnsPerDocumentResults(t *testing.T) {
 	}
 	if actual.Items[3].Outcome != batchEmbeddingOutcomeFailed || actual.Items[3].Error == nil || actual.Items[3].Error.Code != errorCodeInternal {
 		t.Fatalf("failed item = %+v", actual.Items[3])
+	}
+	if actual.Items[4].Outcome != batchEmbeddingOutcomeRateLimited || actual.Items[4].Error == nil || actual.Items[4].Error.Code != errorCodeEmbeddingOwnerJobLimit {
+		t.Fatalf("rate-limited item = %+v", actual.Items[4])
+	}
+	if actual.Items[5].Outcome != batchEmbeddingOutcomeCapacityFull || actual.Items[5].Error == nil || actual.Items[5].Error.Code != errorCodeEmbeddingQueueCapacity {
+		t.Fatalf("capacity item = %+v", actual.Items[5])
+	}
+	if response.Header().Get("Retry-After") != "5" {
+		t.Fatalf("Retry-After = %q, want 5", response.Header().Get("Retry-After"))
 	}
 }

@@ -125,7 +125,13 @@ func TestEmbeddingOwnerHTTPWithPostgreSQL(t *testing.T) {
 
 	const modelName = "test-embedding-model"
 	const dimensions = 1536
-	scopedJobs := postgresrepository.NewScopedEmbeddingJobRepository(pool)
+	scopedJobs := postgresrepository.NewScopedEmbeddingJobRepository(
+		pool,
+		embeddingdomain.JobAdmissionLimits{
+			MaxActiveJobsPerOwner: 100,
+			MaxActiveJobsGlobal:   500,
+		},
+	)
 	queueService := embeddingapplication.NewQueueService(
 		scopedJobs,
 		modelName,
