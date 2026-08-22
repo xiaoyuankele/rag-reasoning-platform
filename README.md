@@ -235,7 +235,7 @@ Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义�
 
 `GET /search` 已实现以统一文本块为结果单位的关键词检索，并在 P6/B5.2 接入 Session 与 OwnerScope。接口保留 `q` 完整短语，同时支持 2～8 个重复 `term`、`operator=all|any` 和 `within=chunk`，可要求全部关键词或任一关键词出现在同一个 chunk。Handler 另接收可选 `document_id`、`page` 和 `page_size`，Application 负责规范化、去重、业务校验、分页换算与总页数计算，PostgreSQL 仓储在 `text_chunks` 与 `documents` 之间执行关联查询；count 与 data 两条 SQL 都使用相同的用户、状态、词项和文档条件。跨文档搜索只表示当前用户的全部 `ready` 文档，其他用户即使指定真实 `document_id` 也只得到正常 `200` 空结果。HTTP 响应包含规范化检索模式、命中文本、文献标题、原始文件名、物理页码和分页元数据。Repository 使用参数化 `ILIKE` 保持中英文大小写不敏感的字面子串语义，并转义 `%`、`_` 与反斜杠；第 6 号迁移通过 `pg_trgm + GIN` 加速数万文本块规模下的稀有子串查询。当前排序仍为确定性的“较新文档优先、文档内原文顺序”，不把时间顺序包装成相关性评分；sentence/paragraph 共现尚未实现。
 
-`POST /documents/:id/embeddings` 已实现独立向量任务的手动入队，并在 P6/B5.1 接入 Session 与 OwnerScope。只有当前用户自己的 `ready` 文档可以创建任务，成功返回 `202 Accepted`；非法 ID 返回 `400`，文档不存在或属于其他用户统一返回 `404`，文本未就绪或已经存在活动向量任务返回 `409`。PostgreSQL 使用带所有者条件的 `INSERT ... SELECT` 原子验证归属并创建任务，防止只在 Application 检查后发生竞态越权。任务会冻结 `model_name` 和 `dimensions`，第一版数据库固定使用 1536 维向量；DashScope 默认模型为 `text-embedding-v4`，OpenAI 默认模型为 `text-embedding-3-small`。接口本身只创建 `queued` 任务；当 `EMBEDDING_WORKER_ENABLED=true` 时，后台固定大小 Worker Pool 会按文件并行、按文件内部批次顺序调用当前配置的远程 API，并通过 PostgreSQL 事务原子保存一份文档的全部 chunk 向量与任务成功状态。并发数由 `EMBEDDING_WORKER_CONCURRENCY` 控制，默认 1 可安全降级，允许 1～4；PostgreSQL `FOR UPDATE SKIP LOCKED` 保证并发 Worker 不会领取同一任务。临时错误按指数退避重新排队，鉴权、参数、余额或额度耗尽等永久错误进入 `failed`，正常 shutdown 遗留的 `processing` 任务会在下次单实例启动时恢复为 `queued`。Worker 默认关闭，不会产生远程调用或模型费用。
+`POST /documents/:id/embeddings` 已实现独立向量任务的手动入队，并在 P6/B5.1 接入 Session 与 OwnerScope。当前用户自己的文档可以保存向量化意图：文本已经 ready 时进入 `queued`，尚未完成解析时进入 `waiting_document`；同一文档已有活动任务时幂等返回原任务。非法 ID 返回 `400`，文档不存在或属于其他用户统一返回 `404`。任务会冻结 `model_name` 和 `dimensions`，第一版数据库固定使用 1536 维向量；DashScope 默认模型为 `text-embedding-v4`，OpenAI 默认模型为 `text-embedding-3-small`。入队端默认限制每用户 100、全局 500 条活动任务，并通过 PostgreSQL 事务级 advisory lock 原子执行容量检查与创建；用户满额返回 `429`，系统满额返回 `503`。当 `EMBEDDING_WORKER_ENABLED=true` 时，后台固定大小 Worker Pool 会按文件并行、按文件内部批次顺序调用当前配置的远程 API，并通过 PostgreSQL 事务原子保存一份文档的全部 chunk 向量与任务成功状态。并发数由 `EMBEDDING_WORKER_CONCURRENCY` 控制，默认 1 可安全降级，允许 1～4；PostgreSQL `FOR UPDATE SKIP LOCKED` 保证并发 Worker 不会领取同一任务。远程调用容量采用“分类隔离 + 全局保险”：后台 Worker 默认最多占 2 个槽位，语义检索与问答内部检索共用另外 2 个在线槽位，所有入口合计不超过 4。在线请求等待 2 秒仍无槽位时返回稳定 `503 embedding_provider_capacity_exhausted`，后台任务则继续等待至任务取消或服务关闭，因此后台任务堆积不会把在线语义检索完全饿死。临时错误按指数退避重新排队，鉴权、参数、余额或额度耗尽等永久错误进入 `failed`，正常 shutdown 遗留的 `processing` 任务会在下次单实例启动时恢复为 `queued`。Worker 默认关闭，不会产生远程调用或模型费用。
 
 `GET /embedding-jobs/:id` 已提供受 Session 保护的向量任务状态查询。接口通过任务 JOIN 所属文档并按 OwnerScope 过滤，任务不存在或属于其他用户统一返回 `404`；成功时返回任务所属文档、冻结的模型与维度、当前状态、尝试次数、下次重试时间、错误信息、Token 用量和各阶段时间戳。前端可以在创建任务获得 ID 后轮询该接口，而不需要读取数据库或依赖后端日志。
 
@@ -405,6 +405,12 @@ Go 后端当前支持以下环境变量：
 | `PYTHON_PROCESS_MAX_DOCUMENTS` | `20` | 单个常驻 Python 进程处理多少份文档后主动回收 |
 | `EMBEDDING_WORKER_ENABLED` | `false` | 是否启动远程 Embedding Worker；默认关闭以避免意外费用 |
 | `EMBEDDING_WORKER_CONCURRENCY` | `1` | 同一实例内的向量 Worker 数，允许 1～4；默认 1 可安全降级 |
+| `EMBEDDING_MAX_ACTIVE_JOBS_PER_USER` | `100` | 单个用户允许的 waiting/queued/processing 向量任务总数 |
+| `EMBEDDING_MAX_ACTIVE_JOBS_GLOBAL` | `500` | 全系统允许的活动向量任务总数，不能小于单用户上限 |
+| `EMBEDDING_PROVIDER_MAX_CONCURRENCY` | `4` | 单个后端进程内所有远程 Embedding 在途调用的全局硬上限 |
+| `EMBEDDING_WORKER_PROVIDER_CONCURRENCY` | `2` | 后台向量 Worker 可占用的远程调用上限；启用 Worker 时不能小于 Worker 数 |
+| `EMBEDDING_ONLINE_PROVIDER_CONCURRENCY` | `2` | 语义检索和问答内部语义检索共享的在线远程调用上限 |
+| `EMBEDDING_ONLINE_QUEUE_WAIT_TIMEOUT` | `2s` | 在线语义检索或问答等待共享 Embedding 槽位的最长时间 |
 | `SEMANTIC_SEARCH_ENABLED` | `false` | 是否注册在线语义检索接口；启用后每次检索会调用远程 Embedding API |
 | `EMBEDDING_PROVIDER` | `dashscope` | 当前远程提供方，可选 `dashscope` 或 `openai` |
 | `DASHSCOPE_API_KEY` | 无 | 选择 DashScope 且 Worker 或语义检索启用时必填；只能保存在本机 `.env` |

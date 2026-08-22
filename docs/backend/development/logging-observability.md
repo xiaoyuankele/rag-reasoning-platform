@@ -232,17 +232,43 @@ HTTP 访问日志负责整次请求的状态与总耗时，Generation 事件只�
 当前闸门是**单后端进程级**限制：如果未来水平扩容为多个后端副本，总并发约等于“副本数 × 每副本上限”，
 届时若要形成全局配额，需要增加 Redis/数据库等分布式准入能力。
 
-### 7.5 可重复成本汇总
+### 7.5 远程 Embedding 分类隔离与全局准入
+
+后台向量 Worker、在线语义检索和问答内部语义检索使用两个不同等待策略的 `GatedEmbedder`，并持有同一个
+包含 Worker、Online、Global 三组槽位的 `EmbeddingProviderGate`。分类槽位隔离后台和在线容量，全局槽位负责
+保证所有远程 Embedding HTTP 调用合计不会超额。
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `embedding_provider_request_admitted` | `INFO` | Worker 或在线请求取得共享槽位 |
+| `embedding_provider_request_rejected` | `WARN`/`INFO` | 在线等待容量超时，或等待中的 context 被取消 |
+| `embedding_provider_request_released` | `INFO` | 远程调用成功、失败或取消后已经归还槽位 |
+
+事件记录 `origin=worker/online`、`request_id`（在线链路存在时）、`wait_duration_ms`、分类容量字段
+`origin_in_flight/origin_max_concurrency`、全局容量字段 `in_flight/max_concurrency` 和 `outcome`；释放事件增加
+`execution_duration_ms`。日志禁止记录输入文本、向量、远程响应正文和 API Key。默认 Worker/Online/Global
+分别为 2/2/4，在线等待 2 秒；后台 Worker 只随任务 context 或 shutdown 取消。
+
+该闸门控制并发数，不控制提供方的 RPM、TPM 或账户配额。分类槽位解决 Worker 饿死在线请求的问题，但在线
+类别内部仍可能出现跨用户饥饿；届时需要再设计用户级公平调度，而不是盲目提高并发数。
+
+### 7.6 可重复成本与问答并发汇总
 
 P5.2.6 第一部分提供 `go run ./cmd/observability-report`。该命令只消费已有 JSONL 日志，不启动服务、
 不访问数据库，也不调用远程模型。它排除 started 事件，按终结事件汇总 Embedding/Generation 的调用次数、
 Token、成功/失败/跳过状态以及平均、P50、P95 耗时。重试前已经发生的 Embedding 调用继续计入成本，
 无证据 Generation `skipped` 不计远程调用。
 
+2026-08-22 报告结构升级为 `schema_version=2`，在原有 `embedding` 和 `generation` 外增加
+`answer_admission`。它汇总 `admitted`、`rejected`、`released` 事件数，按 outcome 区分成功、下游失败、
+容量等待超时和客户端取消，并输出等待耗时、执行耗时和 `max_observed_in_flight`。同一条成功请求会同时写
+`admitted` 与 `released`，所以等待耗时只采用 `released` 或 `rejected` 终结事件，避免重复计算；执行耗时
+只采用 `released`。
+
 完整冻结条件、PowerShell 命令、字段口径和金额换算方法见
 [模型调用成本基线](../performance/model-call-cost-baseline.md)。真实付费批次必须单独获得授权。
 
-### 7.5 应用进程生命周期与启动恢复
+### 7.6 应用进程生命周期与启动恢复
 
 P5.3.3 增加三个进程级事件：`application_started`、`application_shutdown_started` 和
 `application_stopped`。它们由 `main.go` 记录，因为信号、HTTP Server、Worker goroutine 和数据库连接池都在

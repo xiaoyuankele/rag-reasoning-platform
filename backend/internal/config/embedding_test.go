@@ -24,6 +24,22 @@ func TestLoadEmbeddingUsesDefaults(t *testing.T) {
 			defaultEmbeddingWorkerConcurrency,
 		)
 	}
+	if embeddingConfig.ProviderMaxConcurrency != defaultEmbeddingProviderConcurrency ||
+		embeddingConfig.WorkerProviderConcurrency != defaultEmbeddingWorkerProviderConcurrency ||
+		embeddingConfig.OnlineProviderConcurrency != defaultEmbeddingOnlineProviderConcurrency ||
+		embeddingConfig.OnlineQueueWaitTimeout != defaultEmbeddingOnlineWaitTimeout {
+		t.Fatalf(
+			"provider gate config = %d/%d/%d/%s, want %d/%d/%d/%s",
+			embeddingConfig.ProviderMaxConcurrency,
+			embeddingConfig.WorkerProviderConcurrency,
+			embeddingConfig.OnlineProviderConcurrency,
+			embeddingConfig.OnlineQueueWaitTimeout,
+			defaultEmbeddingProviderConcurrency,
+			defaultEmbeddingWorkerProviderConcurrency,
+			defaultEmbeddingOnlineProviderConcurrency,
+			defaultEmbeddingOnlineWaitTimeout,
+		)
+	}
 	if embeddingConfig.SemanticSearchEnabled {
 		t.Fatal("SemanticSearchEnabled = true, want false by default")
 	}
@@ -42,7 +58,9 @@ func TestLoadEmbeddingUsesDefaults(t *testing.T) {
 		embeddingConfig.PollInterval != defaultEmbeddingPollInterval ||
 		embeddingConfig.MaxAttempts != defaultEmbeddingMaxAttempts ||
 		embeddingConfig.RetryBaseDelay != defaultEmbeddingRetryBaseDelay ||
-		embeddingConfig.RetryMaxDelay != defaultEmbeddingRetryMaxDelay {
+		embeddingConfig.RetryMaxDelay != defaultEmbeddingRetryMaxDelay ||
+		embeddingConfig.ActiveJobsPerUserLimit != defaultEmbeddingActiveOwnerLimit ||
+		embeddingConfig.ActiveJobsGlobalLimit != defaultEmbeddingActiveGlobalLimit {
 		t.Fatalf("default worker configuration was not loaded")
 	}
 }
@@ -51,6 +69,10 @@ func TestLoadEmbeddingUsesOpenAIEnvironment(t *testing.T) {
 	clearEmbeddingEnvironment(t)
 	t.Setenv("EMBEDDING_WORKER_ENABLED", "true")
 	t.Setenv("EMBEDDING_WORKER_CONCURRENCY", "2")
+	t.Setenv("EMBEDDING_PROVIDER_MAX_CONCURRENCY", "6")
+	t.Setenv("EMBEDDING_WORKER_PROVIDER_CONCURRENCY", "2")
+	t.Setenv("EMBEDDING_ONLINE_PROVIDER_CONCURRENCY", "3")
+	t.Setenv("EMBEDDING_ONLINE_QUEUE_WAIT_TIMEOUT", "750ms")
 	t.Setenv("EMBEDDING_PROVIDER", " OPENAI ")
 	t.Setenv("OPENAI_API_KEY", " test-api-key ")
 	t.Setenv("OPENAI_EMBEDDING_ENDPOINT", " https://example.com/v1/embeddings ")
@@ -63,6 +85,8 @@ func TestLoadEmbeddingUsesOpenAIEnvironment(t *testing.T) {
 	t.Setenv("EMBEDDING_MAX_ATTEMPTS", "4")
 	t.Setenv("EMBEDDING_RETRY_BASE_DELAY", "3s")
 	t.Setenv("EMBEDDING_RETRY_MAX_DELAY", "1m")
+	t.Setenv("EMBEDDING_MAX_ACTIVE_JOBS_PER_USER", "25")
+	t.Setenv("EMBEDDING_MAX_ACTIVE_JOBS_GLOBAL", "200")
 
 	embeddingConfig, err := LoadEmbedding()
 	if err != nil {
@@ -71,6 +95,10 @@ func TestLoadEmbeddingUsesOpenAIEnvironment(t *testing.T) {
 
 	if !embeddingConfig.WorkerEnabled ||
 		embeddingConfig.WorkerConcurrency != 2 ||
+		embeddingConfig.ProviderMaxConcurrency != 6 ||
+		embeddingConfig.WorkerProviderConcurrency != 2 ||
+		embeddingConfig.OnlineProviderConcurrency != 3 ||
+		embeddingConfig.OnlineQueueWaitTimeout != 750*time.Millisecond ||
 		embeddingConfig.Provider != EmbeddingProviderOpenAI ||
 		embeddingConfig.APIKey != "test-api-key" ||
 		embeddingConfig.Endpoint != "https://example.com/v1/embeddings" ||
@@ -82,7 +110,9 @@ func TestLoadEmbeddingUsesOpenAIEnvironment(t *testing.T) {
 		embeddingConfig.PollInterval != 500*time.Millisecond ||
 		embeddingConfig.MaxAttempts != 4 ||
 		embeddingConfig.RetryBaseDelay != 3*time.Second ||
-		embeddingConfig.RetryMaxDelay != time.Minute {
+		embeddingConfig.RetryMaxDelay != time.Minute ||
+		embeddingConfig.ActiveJobsPerUserLimit != 25 ||
+		embeddingConfig.ActiveJobsGlobalLimit != 200 {
 		t.Fatal("LoadEmbedding() did not preserve configured values")
 	}
 }
@@ -228,6 +258,68 @@ func TestLoadEmbeddingRejectsInvalidWorkerConcurrency(t *testing.T) {
 	}
 }
 
+func TestLoadEmbeddingRejectsInvalidProviderGateConfiguration(t *testing.T) {
+	tests := []struct {
+		name        string
+		environment string
+		value       string
+	}{
+		{name: "non-numeric concurrency", environment: "EMBEDDING_PROVIDER_MAX_CONCURRENCY", value: "many"},
+		{name: "zero concurrency", environment: "EMBEDDING_PROVIDER_MAX_CONCURRENCY", value: "0"},
+		{name: "concurrency above maximum", environment: "EMBEDDING_PROVIDER_MAX_CONCURRENCY", value: "33"},
+		{name: "zero worker provider concurrency", environment: "EMBEDDING_WORKER_PROVIDER_CONCURRENCY", value: "0"},
+		{name: "worker provider concurrency above maximum", environment: "EMBEDDING_WORKER_PROVIDER_CONCURRENCY", value: "33"},
+		{name: "zero online provider concurrency", environment: "EMBEDDING_ONLINE_PROVIDER_CONCURRENCY", value: "0"},
+		{name: "online provider concurrency above maximum", environment: "EMBEDDING_ONLINE_PROVIDER_CONCURRENCY", value: "33"},
+		{name: "invalid wait timeout", environment: "EMBEDDING_ONLINE_QUEUE_WAIT_TIMEOUT", value: "soon"},
+		{name: "zero wait timeout", environment: "EMBEDDING_ONLINE_QUEUE_WAIT_TIMEOUT", value: "0s"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			clearEmbeddingEnvironment(t)
+			t.Setenv(test.environment, test.value)
+			if _, err := LoadEmbedding(); err == nil {
+				t.Fatalf(
+					"LoadEmbedding() error = nil for %s=%q",
+					test.environment,
+					test.value,
+				)
+			}
+		})
+	}
+}
+
+func TestLoadEmbeddingRejectsProviderCapacityBelowEnabledWorkerPool(t *testing.T) {
+	clearEmbeddingEnvironment(t)
+	t.Setenv("EMBEDDING_WORKER_ENABLED", "true")
+	t.Setenv("DASHSCOPE_API_KEY", "test-api-key")
+	t.Setenv("EMBEDDING_WORKER_CONCURRENCY", "3")
+	t.Setenv("EMBEDDING_PROVIDER_MAX_CONCURRENCY", "5")
+	t.Setenv("EMBEDDING_WORKER_PROVIDER_CONCURRENCY", "2")
+
+	_, err := LoadEmbedding()
+	if !errors.Is(err, ErrInvalidEmbeddingProviderConcurrency) {
+		t.Fatalf(
+			"LoadEmbedding() error = %v, want ErrInvalidEmbeddingProviderConcurrency",
+			err,
+		)
+	}
+}
+
+func TestLoadEmbeddingRejectsClassCapacityAboveGlobalProviderCapacity(t *testing.T) {
+	clearEmbeddingEnvironment(t)
+	t.Setenv("EMBEDDING_PROVIDER_MAX_CONCURRENCY", "3")
+
+	_, err := LoadEmbedding()
+	if !errors.Is(err, ErrInvalidEmbeddingProviderAllocation) {
+		t.Fatalf(
+			"LoadEmbedding() error = %v, want ErrInvalidEmbeddingProviderAllocation",
+			err,
+		)
+	}
+}
+
 func TestLoadEmbeddingRejectsInvalidSemanticSearchEnabled(t *testing.T) {
 	clearEmbeddingEnvironment(t)
 	t.Setenv("SEMANTIC_SEARCH_ENABLED", "sometimes")
@@ -248,12 +340,47 @@ func TestLoadEmbeddingRejectsReversedRetryDelays(t *testing.T) {
 	}
 }
 
+func TestLoadEmbeddingRejectsInvalidActiveJobLimits(t *testing.T) {
+	t.Run("invalid values", func(t *testing.T) {
+		for _, testCase := range []struct {
+			name  string
+			value string
+		}{
+			{name: "non-numeric", value: "many"},
+			{name: "zero", value: "0"},
+			{name: "above maximum", value: "10001"},
+		} {
+			t.Run(testCase.name, func(t *testing.T) {
+				clearEmbeddingEnvironment(t)
+				t.Setenv("EMBEDDING_MAX_ACTIVE_JOBS_PER_USER", testCase.value)
+				if _, err := LoadEmbedding(); err == nil {
+					t.Fatalf("LoadEmbedding() error = nil for per-user limit %q", testCase.value)
+				}
+			})
+		}
+	})
+
+	t.Run("global smaller than per-user", func(t *testing.T) {
+		clearEmbeddingEnvironment(t)
+		t.Setenv("EMBEDDING_MAX_ACTIVE_JOBS_PER_USER", "20")
+		t.Setenv("EMBEDDING_MAX_ACTIVE_JOBS_GLOBAL", "10")
+		_, err := LoadEmbedding()
+		if !errors.Is(err, ErrInvalidEmbeddingActiveJobLimits) {
+			t.Fatalf("LoadEmbedding() error = %v, want ErrInvalidEmbeddingActiveJobLimits", err)
+		}
+	})
+}
+
 func clearEmbeddingEnvironment(t *testing.T) {
 	t.Helper()
 
 	for _, name := range []string{
 		"EMBEDDING_WORKER_ENABLED",
 		"EMBEDDING_WORKER_CONCURRENCY",
+		"EMBEDDING_PROVIDER_MAX_CONCURRENCY",
+		"EMBEDDING_WORKER_PROVIDER_CONCURRENCY",
+		"EMBEDDING_ONLINE_PROVIDER_CONCURRENCY",
+		"EMBEDDING_ONLINE_QUEUE_WAIT_TIMEOUT",
 		"SEMANTIC_SEARCH_ENABLED",
 		"EMBEDDING_PROVIDER",
 		"DASHSCOPE_API_KEY",
@@ -269,6 +396,8 @@ func clearEmbeddingEnvironment(t *testing.T) {
 		"EMBEDDING_MAX_ATTEMPTS",
 		"EMBEDDING_RETRY_BASE_DELAY",
 		"EMBEDDING_RETRY_MAX_DELAY",
+		"EMBEDDING_MAX_ACTIVE_JOBS_PER_USER",
+		"EMBEDDING_MAX_ACTIVE_JOBS_GLOBAL",
 	} {
 		t.Setenv(name, "")
 	}

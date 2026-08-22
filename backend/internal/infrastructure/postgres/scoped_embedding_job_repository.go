@@ -16,8 +16,13 @@ import (
 // ScopedEmbeddingJobRepository 为已认证用户创建和查询向量任务。
 // Embedding Worker 继续使用系统级 EmbeddingJobRepository。
 type ScopedEmbeddingJobRepository struct {
-	pool *pgxpool.Pool
+	pool            *pgxpool.Pool
+	admissionLimits embeddingdomain.JobAdmissionLimits
 }
+
+// embeddingJobAdmissionAdvisoryLockID 是所有向量任务创建者共享的事务锁编号。
+// 它只在“统计活动任务并创建新任务”的短事务内持有，不覆盖 Worker 的远程调用。
+const embeddingJobAdmissionAdvisoryLockID int64 = 0x524147454D424544
 
 var _ embeddingdomain.ScopedJobRequester = (*ScopedEmbeddingJobRepository)(nil)
 var _ embeddingdomain.ScopedJobFinder = (*ScopedEmbeddingJobRepository)(nil)
@@ -27,8 +32,12 @@ var _ embeddingdomain.ScopedJobCanceler = (*ScopedEmbeddingJobRepository)(nil)
 // NewScopedEmbeddingJobRepository 创建带文档所有者边界的向量任务仓储。
 func NewScopedEmbeddingJobRepository(
 	pool *pgxpool.Pool,
+	admissionLimits embeddingdomain.JobAdmissionLimits,
 ) *ScopedEmbeddingJobRepository {
-	return &ScopedEmbeddingJobRepository{pool: pool}
+	return &ScopedEmbeddingJobRepository{
+		pool:            pool,
+		admissionLimits: admissionLimits,
+	}
 }
 
 // RequestEmbeddingJob 原子保存当前用户的向量化意图。
@@ -45,6 +54,9 @@ func (r *ScopedEmbeddingJobRepository) RequestEmbeddingJob(
 ) (embeddingdomain.JobRequestResult, error) {
 	if !scope.IsValid() {
 		return embeddingdomain.JobRequestResult{}, accessdomain.ErrInvalidOwnerScope
+	}
+	if !r.admissionLimits.IsValid() {
+		return embeddingdomain.JobRequestResult{}, embeddingdomain.ErrInvalidJobAdmissionLimits
 	}
 
 	transaction, err := r.pool.Begin(ctx)
@@ -135,6 +147,49 @@ func (r *ScopedEmbeddingJobRepository) RequestEmbeddingJob(
 			"find active scoped embedding job: %w",
 			err,
 		)
+	}
+
+	// 不同文档拥有不同的行锁，单靠 document FOR UPDATE 无法阻止两个请求
+	// 同时通过 COUNT。事务级 advisory lock 把“容量检查 + INSERT”变成一个
+	// 跨文档、跨后端实例的短临界区，事务结束时由 PostgreSQL 自动释放。
+	const admissionLockQuery = `SELECT pg_advisory_xact_lock($1)`
+	if _, err := transaction.Exec(
+		ctx,
+		admissionLockQuery,
+		embeddingJobAdmissionAdvisoryLockID,
+	); err != nil {
+		return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+			"lock embedding job admission capacity: %w",
+			err,
+		)
+	}
+
+	const countActiveJobsQuery = `
+		SELECT
+			COUNT(*) FILTER (WHERE source_document.owner_user_id = $1),
+			COUNT(*)
+		FROM embedding_jobs AS job
+		JOIN documents AS source_document
+		  ON source_document.id = job.document_id
+		WHERE job.status IN ('waiting_document', 'queued', 'processing')
+	`
+	var ownerActiveJobCount int64
+	var globalActiveJobCount int64
+	if err := transaction.QueryRow(
+		ctx,
+		countActiveJobsQuery,
+		scope.OwnerUserID(),
+	).Scan(&ownerActiveJobCount, &globalActiveJobCount); err != nil {
+		return embeddingdomain.JobRequestResult{}, fmt.Errorf(
+			"count active embedding jobs before admission: %w",
+			err,
+		)
+	}
+	if ownerActiveJobCount >= int64(r.admissionLimits.MaxActiveJobsPerOwner) {
+		return embeddingdomain.JobRequestResult{}, embeddingdomain.ErrOwnerActiveJobLimitExceeded
+	}
+	if globalActiveJobCount >= int64(r.admissionLimits.MaxActiveJobsGlobal) {
+		return embeddingdomain.JobRequestResult{}, embeddingdomain.ErrGlobalActiveJobLimitExceeded
 	}
 
 	initialStatus := embeddingdomain.JobStatusWaitingDocument

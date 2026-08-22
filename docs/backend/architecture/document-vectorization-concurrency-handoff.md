@@ -226,8 +226,23 @@ HTTP goroutine 数量不能代表系统容量。需要分别限制：
 - 批量 document ID 数量；
 - PostgreSQL 连接池和连接获取等待时间。
 
-达到用户预算返回 `429 + Retry-After`；系统资源暂时饱和返回 `503`。不要把新任务无限写入数据库后才依赖 Worker 慢慢
-消化。全局 FIFO 还需要防止一个用户占满队列，第一版至少在入队时限制每用户活动数量，后续再按指标设计公平调度。
+第一版入队背压已实现：活动状态为 `waiting_document/queued/processing`，默认每用户上限 100、全局上限 500。
+达到用户预算返回 `429 + Retry-After`，系统容量饱和返回 `503 + Retry-After`。Repository 在文档幂等检查后使用
+PostgreSQL 事务级 advisory lock 串行化“统计活动任务 + INSERT”，避免不同文档的并发请求同时越过最后一个名额。
+锁只覆盖短数据库事务，不覆盖 Worker 的远程 API 调用。
+
+第一版远程调用闸门也已实现：组合根只创建一个 `EmbeddingProviderGate`，其中包含 Worker、Online 和 Global
+三组槽位。后台 Worker 使用无本地超时的 `GatedEmbedder`，在线语义检索和问答内部检索使用限时等待的
+`GatedEmbedder`，二者复用同一个原始 DashScope/OpenAI 客户端，但先经过各自分类容量。默认 Worker 2、
+Online 2、Global 4；在线等待 2 秒后返回 `503 embedding_provider_capacity_exhausted`，后台等待则随任务
+context 或 shutdown 终止。Worker 和 Online 份额之和不能超过全局上限；启用 Worker 时，Worker 份额不能小于
+Worker 数，避免任务提前变成 `processing` 后长期堵在闸门前。
+
+该闸门还不是完整的供应商限流器：它不计算 RPM/TPM，不跨后端副本共享，在线类别内部也不保证用户级公平。
+只有多实例全局配额成为真实需求时才引入 Redis 等协调层。
+
+批量请求继续逐项提交：已经成功创建或复用的任务不因后续项目满额而回滚。全局 FIFO 的进一步公平调度仍需按真实
+指标设计；当前背压保证有界，但不承诺不同用户严格轮转。
 
 建议压测场景：重复批量提交、解析完成/申请同时发生、取消/领取同时发生、两个 Worker 并行、单用户洪峰、两个用户
 公平性、供应商 429/500、进程崩溃恢复和 30～60 分钟稳定性。默认测试使用本地 Fake Provider，避免真实费用。

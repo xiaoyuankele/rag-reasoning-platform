@@ -67,6 +67,33 @@ func TestQueueServicePreservesDocumentNotFound(t *testing.T) {
 	}
 }
 
+func TestQueueServicePreservesAdmissionErrors(t *testing.T) {
+	for _, admissionErr := range []error{
+		embeddingdomain.ErrOwnerActiveJobLimitExceeded,
+		embeddingdomain.ErrGlobalActiveJobLimitExceeded,
+	} {
+		t.Run(admissionErr.Error(), func(t *testing.T) {
+			jobs := &fakeJobRequester{
+				requestFunc: func(
+					context.Context,
+					accessdomain.OwnerScope,
+					int64,
+					string,
+					int,
+				) (embeddingdomain.JobRequestResult, error) {
+					return embeddingdomain.JobRequestResult{}, admissionErr
+				},
+			}
+			service := NewQueueService(jobs, "test-model", 8)
+
+			_, err := service.Queue(context.Background(), testEmbeddingOwnerScope(t), 7)
+			if !errors.Is(err, admissionErr) {
+				t.Fatalf("Queue() error = %v, want wrapped %v", err, admissionErr)
+			}
+		})
+	}
+}
+
 func TestQueueServiceRequestsConfiguredJob(t *testing.T) {
 	const (
 		documentID int64 = 7

@@ -186,7 +186,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
 	scopedProcessingJobRepository := postgres.NewScopedProcessingJobRepository(databasePool)
 	embeddingJobRepository := postgres.NewEmbeddingJobRepository(databasePool)
-	scopedEmbeddingJobRepository := postgres.NewScopedEmbeddingJobRepository(databasePool)
+	scopedEmbeddingJobRepository := postgres.NewScopedEmbeddingJobRepository(
+		databasePool,
+		embeddingdomain.JobAdmissionLimits{
+			MaxActiveJobsPerOwner: embeddingConfig.ActiveJobsPerUserLimit,
+			MaxActiveJobsGlobal:   embeddingConfig.ActiveJobsGlobalLimit,
+		},
+	)
 	chunkRepository := postgres.NewChunkRepository(databasePool)
 	scopedChunkRepository := postgres.NewScopedChunkRepository(databasePool)
 	verificationChallengeRepository :=
@@ -381,16 +387,62 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		"concurrency", workerConfig.DocumentConcurrency,
 	)
 
-	// Worker、公开语义检索和问答内部检索都依赖 Embedder。只要任一能力开启，
-	// 就创建一个无状态客户端并复用；三者都关闭时不创建远程客户端。
-	var embedder embeddingdomain.Embedder
+	// Worker、公开语义检索和问答内部检索最终都调用同一个远程 Embedding
+	// 提供方。组合根创建一个原始客户端、一个共享 Gate，再按后台/在线两种
+	// 等待策略包装成两个 Embedder；这样两条执行链竞争的是同一组槽位。
+	var workerEmbedder embeddingdomain.Embedder
+	var onlineEmbedder embeddingdomain.Embedder
 	if embeddingConfig.WorkerEnabled ||
 		embeddingConfig.SemanticSearchEnabled ||
 		generationConfig.Enabled {
-		embedder, err = newEmbeddingClient(embeddingConfig)
+		rawEmbedder, err := newEmbeddingClient(embeddingConfig)
 		if err != nil {
 			return err
 		}
+
+		providerGate, err := embeddingapplication.NewEmbeddingProviderGate(
+			embeddingConfig.ProviderMaxConcurrency,
+			embeddingConfig.WorkerProviderConcurrency,
+			embeddingConfig.OnlineProviderConcurrency,
+		)
+		if err != nil {
+			return fmt.Errorf("create embedding provider gate: %w", err)
+		}
+		providerAdmissionObserver :=
+			observability.NewEmbeddingProviderAdmissionLogger(logger)
+
+		workerEmbedder, err = embeddingapplication.NewGatedEmbedder(
+			rawEmbedder,
+			providerGate,
+			providerAdmissionObserver,
+			embeddingapplication.EmbeddingProviderCallOriginWorker,
+			0,
+		)
+		if err != nil {
+			return fmt.Errorf("create worker embedding provider gate: %w", err)
+		}
+		onlineEmbedder, err = embeddingapplication.NewGatedEmbedder(
+			rawEmbedder,
+			providerGate,
+			providerAdmissionObserver,
+			embeddingapplication.EmbeddingProviderCallOriginOnline,
+			embeddingConfig.OnlineQueueWaitTimeout,
+		)
+		if err != nil {
+			return fmt.Errorf("create online embedding provider gate: %w", err)
+		}
+
+		logger.Info(
+			"Embedding provider concurrency configured",
+			"event", "embedding_provider_concurrency_configured",
+			"max_concurrency", embeddingConfig.ProviderMaxConcurrency,
+			"worker_max_concurrency",
+			embeddingConfig.WorkerProviderConcurrency,
+			"online_max_concurrency",
+			embeddingConfig.OnlineProviderConcurrency,
+			"online_queue_wait_timeout_ms",
+			embeddingConfig.OnlineQueueWaitTimeout.Milliseconds(),
+		)
 	}
 
 	// 语义检索服务有两种消费者：
@@ -401,7 +453,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled {
 		semanticSearchService, err =
 			embeddingapplication.NewSemanticSearchService(
-				embedder,
+				onlineEmbedder,
 				scopedChunkRepository,
 				embeddingConfig.ModelName,
 				embeddingConfig.Dimensions,
@@ -574,7 +626,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		embeddingWorker, err := embeddingapplication.NewWorker(
 			embeddingJobRepository,
 			chunkRepository,
-			embedder,
+			workerEmbedder,
 			observability.NewEmbeddingJobLogger(logger),
 			embeddingConfig.BatchSize,
 			embeddingConfig.ProcessingTimeout,

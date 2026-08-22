@@ -107,6 +107,21 @@ Get-Content .\server.jsonl |
   用于解释不同 Top K 批次的 Prompt 成本差异；
 - `provider_duration` 只计算 Generator 调用，不等于完整 HTTP 延迟。
 
+### 5.4 Answer Admission
+
+`answer_admission` 不统计模型费用，而是回答“问答请求是否正在等待、被拒绝或已经释放并发槽位”：
+
+- `events`：`answer_request_admitted`、`answer_request_rejected`、`answer_request_released` 的数量；
+- `outcomes`：终结事件中的 `succeeded`、`downstream_error`、`capacity_timeout`、`canceled` 数量；
+- `capacity_timeout_count`：在配置等待时间内没有取得槽位的请求数；
+- `canceled_wait_count`：等待期间被客户端或上游 context 取消的请求数；
+- `max_observed_in_flight`：这批日志实际观察到的进程内最大并发问答数；
+- `wait_duration`：每个终结请求等待槽位的耗时；
+- `execution_duration`：已取得槽位的请求执行完整问答链路的耗时。
+
+等待耗时只从 `released` 和 `rejected` 读取。`admitted` 事件也含同一份等待耗时，但只用于观察准入瞬间，
+不能再次加入耗时样本。否则每个成功请求会被统计两遍，平均值和分位数都会失真。
+
 耗时统计统一提供 `count`、`total_ms`、`average_ms`、`min_ms`、`p50_ms`、`p95_ms` 和 `max_ms`。
 P50/P95 使用 nearest-rank：先从小到大排序，再取向上取整后的第 50%/95% 位置。
 
@@ -127,5 +142,8 @@ Generation 金额 = prompt_tokens / 1,000,000 × 当日输入单价
 2026-08-15 已完成 P5.2.6 第一部分：事件字段、严格 JSONL 汇总器、命令行入口、P50/P95 统计和自动化测试均已就绪。
 汇总器测试只使用合成日志，没有调用真实模型。P4 的 14 次生成、39,982 Token 和端到端耗时继续作为历史质量
 参考，但由于当时记录的是 HTTP 总耗时而不是当前的 provider duration，不能伪装成新口径的第一批结果。
+
+2026-08-22 报告结构升级为 `schema_version=2`，同一命令能够额外汇总问答并发准入、容量超时、取消等待、
+等待/执行耗时和最大观测并发。该扩展同样只读取日志，不会发起远程问答。
 
 下一次真实成本批次需要冻结语料和问题集，并在用户明确同意产生远程费用后执行。

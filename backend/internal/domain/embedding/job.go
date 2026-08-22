@@ -28,6 +28,15 @@ var (
 
 	// ErrJobTerminalCannotCancel 表示成功或失败的历史任务已经结束，不能取消。
 	ErrJobTerminalCannotCancel = errors.New("terminal embedding job cannot be canceled")
+
+	// ErrOwnerActiveJobLimitExceeded 表示当前用户的活动向量任务已经达到上限。
+	ErrOwnerActiveJobLimitExceeded = errors.New("owner active embedding job limit exceeded")
+
+	// ErrGlobalActiveJobLimitExceeded 表示系统的活动向量任务已经达到上限。
+	ErrGlobalActiveJobLimitExceeded = errors.New("global active embedding job limit exceeded")
+
+	// ErrInvalidJobAdmissionLimits 表示内部组装了无效的向量任务容量配置。
+	ErrInvalidJobAdmissionLimits = errors.New("embedding job admission limits are invalid")
 )
 
 // JobStatus 是向量任务的生命周期状态。
@@ -85,6 +94,19 @@ type Job struct {
 type JobRequestResult struct {
 	Job     Job
 	Created bool
+}
+
+// JobAdmissionLimits 是创建向量任务时必须原子执行的容量约束。
+// 活动任务包含 waiting_document、queued 和 processing。
+type JobAdmissionLimits struct {
+	MaxActiveJobsPerOwner int
+	MaxActiveJobsGlobal   int
+}
+
+// IsValid 判断用户上限和全局上限能否组成有效的准入策略。
+func (l JobAdmissionLimits) IsValid() bool {
+	return l.MaxActiveJobsPerOwner > 0 &&
+		l.MaxActiveJobsGlobal >= l.MaxActiveJobsPerOwner
 }
 
 // JobCreator 定义创建向量任务所需的最小持久化能力。

@@ -18,23 +18,24 @@ import (
 
 const (
 	// SchemaVersion 是基线报告结构版本；字段含义变化时必须递增。
-	SchemaVersion       = 1
+	SchemaVersion       = 2
 	maximumLogLineBytes = 1 << 20
 )
 
 // Report 是一次日志汇总的稳定 JSON 输出。
 // Source 由调用者填写，通常是输入日志文件路径或 "stdin"。
 type Report struct {
-	SchemaVersion           int               `json:"schema_version"`
-	GeneratedAt             string            `json:"generated_at"`
-	Source                  string            `json:"source"`
-	ScannedLineCount        int               `json:"scanned_line_count"`
-	JSONLineCount           int               `json:"json_line_count"`
-	AggregatedEventCount    int               `json:"aggregated_event_count"`
-	IgnoredNonJSONLineCount int               `json:"ignored_non_json_line_count"`
-	IgnoredJSONEventCount   int               `json:"ignored_json_event_count"`
-	Embedding               EmbeddingSummary  `json:"embedding"`
-	Generation              GenerationSummary `json:"generation"`
+	SchemaVersion           int                    `json:"schema_version"`
+	GeneratedAt             string                 `json:"generated_at"`
+	Source                  string                 `json:"source"`
+	ScannedLineCount        int                    `json:"scanned_line_count"`
+	JSONLineCount           int                    `json:"json_line_count"`
+	AggregatedEventCount    int                    `json:"aggregated_event_count"`
+	IgnoredNonJSONLineCount int                    `json:"ignored_non_json_line_count"`
+	IgnoredJSONEventCount   int                    `json:"ignored_json_event_count"`
+	Embedding               EmbeddingSummary       `json:"embedding"`
+	Generation              GenerationSummary      `json:"generation"`
+	AnswerAdmission         AnswerAdmissionSummary `json:"answer_admission"`
 }
 
 // DurationSummary 使用毫秒描述一组耗时。
@@ -82,6 +83,21 @@ type GenerationSummary struct {
 	ProviderDuration     DurationSummary `json:"provider_duration"`
 }
 
+// AnswerAdmissionSummary 汇总在线问答并发闸门的容量、等待和执行情况。
+//
+// Events 记录 admitted/rejected/released 生命周期事件；Outcomes 只记录
+// released/rejected 终结事件。WaitDuration 也只使用终结事件，避免同一条
+// 已准入请求在 admitted 和 released 中被重复统计。
+type AnswerAdmissionSummary struct {
+	Events               map[string]int  `json:"events"`
+	Outcomes             map[string]int  `json:"outcomes"`
+	CapacityTimeoutCount int             `json:"capacity_timeout_count"`
+	CanceledWaitCount    int             `json:"canceled_wait_count"`
+	MaxObservedInFlight  int             `json:"max_observed_in_flight"`
+	WaitDuration         DurationSummary `json:"wait_duration"`
+	ExecutionDuration    DurationSummary `json:"execution_duration"`
+}
+
 type logEntry struct {
 	Event                string `json:"event"`
 	ModelName            string `json:"model_name"`
@@ -96,16 +112,21 @@ type logEntry struct {
 	GeneratedVectorCount *int   `json:"generated_vector_count"`
 	EvidenceCount        *int   `json:"evidence_count"`
 	ErrorCategory        string `json:"error_category"`
+	Outcome              string `json:"outcome"`
+	WaitDurationMS       *int64 `json:"wait_duration_ms"`
+	ExecutionDurationMS  *int64 `json:"execution_duration_ms"`
+	InFlight             *int   `json:"in_flight"`
+	MaxConcurrency       *int   `json:"max_concurrency"`
 }
 
 type durationAccumulator struct {
 	values []int64
 }
 
-// Summarize 扫描混合了 Gin 文本与 slog JSON 的日志，并只汇总模型终结事件。
+// Summarize 扫描混合了 Gin 文本与 slog JSON 的日志，并汇总模型终结事件与问答准入事件。
 //
 // 非 JSON 行会被计数后忽略；以 "{" 开头却无法解析的行会直接报错，避免悄悄丢失损坏的结构化日志。
-// started 事件只表示过程开始，为防止重复计数不会进入最终成本统计。
+// 模型 started 事件只表示过程开始，为防止重复计数不会进入最终成本统计。
 func Summarize(reader io.Reader, generatedAt time.Time) (Report, error) {
 	if reader == nil {
 		return Report{}, errors.New("baseline log reader must be provided")
@@ -115,6 +136,8 @@ func Summarize(reader io.Reader, generatedAt time.Time) (Report, error) {
 	var embeddingWorkerDurations durationAccumulator
 	var embeddingProviderDurations durationAccumulator
 	var generationProviderDurations durationAccumulator
+	var answerWaitDurations durationAccumulator
+	var answerExecutionDurations durationAccumulator
 
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), maximumLogLineBytes)
@@ -142,6 +165,8 @@ func Summarize(reader io.Reader, generatedAt time.Time) (Report, error) {
 			&embeddingWorkerDurations,
 			&embeddingProviderDurations,
 			&generationProviderDurations,
+			&answerWaitDurations,
+			&answerExecutionDurations,
 		)
 		if err != nil {
 			return Report{}, fmt.Errorf(
@@ -163,6 +188,8 @@ func Summarize(reader io.Reader, generatedAt time.Time) (Report, error) {
 	report.Embedding.WorkerDuration = embeddingWorkerDurations.summary()
 	report.Embedding.ProviderDuration = embeddingProviderDurations.summary()
 	report.Generation.ProviderDuration = generationProviderDurations.summary()
+	report.AnswerAdmission.WaitDuration = answerWaitDurations.summary()
+	report.AnswerAdmission.ExecutionDuration = answerExecutionDurations.summary()
 	if generationEventCount := mapValueTotal(report.Generation.Events); generationEventCount > 0 {
 		report.Generation.AverageEvidenceCount =
 			float64(report.Generation.EvidenceCountTotal) / float64(generationEventCount)
@@ -186,6 +213,10 @@ func newReport(generatedAt time.Time) Report {
 			ResponseLanguages: make(map[string]int),
 			ErrorCategories:   make(map[string]int),
 		},
+		AnswerAdmission: AnswerAdmissionSummary{
+			Events:   make(map[string]int),
+			Outcomes: make(map[string]int),
+		},
 	}
 }
 
@@ -195,6 +226,8 @@ func aggregateEntry(
 	embeddingWorkerDurations *durationAccumulator,
 	embeddingProviderDurations *durationAccumulator,
 	generationProviderDurations *durationAccumulator,
+	answerWaitDurations *durationAccumulator,
+	answerExecutionDurations *durationAccumulator,
 ) (bool, error) {
 	switch entry.Event {
 	case string(embeddingapplication.JobEventSucceeded),
@@ -216,9 +249,83 @@ func aggregateEntry(
 			entry,
 			generationProviderDurations,
 		)
+	case string(answerapplication.AnswerAdmissionEventAdmitted),
+		string(answerapplication.AnswerAdmissionEventRejected),
+		string(answerapplication.AnswerAdmissionEventReleased):
+		return true, aggregateAnswerAdmissionEntry(
+			&report.AnswerAdmission,
+			entry,
+			answerWaitDurations,
+			answerExecutionDurations,
+		)
 	default:
 		return false, nil
 	}
+}
+
+func aggregateAnswerAdmissionEntry(
+	summary *AnswerAdmissionSummary,
+	entry logEntry,
+	waitDurations *durationAccumulator,
+	executionDurations *durationAccumulator,
+) error {
+	if entry.WaitDurationMS == nil || *entry.WaitDurationMS < 0 {
+		return errors.New("answer admission event requires non-negative wait_duration_ms")
+	}
+	if entry.InFlight == nil || *entry.InFlight < 0 {
+		return errors.New("answer admission event requires non-negative in_flight")
+	}
+	if entry.MaxConcurrency == nil || *entry.MaxConcurrency <= 0 {
+		return errors.New("answer admission event requires positive max_concurrency")
+	}
+	if *entry.InFlight > *entry.MaxConcurrency {
+		return errors.New("answer admission in_flight must not exceed max_concurrency")
+	}
+
+	summary.Events[entry.Event]++
+	if *entry.InFlight > summary.MaxObservedInFlight {
+		summary.MaxObservedInFlight = *entry.InFlight
+	}
+
+	switch entry.Event {
+	case string(answerapplication.AnswerAdmissionEventAdmitted):
+		if *entry.InFlight == 0 {
+			return errors.New("admitted answer event requires positive in_flight")
+		}
+		if strings.TrimSpace(entry.Outcome) != "" {
+			return errors.New("admitted answer event must not have an outcome")
+		}
+		return nil
+
+	case string(answerapplication.AnswerAdmissionEventRejected):
+		if entry.Outcome != string(answerapplication.AnswerAdmissionOutcomeCapacityTimeout) &&
+			entry.Outcome != string(answerapplication.AnswerAdmissionOutcomeCanceled) {
+			return errors.New("rejected answer event has invalid outcome")
+		}
+		summary.Outcomes[entry.Outcome]++
+		waitDurations.add(*entry.WaitDurationMS)
+		if entry.Outcome == string(answerapplication.AnswerAdmissionOutcomeCapacityTimeout) {
+			summary.CapacityTimeoutCount++
+		} else {
+			summary.CanceledWaitCount++
+		}
+		return nil
+
+	case string(answerapplication.AnswerAdmissionEventReleased):
+		if entry.Outcome != string(answerapplication.AnswerAdmissionOutcomeSucceeded) &&
+			entry.Outcome != string(answerapplication.AnswerAdmissionOutcomeDownstreamError) {
+			return errors.New("released answer event has invalid outcome")
+		}
+		if entry.ExecutionDurationMS == nil || *entry.ExecutionDurationMS < 0 {
+			return errors.New("released answer event requires non-negative execution_duration_ms")
+		}
+		summary.Outcomes[entry.Outcome]++
+		waitDurations.add(*entry.WaitDurationMS)
+		executionDurations.add(*entry.ExecutionDurationMS)
+		return nil
+	}
+
+	return nil
 }
 
 func aggregateEmbeddingEntry(
