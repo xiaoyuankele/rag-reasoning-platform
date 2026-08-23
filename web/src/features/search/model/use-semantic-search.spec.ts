@@ -101,7 +101,11 @@ describe('useSemanticSearch', () => {
     searchSemanticallyMock.mockResolvedValueOnce(result)
     const firstScope = effectScope()
     const firstModel = firstScope.run(() =>
-      useSemanticSearch({ cacheOwnerUserId: 17, initialDocumentId: 7 }),
+      useSemanticSearch({
+        cacheOwnerUserId: 17,
+        initialDocumentId: 7,
+        shouldRetainResult: () => true,
+      }),
     )!
     await firstModel.search({ query: '问题', documentId: 7, topK: 5 })
     firstScope.stop()

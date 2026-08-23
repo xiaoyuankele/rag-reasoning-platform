@@ -15,6 +15,7 @@ export interface SemanticSearchOptions {
   cacheOwnerUserId?: number
   initialDocumentId?: number
   restoreCachedResult?: boolean
+  shouldRetainResult?: () => boolean
 }
 
 function semanticSearchErrorMessage(error: ApiError): string {
@@ -88,7 +89,7 @@ export function useSemanticSearch(options: SemanticSearchOptions = {}) {
 
       result.value = nextResult
       state.value = nextResult.hits.length === 0 ? 'empty' : 'success'
-      if (options.cacheOwnerUserId) {
+      if (options.cacheOwnerUserId && options.shouldRetainResult?.() === true) {
         writeCachedSemanticSearch(options.cacheOwnerUserId, params, nextResult)
       }
     } catch (error) {
@@ -110,6 +111,18 @@ export function useSemanticSearch(options: SemanticSearchOptions = {}) {
   async function retry(): Promise<void> {
     if (!lastParams || !canRetry.value) return
     await search(lastParams)
+  }
+
+  function retainCurrentResult(): void {
+    if (
+      !options.cacheOwnerUserId ||
+      !lastParams ||
+      !result.value ||
+      (state.value !== 'success' && state.value !== 'empty')
+    ) {
+      return
+    }
+    writeCachedSemanticSearch(options.cacheOwnerUserId, lastParams, result.value)
   }
 
   function reset(options: { preserveCapacity?: boolean } = {}): void {
@@ -142,6 +155,7 @@ export function useSemanticSearch(options: SemanticSearchOptions = {}) {
     requestId,
     reset,
     result,
+    retainCurrentResult,
     retry,
     retryAfterSeconds: retryCooldown.remainingSeconds,
     retryAvailable,

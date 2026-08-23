@@ -109,6 +109,7 @@ app → pages → features → entities → shared
 
 语义检索沿用相同的 `DocumentScope`，但只在 `/search?mode=semantic` 的显式提交中使用。问题正文和单次结果不写入 URL 或 Pinia；
 成功结果只在当前标签页 `sessionStorage` 中按公开用户 ID 和文档范围隔离，用于刷新恢复，不进入跨会话永久缓存。
+缓存默认关闭，用户开启时明确告知包含返回文本片段；缓存具有 30 分钟 TTL，并随退出、401 会话失效和密码重置清除。
 `features/search` 内的 semantic API、composable 与 UI 独立于关键词分页状态，也独立于问答来源 DTO。
 语义请求使用 30 秒超时，并复用共享容量错误与手动重试冷却；模式切换只负责页面组合，不会让两个检索流程互相自动触发。
 具体边界见 [F4 语义检索前端交接](f4-semantic-search-handoff.md)。
@@ -215,7 +216,7 @@ Element Plus 只用于弹窗、分页、选择器、消息等行为成熟的组�
 ```
 
 - Vite 负责转换和构建，类型检查必须由 `vue-tsc` 单独执行；
-- Vitest 验证状态转换、错误转换和纯逻辑；当前 37 个测试文件、145 个测试通过；
+- Vitest 验证状态转换、错误转换和纯逻辑；当前 38 个测试文件、151 个测试通过；
 - Vue Test Utils 验证组件渲染和用户交互；
 - Playwright 在 F5 验证上传、处理、搜索和问答主流程；
 - 测试优先断言用户可观察结果，不依赖组件内部实现细节。

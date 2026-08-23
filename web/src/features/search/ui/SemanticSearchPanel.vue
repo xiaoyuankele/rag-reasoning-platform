@@ -5,6 +5,7 @@ import {
   type DocumentScope,
 } from '../../../entities/document/model/document-scope'
 import { useSemanticSearch } from '../model/use-semantic-search'
+import { clearCachedSemanticSearch } from '../model/semantic-search-cache'
 import SemanticSearchResultCard from './SemanticSearchResultCard.vue'
 
 const props = defineProps<{
@@ -16,6 +17,7 @@ const props = defineProps<{
 const queryInput = ref('')
 const topK = ref(5)
 const formError = ref('')
+const retainResultInTab = ref(false)
 const {
   canRetry,
   capacityFailure,
@@ -26,6 +28,7 @@ const {
   requestId,
   reset,
   result,
+  retainCurrentResult,
   retry,
   retryAfterSeconds,
   retryAvailable,
@@ -36,9 +39,11 @@ const {
   cacheOwnerUserId: props.cacheOwnerUserId,
   initialDocumentId: documentIdFromScope(props.scope),
   restoreCachedResult: props.scopeIsValid,
+  shouldRetainResult: () => retainResultInTab.value,
 })
 
 if (restoredParams) {
+  retainResultInTab.value = true
   queryInput.value = restoredParams.query
   topK.value = restoredParams.topK
 }
@@ -59,6 +64,14 @@ const scopeKey = computed(() =>
 watch(scopeKey, () => {
   formError.value = ''
   reset({ preserveCapacity: true })
+})
+
+watch(retainResultInTab, (shouldRetain) => {
+  if (shouldRetain) {
+    retainCurrentResult()
+  } else {
+    clearCachedSemanticSearch(props.cacheOwnerUserId)
+  }
 })
 
 function validateQuery(): string | null {
@@ -142,6 +155,17 @@ function submitSearch(): void {
         <strong>本操作会调用远程 Embedding 模型</strong>
         <span>只有点击检索按钮才会发送请求；输入、切换范围和打开页面都不会产生模型调用。</span>
       </div>
+
+      <label class="retention-option">
+        <input v-model="retainResultInTab" type="checkbox" />
+        <span>
+          <strong>在当前标签页保留最近结果</strong>
+          <small>
+            默认关闭；开启后，本次结果（含返回的文本片段）可刷新恢复，30
+            分钟后或退出登录时自动清除。
+          </small>
+        </span>
+      </label>
     </form>
 
     <div v-if="state === 'idle'" class="state-card state-card--quiet">
@@ -336,6 +360,39 @@ function submitSearch(): void {
 
 .cost-notice strong {
   color: var(--color-text-strong);
+}
+
+.retention-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.retention-option input {
+  width: auto;
+  height: auto;
+  margin-top: 3px;
+  accent-color: var(--color-accent);
+}
+
+.retention-option span {
+  display: grid;
+  gap: 2px;
+}
+
+.retention-option strong {
+  color: var(--color-text-strong);
+  font-size: 12px;
+}
+
+.retention-option small {
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  line-height: 1.5;
 }
 
 .state-card {

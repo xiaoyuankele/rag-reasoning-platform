@@ -60,6 +60,12 @@ describe('SemanticSearchPanel', () => {
     expect(wrapper.text()).toContain('Maglev stability study')
     expect(wrapper.text()).toContain('第 3–4 页')
     expect(wrapper.text()).toContain('相似度 91%')
+    expect(sessionStorage.length).toBe(0)
+
+    await wrapper.get('.retention-option input').setValue(true)
+    expect(sessionStorage.length).toBe(1)
+    await wrapper.get('.retention-option input').setValue(false)
+    expect(sessionStorage.length).toBe(0)
     wrapper.unmount()
   })
 
@@ -119,6 +125,7 @@ describe('SemanticSearchPanel', () => {
   it('刷新恢复同一用户和范围的最后结果，不会再次调用远程模型', async () => {
     searchSemanticallyMock.mockResolvedValueOnce(result)
     const firstWrapper = mountPanel()
+    await firstWrapper.get('.retention-option input').setValue(true)
     await firstWrapper.get('#semantic-query').setValue('如何提高悬浮稳定性？')
     await firstWrapper.get('select').setValue('10')
     await firstWrapper.get('form').trigger('submit')
@@ -135,6 +142,10 @@ describe('SemanticSearchPanel', () => {
     )
     expect(restoredWrapper.get('select').element).toHaveProperty('value', '10')
     expect(restoredWrapper.text()).toContain('Maglev stability study')
+    expect(restoredWrapper.get('.retention-option input').element).toHaveProperty('checked', true)
+
+    await restoredWrapper.get('.retention-option input').setValue(false)
+    expect(sessionStorage.length).toBe(0)
     restoredWrapper.unmount()
   })
 })

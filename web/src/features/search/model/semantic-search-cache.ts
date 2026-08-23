@@ -2,9 +2,12 @@ import type {
   SemanticSearchHit,
   SemanticSearchResult,
 } from '../../../entities/search-result/model/search-result'
+import { privateSessionStorageKey } from '../../../shared/storage/private-session-storage'
 import type { SemanticSearchParams } from '../api/search-semantically'
 
-const cacheVersion = 1
+const cacheVersion = 2
+const semanticCacheName = `semantic-search:last-result:v${cacheVersion}`
+const semanticCacheLifetimeMs = 30 * 60 * 1_000
 const legacyCacheKeys = [
   'rag-workspace:keyword-search:last-result',
   'rag-workspace:semantic-search:last-result',
@@ -13,6 +16,8 @@ const legacyCacheKeys = [
 interface CachedSemanticSearchEntry {
   version: typeof cacheVersion
   ownerUserId: number
+  retainedWithUserConsent: true
+  expiresAt: number
   params: {
     query: string
     documentId: number | null
@@ -33,10 +38,20 @@ export function removeLegacySearchCaches(): void {
   } catch {
     // 存储不可用时不阻塞检索页面。
   }
+
+  try {
+    const legacySessionKey = /^rag-workspace:user:\d+:semantic-search:last-result:v1$/u
+    const keys = Array.from({ length: sessionStorage.length }, (_, index) =>
+      sessionStorage.key(index),
+    ).filter((key): key is string => key !== null && legacySessionKey.test(key))
+    for (const key of keys) sessionStorage.removeItem(key)
+  } catch {
+    // 存储不可用时不阻塞检索页面。
+  }
 }
 
 function cacheKey(ownerUserId: number): string {
-  return `rag-workspace:user:${ownerUserId}:semantic-search:last-result:v${cacheVersion}`
+  return privateSessionStorageKey(ownerUserId, semanticCacheName)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -90,6 +105,9 @@ function isCachedSemanticSearchEntry(value: unknown): value is CachedSemanticSea
   return (
     value.version === cacheVersion &&
     isInteger(value.ownerUserId, 1) &&
+    value.retainedWithUserConsent === true &&
+    typeof value.expiresAt === 'number' &&
+    Number.isFinite(value.expiresAt) &&
     typeof value.params.query === 'string' &&
     value.params.query.trim().length > 0 &&
     [...value.params.query].length <= 1_000 &&
@@ -120,6 +138,10 @@ export function readCachedSemanticSearch(
       sessionStorage.removeItem(key)
       return null
     }
+    if (cached.expiresAt <= Date.now()) {
+      sessionStorage.removeItem(key)
+      return null
+    }
     if (cached.ownerUserId !== ownerUserId || cached.params.documentId !== (documentId ?? null)) {
       return null
     }
@@ -137,6 +159,16 @@ export function readCachedSemanticSearch(
   }
 }
 
+/** 用户关闭保留选项时立即删除自己的语义结果缓存。 */
+export function clearCachedSemanticSearch(ownerUserId: number): void {
+  if (!isInteger(ownerUserId, 1)) return
+  try {
+    sessionStorage.removeItem(cacheKey(ownerUserId))
+  } catch {
+    // 存储不可用时不阻塞页面状态。
+  }
+}
+
 /** 保存当前用户当前标签页的最后一次成功语义检索；存储失败不影响主流程。 */
 export function writeCachedSemanticSearch(
   ownerUserId: number,
@@ -148,6 +180,8 @@ export function writeCachedSemanticSearch(
   const entry: CachedSemanticSearchEntry = {
     version: cacheVersion,
     ownerUserId,
+    retainedWithUserConsent: true,
+    expiresAt: Date.now() + semanticCacheLifetimeMs,
     params: {
       query: params.query,
       documentId: params.documentId ?? null,
