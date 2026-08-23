@@ -4,6 +4,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // TestLoadDatabaseUsesDefaults 验证只提供密码时使用其他默认值。
@@ -14,6 +16,7 @@ func TestLoadDatabaseUsesDefaults(t *testing.T) {
 	t.Setenv("DB_USER", "")
 	t.Setenv("DB_PASSWORD", "test_password")
 	t.Setenv("DB_SSLMODE", "")
+	t.Setenv("DB_MAX_CONNECTIONS", "")
 
 	databaseConfig, err := LoadDatabase()
 	if err != nil {
@@ -21,12 +24,13 @@ func TestLoadDatabaseUsesDefaults(t *testing.T) {
 	}
 
 	expected := DatabaseConfig{
-		Host:     defaultDBHost,
-		Port:     defaultDBPort,
-		Name:     defaultDBName,
-		User:     defaultDBUser,
-		Password: "test_password",
-		SSLMode:  defaultDBSSLMode,
+		Host:           defaultDBHost,
+		Port:           defaultDBPort,
+		Name:           defaultDBName,
+		User:           defaultDBUser,
+		Password:       "test_password",
+		SSLMode:        defaultDBSSLMode,
+		MaxConnections: defaultDBMaxConnections,
 	}
 
 	// DatabaseConfig 的所有字段都可以比较，因此两个结构体可以直接使用 !=。
@@ -43,6 +47,7 @@ func TestLoadDatabaseUsesEnvironment(t *testing.T) {
 	t.Setenv("DB_USER", "custom_user")
 	t.Setenv("DB_PASSWORD", "custom_password")
 	t.Setenv("DB_SSLMODE", "require")
+	t.Setenv("DB_MAX_CONNECTIONS", "20")
 
 	databaseConfig, err := LoadDatabase()
 	if err != nil {
@@ -50,12 +55,13 @@ func TestLoadDatabaseUsesEnvironment(t *testing.T) {
 	}
 
 	expected := DatabaseConfig{
-		Host:     "database.example",
-		Port:     5544,
-		Name:     "custom_database",
-		User:     "custom_user",
-		Password: "custom_password",
-		SSLMode:  "require",
+		Host:           "database.example",
+		Port:           5544,
+		Name:           "custom_database",
+		User:           "custom_user",
+		Password:       "custom_password",
+		SSLMode:        "require",
+		MaxConnections: 20,
 	}
 
 	if databaseConfig != expected {
@@ -109,18 +115,47 @@ func TestLoadDatabaseRejectsInvalidPort(t *testing.T) {
 	}
 }
 
+// TestLoadDatabaseRejectsInvalidMaxConnections 验证连接池上限必须是受控正整数。
+func TestLoadDatabaseRejectsInvalidMaxConnections(t *testing.T) {
+	testCases := []struct {
+		name  string
+		value string
+	}{
+		{name: "non-numeric value", value: "many"},
+		{name: "zero", value: "0"},
+		{name: "above maximum", value: "101"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("DB_PORT", "")
+			t.Setenv("DB_PASSWORD", "test_password")
+			t.Setenv("DB_MAX_CONNECTIONS", testCase.value)
+
+			_, err := LoadDatabase()
+			if err == nil {
+				t.Fatalf(
+					"expected an error for DB_MAX_CONNECTIONS %q",
+					testCase.value,
+				)
+			}
+		})
+	}
+}
+
 // TestDatabaseConfigConnectionString 验证标准数据库配置生成正确地址。
 func TestDatabaseConfigConnectionString(t *testing.T) {
 	databaseConfig := DatabaseConfig{
-		Host:     "localhost",
-		Port:     5433,
-		Name:     "rag_platform",
-		User:     "rag_user",
-		Password: "test_password",
-		SSLMode:  "disable",
+		Host:           "localhost",
+		Port:           5433,
+		Name:           "rag_platform",
+		User:           "rag_user",
+		Password:       "test_password",
+		SSLMode:        "disable",
+		MaxConnections: 10,
 	}
 
-	expected := "postgres://rag_user:test_password@localhost:5433/rag_platform?sslmode=disable"
+	expected := "postgres://rag_user:test_password@localhost:5433/rag_platform?pool_max_conns=10&sslmode=disable"
 	actual := databaseConfig.ConnectionString()
 
 	if actual != expected {
@@ -132,12 +167,13 @@ func TestDatabaseConfigConnectionString(t *testing.T) {
 // 并且可以正确还原。
 func TestDatabaseConfigConnectionStringEscapesPassword(t *testing.T) {
 	databaseConfig := DatabaseConfig{
-		Host:     "localhost",
-		Port:     5433,
-		Name:     "rag_platform",
-		User:     "rag_user",
-		Password: "p@ss:word/with?symbols",
-		SSLMode:  "disable",
+		Host:           "localhost",
+		Port:           5433,
+		Name:           "rag_platform",
+		User:           "rag_user",
+		Password:       "p@ss:word/with?symbols",
+		SSLMode:        "disable",
+		MaxConnections: 10,
 	}
 
 	connectionString := databaseConfig.ConnectionString()
@@ -165,5 +201,27 @@ func TestDatabaseConfigConnectionStringEscapesPassword(t *testing.T) {
 			databaseConfig.Password,
 			decodedPassword,
 		)
+	}
+}
+
+// TestDatabaseConfigConnectionStringConfiguresPGXPool 验证生成的参数会被
+// pgxpool.ParseConfig 识别，而不只是出现在 URL 文本中。
+func TestDatabaseConfigConnectionStringConfiguresPGXPool(t *testing.T) {
+	databaseConfig := DatabaseConfig{
+		Host:           "localhost",
+		Port:           5433,
+		Name:           "rag_platform",
+		User:           "rag_user",
+		Password:       "test_password",
+		SSLMode:        "disable",
+		MaxConnections: 17,
+	}
+
+	poolConfig, err := pgxpool.ParseConfig(databaseConfig.ConnectionString())
+	if err != nil {
+		t.Fatalf("parse pgxpool configuration: %v", err)
+	}
+	if poolConfig.MaxConns != 17 {
+		t.Fatalf("MaxConns = %d, want 17", poolConfig.MaxConns)
 	}
 }

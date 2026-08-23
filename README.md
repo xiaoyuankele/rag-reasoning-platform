@@ -371,6 +371,7 @@ Go 后端当前支持以下环境变量：
 | `DB_USER` | `rag_user` | 数据库用户 |
 | `DB_PASSWORD` | 无 | 本机私有密码，必须在 `.env` 中设置 |
 | `DB_SSLMODE` | `disable` | 本地开发时的 PostgreSQL SSL 模式 |
+| `DB_MAX_CONNECTIONS` | `10` | 单个 Go 后端实例的 PostgreSQL 连接池上限；多实例时应按实例数合计 |
 | `VERIFICATION_HMAC_SECRET` | 无 | 验证码 HMAC 服务端密钥，至少 32 字节，必须保存在本机 `.env` |
 | `VERIFICATION_SENDER` | `fake` | 验证码发送实现；`fake` 仅供自动化测试，`mailpit` 用于本地人工邮件联调 |
 | `VERIFICATION_SMTP_HOST` | `127.0.0.1` | 直接运行 Go 后端时连接 Mailpit 的 SMTP 主机 |

@@ -32,6 +32,7 @@ services:
       DB_USER: ${DB_USER:-rag_user}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
       DB_SSLMODE: ${DB_SSLMODE:-disable}
+      DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-10}
 
       # P6 验证码接口默认使用零费用 Fake Sender，但 HMAC 密钥仍必须显式配置。
       VERIFICATION_HMAC_SECRET: ${VERIFICATION_HMAC_SECRET:-}

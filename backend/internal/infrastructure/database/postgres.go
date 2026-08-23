@@ -16,9 +16,6 @@ const (
 	// pingTimeout 限制启动时数据库健康检查的最长等待时间。
 	pingTimeout = 5 * time.Second
 
-	// maxConnections 限制连接池最多创建 5 条数据库连接。
-	maxConnections int32 = 5
-
 	// maxConnectionIdleTime 表示连接空闲超过 5 分钟后可以被关闭。
 	maxConnectionIdleTime = 5 * time.Minute
 )
@@ -36,8 +33,8 @@ func Open(
 		return nil, fmt.Errorf("parse PostgreSQL configuration: %w", err)
 	}
 
-	// 限制连接数量，减少本机数据库和 Go 服务的资源占用。
-	poolConfig.MaxConns = maxConnections
+	// MaxConns 已由配置层通过连接字符串中的 pool_max_conns 提供。
+	// 这里不再用基础设施常量覆盖它，使不同部署环境可以独立调优。
 	poolConfig.MinConns = 0
 	poolConfig.MaxConnIdleTime = maxConnectionIdleTime
 	poolConfig.AfterConnect = RegisterVectorTypesWhenAvailable
