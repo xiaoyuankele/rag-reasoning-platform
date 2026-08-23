@@ -58,6 +58,11 @@
 20. [100 人在线并发前端交接](architecture/100-user-concurrency-handoff.md)；
 21. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
 
+## 安全与问题追溯
+
+- [SECURITY-F4-001：检索结果缓存缺少用户隔离](incidents/SECURITY-F4-001-search-result-cache-isolation.md)：记录不安全本地缓存的
+  时间线、影响边界、根因、永久修复、验证证据和以后新增浏览器存储时的强制检查清单。
+
 ## 文档边界
 
 - 本目录只记录已经确认、需要长期可信的前端架构与开发路线；
