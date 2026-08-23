@@ -1,15 +1,25 @@
 package config
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func clearUploadCapacityEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("UPLOAD_MAX_CONCURRENCY_PER_USER", "")
+	t.Setenv("UPLOAD_MAX_CONCURRENCY_GLOBAL", "")
+	t.Setenv("UPLOAD_QUEUE_WAIT_TIMEOUT", "")
+}
 
 // TestLoadStorageUsesDefaults 验证没有设置环境变量时使用项目默认值。
 func TestLoadStorageUsesDefaults(t *testing.T) {
 	appRoot := t.TempDir()
 	t.Setenv("STORAGE_ROOT", "")
 	t.Setenv("STORAGE_MAX_FILE_SIZE_BYTES", "")
+	clearUploadCapacityEnvironment(t)
 
 	storageConfig, err := LoadStorage(appRoot)
 	if err != nil {
@@ -17,8 +27,11 @@ func TestLoadStorageUsesDefaults(t *testing.T) {
 	}
 
 	expected := StorageConfig{
-		RootDir:          filepath.Join(appRoot, "storage"),
-		MaxFileSizeBytes: 200 * 1024 * 1024,
+		RootDir:                     filepath.Join(appRoot, "storage"),
+		MaxFileSizeBytes:            200 * 1024 * 1024,
+		UploadMaxConcurrencyPerUser: defaultUploadMaxConcurrencyPerUser,
+		UploadMaxConcurrencyGlobal:  defaultUploadMaxConcurrencyGlobal,
+		UploadQueueWaitTimeout:      defaultUploadQueueWaitTimeout,
 	}
 
 	if storageConfig != expected {
@@ -35,6 +48,9 @@ func TestLoadStorageUsesEnvironment(t *testing.T) {
 	appRoot := t.TempDir()
 	t.Setenv("STORAGE_ROOT", "custom-storage")
 	t.Setenv("STORAGE_MAX_FILE_SIZE_BYTES", "1048576")
+	t.Setenv("UPLOAD_MAX_CONCURRENCY_PER_USER", "2")
+	t.Setenv("UPLOAD_MAX_CONCURRENCY_GLOBAL", "8")
+	t.Setenv("UPLOAD_QUEUE_WAIT_TIMEOUT", "750ms")
 
 	storageConfig, err := LoadStorage(appRoot)
 	if err != nil {
@@ -42,8 +58,11 @@ func TestLoadStorageUsesEnvironment(t *testing.T) {
 	}
 
 	expected := StorageConfig{
-		RootDir:          filepath.Join(appRoot, "custom-storage"),
-		MaxFileSizeBytes: 1048576,
+		RootDir:                     filepath.Join(appRoot, "custom-storage"),
+		MaxFileSizeBytes:            1048576,
+		UploadMaxConcurrencyPerUser: 2,
+		UploadMaxConcurrencyGlobal:  8,
+		UploadQueueWaitTimeout:      750 * time.Millisecond,
 	}
 
 	if storageConfig != expected {
@@ -71,6 +90,7 @@ func TestLoadStorageRejectsInvalidMaximumSize(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("STORAGE_ROOT", "")
 			t.Setenv("STORAGE_MAX_FILE_SIZE_BYTES", test.value)
+			clearUploadCapacityEnvironment(t)
 
 			_, err := LoadStorage(t.TempDir())
 			if err == nil {
@@ -87,6 +107,7 @@ func TestLoadStorageRejectsInvalidMaximumSize(t *testing.T) {
 func TestLoadStorageRejectsBlankRoot(t *testing.T) {
 	t.Setenv("STORAGE_ROOT", "   ")
 	t.Setenv("STORAGE_MAX_FILE_SIZE_BYTES", "")
+	clearUploadCapacityEnvironment(t)
 
 	_, err := LoadStorage(t.TempDir())
 	if err == nil {
@@ -100,6 +121,7 @@ func TestLoadStoragePreservesAbsoluteRoot(t *testing.T) {
 	absoluteStorageRoot := t.TempDir()
 	t.Setenv("STORAGE_ROOT", absoluteStorageRoot)
 	t.Setenv("STORAGE_MAX_FILE_SIZE_BYTES", "")
+	clearUploadCapacityEnvironment(t)
 
 	storageConfig, err := LoadStorage(appRoot)
 	if err != nil {
@@ -110,6 +132,58 @@ func TestLoadStoragePreservesAbsoluteRoot(t *testing.T) {
 			"RootDir = %q, want %q",
 			storageConfig.RootDir,
 			filepath.Clean(absoluteStorageRoot),
+		)
+	}
+}
+
+func TestLoadStorageRejectsInvalidUploadCapacityValues(t *testing.T) {
+	testCases := []struct {
+		name        string
+		environment string
+		value       string
+	}{
+		{name: "non-numeric per-user concurrency", environment: "UPLOAD_MAX_CONCURRENCY_PER_USER", value: "one"},
+		{name: "zero per-user concurrency", environment: "UPLOAD_MAX_CONCURRENCY_PER_USER", value: "0"},
+		{name: "per-user concurrency above maximum", environment: "UPLOAD_MAX_CONCURRENCY_PER_USER", value: "65"},
+		{name: "non-numeric global concurrency", environment: "UPLOAD_MAX_CONCURRENCY_GLOBAL", value: "four"},
+		{name: "zero global concurrency", environment: "UPLOAD_MAX_CONCURRENCY_GLOBAL", value: "0"},
+		{name: "global concurrency above maximum", environment: "UPLOAD_MAX_CONCURRENCY_GLOBAL", value: "65"},
+		{name: "invalid wait timeout", environment: "UPLOAD_QUEUE_WAIT_TIMEOUT", value: "soon"},
+		{name: "zero wait timeout", environment: "UPLOAD_QUEUE_WAIT_TIMEOUT", value: "0s"},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("STORAGE_ROOT", "")
+			t.Setenv("STORAGE_MAX_FILE_SIZE_BYTES", "")
+			t.Setenv("UPLOAD_MAX_CONCURRENCY_PER_USER", "1")
+			t.Setenv("UPLOAD_MAX_CONCURRENCY_GLOBAL", "4")
+			t.Setenv("UPLOAD_QUEUE_WAIT_TIMEOUT", "2s")
+			t.Setenv(testCase.environment, testCase.value)
+
+			if _, err := LoadStorage(t.TempDir()); err == nil {
+				t.Fatalf(
+					"LoadStorage() error = nil for %s=%q",
+					testCase.environment,
+					testCase.value,
+				)
+			}
+		})
+	}
+}
+
+func TestLoadStorageRejectsGlobalUploadConcurrencyBelowPerUser(t *testing.T) {
+	t.Setenv("STORAGE_ROOT", "")
+	t.Setenv("STORAGE_MAX_FILE_SIZE_BYTES", "")
+	t.Setenv("UPLOAD_MAX_CONCURRENCY_PER_USER", "3")
+	t.Setenv("UPLOAD_MAX_CONCURRENCY_GLOBAL", "2")
+	t.Setenv("UPLOAD_QUEUE_WAIT_TIMEOUT", "2s")
+
+	_, err := LoadStorage(t.TempDir())
+	if !errors.Is(err, ErrInvalidUploadConcurrencyLimits) {
+		t.Fatalf(
+			"LoadStorage() error = %v, want ErrInvalidUploadConcurrencyLimits",
+			err,
 		)
 	}
 }

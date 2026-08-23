@@ -20,6 +20,7 @@ import (
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
 	verificationapplication "rag-reasoning-platform/backend/internal/application/verification"
 	"rag-reasoning-platform/backend/internal/config"
+	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
@@ -184,7 +185,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentRepository := postgres.NewDocumentRepository(databasePool)
 	scopedDocumentRepository := postgres.NewScopedDocumentRepository(databasePool)
 	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
-	scopedProcessingJobRepository := postgres.NewScopedProcessingJobRepository(databasePool)
+	scopedProcessingJobRepository := postgres.NewScopedProcessingJobRepository(
+		databasePool,
+		documentdomain.ProcessingJobAdmissionLimits{
+			MaxActiveJobsPerOwner: workerConfig.ActiveJobsPerUserLimit,
+			MaxActiveJobsGlobal:   workerConfig.ActiveJobsGlobalLimit,
+		},
+	)
 	embeddingJobRepository := postgres.NewEmbeddingJobRepository(databasePool)
 	scopedEmbeddingJobRepository := postgres.NewScopedEmbeddingJobRepository(
 		databasePool,
@@ -321,7 +328,30 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// Service 负责文档查询用例和业务参数校验。
 	documentService := documentapplication.NewService(scopedDocumentRepository)
-	documentUploadService := documentapplication.NewUploadService(scopedDocumentRepository, localFileStorage)
+	baseDocumentUploadService := documentapplication.NewUploadService(
+		scopedDocumentRepository,
+		localFileStorage,
+	)
+	documentUploadService, err := documentapplication.NewConcurrentUploadService(
+		baseDocumentUploadService,
+		observability.NewUploadAdmissionLogger(logger),
+		storageConfig.UploadMaxConcurrencyPerUser,
+		storageConfig.UploadMaxConcurrencyGlobal,
+		storageConfig.UploadQueueWaitTimeout,
+	)
+	if err != nil {
+		return fmt.Errorf("create upload concurrency service: %w", err)
+	}
+	logger.Info(
+		"Upload concurrency configured",
+		"event", "upload_concurrency_configured",
+		"owner_max_concurrency",
+		storageConfig.UploadMaxConcurrencyPerUser,
+		"global_max_concurrency",
+		storageConfig.UploadMaxConcurrencyGlobal,
+		"queue_wait_timeout_ms",
+		storageConfig.UploadQueueWaitTimeout.Milliseconds(),
+	)
 	documentPreflightService := documentapplication.NewPreflightService(
 		scopedDocumentRepository,
 		storageConfig.MaxFileSizeBytes,

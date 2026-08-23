@@ -130,7 +130,13 @@ func TestProcessingOwnerHTTPWithPostgreSQL(t *testing.T) {
 		t.Fatalf("create session service: %v", err)
 	}
 
-	scopedJobs := postgresrepository.NewScopedProcessingJobRepository(pool)
+	scopedJobs := postgresrepository.NewScopedProcessingJobRepository(
+		pool,
+		documentdomain.ProcessingJobAdmissionLimits{
+			MaxActiveJobsPerOwner: 100,
+			MaxActiveJobsGlobal:   500,
+		},
+	)
 	scopedChunks := postgresrepository.NewScopedChunkRepository(pool)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	gin.SetMode(gin.TestMode)

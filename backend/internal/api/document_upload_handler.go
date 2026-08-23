@@ -130,6 +130,28 @@ func (h *DocumentUploadHandler) Upload(c *gin.Context) {
 			var maxBytesError *http.MaxBytesError
 
 			switch {
+			case errors.Is(
+				err,
+				applicationdocument.ErrUploadOwnerCapacityExhausted,
+			):
+				c.Header("Retry-After", "2")
+				writeErrorResponse(
+					c,
+					http.StatusTooManyRequests,
+					errorCodeUploadOwnerCapacity,
+					"another upload is already in progress for this user",
+				)
+			case errors.Is(
+				err,
+				applicationdocument.ErrUploadGlobalCapacityExhausted,
+			):
+				c.Header("Retry-After", "2")
+				writeErrorResponse(
+					c,
+					http.StatusServiceUnavailable,
+					errorCodeUploadGlobalCapacity,
+					"upload service is busy; try again later",
+				)
 			case errors.As(err, &maxBytesError):
 				c.JSON(http.StatusRequestEntityTooLarge, errorResponse{
 					Error: "request body exceeds maximum allowed size",

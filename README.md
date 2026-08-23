@@ -227,6 +227,8 @@ Worker Application 已定义可替换的文档处理器端口，并实现单次�
 
 固定大小 Worker Pool 已经实现连续领取、空队列等待、错误上报和 context 取消；默认并发为 1，可通过 `DOCUMENT_WORKER_CONCURRENCY` 配置为 1～4。Python Process Pool 也已实现固定槽位租借、进程复用、单进程处理数量上限、超时杀进程、崩溃替换、输出边界和 shutdown；默认仍使用 `oneshot`，显式配置 `pool` 后才启用。两个不同任务的 PostgreSQL 收尾、两个一次性 Python 子进程以及两个常驻 Python 槽位均已完成并发验收。HTTP 服务使用标准库 `http.Server` 响应退出信号和执行限时优雅关闭；真实 HTTP、PostgreSQL 与本地文件链路已经验证 Markdown 文档能够自动处理为统一文本块。Worker 使用独立子 context 限制单份文档的处理时间，默认超时为 5 分钟，并在超时后使用仍有效的父 context 将任务安全标记为失败。
 
+文档解析任务入队已经增加 PostgreSQL 原子背压：默认每个用户最多保留 5 条 `queued/processing` 任务，全系统最多 40 条；并发请求通过文档行锁和短事务 advisory lock 竞争容量，不会突破最后一个名额。用户满额返回 `429`，全局满额返回 `503`，成功或失败的历史任务不占用名额。
+
 服务启动时会在 Worker 运行前恢复上一次异常退出遗留的 `processing` 任务，并在同一 PostgreSQL 事务内把任务和关联文档标记为 `failed`。真实启动测试已验证恢复数量、双表状态一致性、安全错误信息和第二次启动的幂等性。当前恢复策略建立在单实例 Worker 约束上；未来扩展为多实例时需要使用 lease/heartbeat 判断任务是否真正失联。
 
 `ProcessorDispatcher` 已作为统一处理器入口接入 Worker，根据数据库中的可信 MIME 类型选择具体实现。`text/markdown` 和 `text/plain` 路由到 Go `TextProcessor`，`application/pdf` 路由到生产 `PythonProcessor`；尚未注册的格式会返回可判断的错误，而不会误用其他处理器。未来增加 DOCX、OCR 或替换 PDF 解析器时，可以继续添加或替换适配器，Worker 的任务领取、超时、文本块保存和状态收尾流程不需要修改。
@@ -394,9 +396,14 @@ Go 后端当前支持以下环境变量：
 | `STORAGE_ROOT` | `storage` | 本地文档存储根目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `STORAGE_HOST_PATH` | `./storage` | Compose 挂载的宿主机文件目录；恢复验收后可无覆盖切换到新目录 |
 | `STORAGE_MAX_FILE_SIZE_BYTES` | `209715200` | 单个上传文件允许的最大字节数，即 200 MiB |
+| `UPLOAD_MAX_CONCURRENCY_PER_USER` | `2` | 单个用户同时执行的完整上传链路上限 |
+| `UPLOAD_MAX_CONCURRENCY_GLOBAL` | `16` | 单个后端实例同时执行的完整上传链路上限，不能小于单用户值 |
+| `UPLOAD_QUEUE_WAIT_TIMEOUT` | `2s` | 上传请求等待单用户和全局槽位的最长时间 |
 | `WORKER_POLL_INTERVAL` | `2s` | 文档 Worker 在空队列或单轮错误后的轮询间隔 |
 | `WORKER_PROCESSING_TIMEOUT` | `5m` | 单份文档从处理器调用到任务收尾的最大时间 |
 | `DOCUMENT_WORKER_CONCURRENCY` | `1` | 同一实例的文档 Worker 数，允许 1～4；默认 1 可安全降级 |
+| `PROCESSING_MAX_ACTIVE_JOBS_PER_USER` | `5` | 单个用户允许的 queued/processing 文档解析任务总数 |
+| `PROCESSING_MAX_ACTIVE_JOBS_GLOBAL` | `40` | 全系统允许的活动文档解析任务总数，不能小于单用户上限 |
 | `PYTHON_EXECUTABLE` | `python` | Go 启动复杂文档处理子进程时使用的 Python 可执行程序 |
 | `PYTHON_SOURCE_ROOT` | `ai/src` | 包含 `rag_ai` 包的 Python 源码目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `PYTHON_PDF_MAX_FILE_SIZE_BYTES` | `52428800` | PDF 解析文件上限，即 50 MiB；独立于上传上限 |

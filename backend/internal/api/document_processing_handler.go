@@ -122,6 +122,31 @@ func (h *DocumentProcessingHandler) Queue(c *gin.Context) {
 		return
 	}
 
+	if errors.Is(
+		err,
+		documentdomain.ErrOwnerActiveProcessingJobLimitExceeded,
+	) {
+		c.Header("Retry-After", "5")
+		writeErrorResponse(
+			c,
+			http.StatusTooManyRequests,
+			errorCodeProcessingOwnerJobLimit,
+			"too many active processing jobs for this user",
+		)
+		return
+	}
+
+	if errors.Is(err, documentdomain.ErrGlobalProcessingJobLimitExceeded) {
+		c.Header("Retry-After", "5")
+		writeErrorResponse(
+			c,
+			http.StatusServiceUnavailable,
+			errorCodeProcessingQueueCapacity,
+			"processing queue is temporarily full",
+		)
+		return
+	}
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errorResponse{
 			Error: "internal server error",

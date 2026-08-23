@@ -171,6 +171,79 @@ func TestDocumentProcessingHandlerMapsServiceErrors(t *testing.T) {
 	}
 }
 
+func TestDocumentProcessingHandlerMapsAdmissionErrors(t *testing.T) {
+	testCases := []struct {
+		name       string
+		serviceErr error
+		statusCode int
+		code       string
+		message    string
+	}{
+		{
+			name: "owner limit",
+			serviceErr: documentdomain.
+				ErrOwnerActiveProcessingJobLimitExceeded,
+			statusCode: http.StatusTooManyRequests,
+			code:       errorCodeProcessingOwnerJobLimit,
+			message:    "too many active processing jobs for this user",
+		},
+		{
+			name:       "global capacity",
+			serviceErr: documentdomain.ErrGlobalProcessingJobLimitExceeded,
+			statusCode: http.StatusServiceUnavailable,
+			code:       errorCodeProcessingQueueCapacity,
+			message:    "processing queue is temporarily full",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &fakeDocumentProcessingQueueService{
+				queueFunc: func(
+					context.Context,
+					accessdomain.OwnerScope,
+					int64,
+				) (documentdomain.ProcessingJob, error) {
+					return documentdomain.ProcessingJob{}, testCase.serviceErr
+				},
+			}
+			response := httptest.NewRecorder()
+			newTestDocumentProcessingRouter(service).ServeHTTP(
+				response,
+				httptest.NewRequest(
+					http.MethodPost,
+					"/documents/7/process",
+					nil,
+				),
+			)
+
+			if response.Code != testCase.statusCode {
+				t.Fatalf(
+					"status = %d, want %d",
+					response.Code,
+					testCase.statusCode,
+				)
+			}
+			if retryAfter := response.Header().Get("Retry-After"); retryAfter != "5" {
+				t.Fatalf("Retry-After = %q, want 5", retryAfter)
+			}
+
+			var actual errorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &actual); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if actual.Code != testCase.code || actual.Error != testCase.message {
+				t.Fatalf(
+					"error response = %+v, want code=%q message=%q",
+					actual,
+					testCase.code,
+					testCase.message,
+				)
+			}
+		})
+	}
+}
+
 func TestDocumentProcessingHandlerReturnsAcceptedJob(t *testing.T) {
 	expectedJob := documentdomain.ProcessingJob{
 		ID:           13,

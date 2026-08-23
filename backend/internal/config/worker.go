@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -8,17 +9,27 @@ import (
 )
 
 const (
-	defaultWorkerPollInterval        = 2 * time.Second
-	defaultWorkerProcessingTimeout   = 5 * time.Minute
-	defaultDocumentWorkerConcurrency = 1
-	maximumDocumentWorkerConcurrency = 4
+	defaultWorkerPollInterval          = 2 * time.Second
+	defaultWorkerProcessingTimeout     = 5 * time.Minute
+	defaultDocumentWorkerConcurrency   = 1
+	maximumDocumentWorkerConcurrency   = 4
+	defaultProcessingActiveOwnerLimit  = 5
+	defaultProcessingActiveGlobalLimit = 40
+	maximumProcessingActiveJobLimit    = 10000
+)
+
+// ErrInvalidProcessingActiveJobLimits 表示全局容量小于单用户容量。
+var ErrInvalidProcessingActiveJobLimits = errors.New(
+	"processing global active job limit must not be smaller than the per-user limit",
 )
 
 // WorkerConfig 保存后台 Worker 的运行配置。
 type WorkerConfig struct {
-	PollInterval        time.Duration
-	ProcessingTimeout   time.Duration
-	DocumentConcurrency int
+	PollInterval           time.Duration
+	ProcessingTimeout      time.Duration
+	DocumentConcurrency    int
+	ActiveJobsPerUserLimit int
+	ActiveJobsGlobalLimit  int
 }
 
 // LoadWorker 从环境变量读取并校验 Worker 配置。
@@ -57,10 +68,39 @@ func LoadWorker() (WorkerConfig, error) {
 		)
 	}
 
+	activeJobsPerUserLimit, err := loadPositiveBoundedInt(
+		"PROCESSING_MAX_ACTIVE_JOBS_PER_USER",
+		defaultProcessingActiveOwnerLimit,
+		maximumProcessingActiveJobLimit,
+	)
+	if err != nil {
+		return WorkerConfig{}, fmt.Errorf(
+			"load processing per-user active job limit: %w",
+			err,
+		)
+	}
+
+	activeJobsGlobalLimit, err := loadPositiveBoundedInt(
+		"PROCESSING_MAX_ACTIVE_JOBS_GLOBAL",
+		defaultProcessingActiveGlobalLimit,
+		maximumProcessingActiveJobLimit,
+	)
+	if err != nil {
+		return WorkerConfig{}, fmt.Errorf(
+			"load processing global active job limit: %w",
+			err,
+		)
+	}
+	if activeJobsGlobalLimit < activeJobsPerUserLimit {
+		return WorkerConfig{}, ErrInvalidProcessingActiveJobLimits
+	}
+
 	return WorkerConfig{
-		PollInterval:        pollInterval,
-		ProcessingTimeout:   processingTimeout,
-		DocumentConcurrency: documentConcurrency,
+		PollInterval:           pollInterval,
+		ProcessingTimeout:      processingTimeout,
+		DocumentConcurrency:    documentConcurrency,
+		ActiveJobsPerUserLimit: activeJobsPerUserLimit,
+		ActiveJobsGlobalLimit:  activeJobsGlobalLimit,
 	}, nil
 }
 

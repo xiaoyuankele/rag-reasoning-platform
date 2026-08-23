@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,8 @@ func TestLoadWorkerUsesDefaults(t *testing.T) {
 	t.Setenv("WORKER_POLL_INTERVAL", "")
 	t.Setenv("WORKER_PROCESSING_TIMEOUT", "")
 	t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "")
+	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_PER_USER", "")
+	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_GLOBAL", "")
 
 	workerConfig, err := LoadWorker()
 	if err != nil {
@@ -36,12 +39,28 @@ func TestLoadWorkerUsesDefaults(t *testing.T) {
 			defaultDocumentWorkerConcurrency,
 		)
 	}
+	if workerConfig.ActiveJobsPerUserLimit != defaultProcessingActiveOwnerLimit {
+		t.Fatalf(
+			"ActiveJobsPerUserLimit = %d, want %d",
+			workerConfig.ActiveJobsPerUserLimit,
+			defaultProcessingActiveOwnerLimit,
+		)
+	}
+	if workerConfig.ActiveJobsGlobalLimit != defaultProcessingActiveGlobalLimit {
+		t.Fatalf(
+			"ActiveJobsGlobalLimit = %d, want %d",
+			workerConfig.ActiveJobsGlobalLimit,
+			defaultProcessingActiveGlobalLimit,
+		)
+	}
 }
 
 func TestLoadWorkerUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("WORKER_POLL_INTERVAL", "500ms")
 	t.Setenv("WORKER_PROCESSING_TIMEOUT", "30s")
 	t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "2")
+	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_PER_USER", "7")
+	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_GLOBAL", "80")
 
 	workerConfig, err := LoadWorker()
 	if err != nil {
@@ -68,9 +87,21 @@ func TestLoadWorkerUsesEnvironmentValues(t *testing.T) {
 			workerConfig.DocumentConcurrency,
 		)
 	}
+	if workerConfig.ActiveJobsPerUserLimit != 7 {
+		t.Fatalf(
+			"ActiveJobsPerUserLimit = %d, want 7",
+			workerConfig.ActiveJobsPerUserLimit,
+		)
+	}
+	if workerConfig.ActiveJobsGlobalLimit != 80 {
+		t.Fatalf(
+			"ActiveJobsGlobalLimit = %d, want 80",
+			workerConfig.ActiveJobsGlobalLimit,
+		)
+	}
 }
 
-func TestLoadWorkerRejectsInvalidDurations(t *testing.T) {
+func TestLoadWorkerRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name            string
 		environmentName string
@@ -121,6 +152,36 @@ func TestLoadWorkerRejectsInvalidDurations(t *testing.T) {
 			environmentName: "DOCUMENT_WORKER_CONCURRENCY",
 			value:           "5",
 		},
+		{
+			name:            "non-numeric per-user active job limit",
+			environmentName: "PROCESSING_MAX_ACTIVE_JOBS_PER_USER",
+			value:           "five",
+		},
+		{
+			name:            "zero per-user active job limit",
+			environmentName: "PROCESSING_MAX_ACTIVE_JOBS_PER_USER",
+			value:           "0",
+		},
+		{
+			name:            "per-user active job limit above maximum",
+			environmentName: "PROCESSING_MAX_ACTIVE_JOBS_PER_USER",
+			value:           "10001",
+		},
+		{
+			name:            "non-numeric global active job limit",
+			environmentName: "PROCESSING_MAX_ACTIVE_JOBS_GLOBAL",
+			value:           "forty",
+		},
+		{
+			name:            "zero global active job limit",
+			environmentName: "PROCESSING_MAX_ACTIVE_JOBS_GLOBAL",
+			value:           "0",
+		},
+		{
+			name:            "global active job limit above maximum",
+			environmentName: "PROCESSING_MAX_ACTIVE_JOBS_GLOBAL",
+			value:           "10001",
+		},
 	}
 
 	for _, test := range tests {
@@ -129,6 +190,8 @@ func TestLoadWorkerRejectsInvalidDurations(t *testing.T) {
 			t.Setenv("WORKER_POLL_INTERVAL", "2s")
 			t.Setenv("WORKER_PROCESSING_TIMEOUT", "5m")
 			t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "1")
+			t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_PER_USER", "5")
+			t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_GLOBAL", "40")
 
 			// 然后只破坏本测试关注的环境变量。
 			t.Setenv(test.environmentName, test.value)
@@ -157,5 +220,24 @@ func TestLoadWorkerRejectsInvalidDurations(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestLoadWorkerRejectsGlobalLimitBelowPerUserLimit(t *testing.T) {
+	t.Setenv("WORKER_POLL_INTERVAL", "2s")
+	t.Setenv("WORKER_PROCESSING_TIMEOUT", "5m")
+	t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "1")
+	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_PER_USER", "6")
+	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_GLOBAL", "5")
+
+	workerConfig, err := LoadWorker()
+	if !errors.Is(err, ErrInvalidProcessingActiveJobLimits) {
+		t.Fatalf(
+			"LoadWorker() error = %v, want ErrInvalidProcessingActiveJobLimits",
+			err,
+		)
+	}
+	if workerConfig != (WorkerConfig{}) {
+		t.Fatalf("LoadWorker() config = %+v, want zero value", workerConfig)
 	}
 }

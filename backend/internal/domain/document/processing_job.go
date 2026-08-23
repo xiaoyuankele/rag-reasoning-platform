@@ -13,6 +13,21 @@ var ErrActiveProcessingJobExists = errors.New(
 	"active document processing job already exists",
 )
 
+// ErrOwnerActiveProcessingJobLimitExceeded 表示当前用户的活动解析任务已经达到上限。
+var ErrOwnerActiveProcessingJobLimitExceeded = errors.New(
+	"owner active document processing job limit exceeded",
+)
+
+// ErrGlobalProcessingJobLimitExceeded 表示系统的活动解析任务已经达到全局上限。
+var ErrGlobalProcessingJobLimitExceeded = errors.New(
+	"global active document processing job limit exceeded",
+)
+
+// ErrInvalidProcessingJobAdmissionLimits 表示内部组装了无效的解析任务容量配置。
+var ErrInvalidProcessingJobAdmissionLimits = errors.New(
+	"document processing job admission limits are invalid",
+)
+
 // ErrProcessingJobNotFound 表示指定解析任务不存在。
 var ErrProcessingJobNotFound = errors.New(
 	"document processing job not found",
@@ -100,6 +115,19 @@ type ProcessingJob struct {
 	UpdatedAt    time.Time
 	StartedAt    *time.Time
 	CompletedAt  *time.Time
+}
+
+// ProcessingJobAdmissionLimits 是创建解析任务时必须原子执行的容量约束。
+// 活动任务只包含 queued 和 processing；成功或失败的历史任务不占用名额。
+type ProcessingJobAdmissionLimits struct {
+	MaxActiveJobsPerOwner int
+	MaxActiveJobsGlobal   int
+}
+
+// IsValid 判断用户上限和全局上限能否组成有效的准入策略。
+func (l ProcessingJobAdmissionLimits) IsValid() bool {
+	return l.MaxActiveJobsPerOwner > 0 &&
+		l.MaxActiveJobsGlobal >= l.MaxActiveJobsPerOwner
 }
 
 // ProcessingJobCreator 定义创建解析任务所需的持久化能力。

@@ -18,13 +18,13 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | 方法 | 路径 | 主要输入 | 成功状态 | 用途 | 前端定位 |
 |---|---|---|---|---|---|
 | `GET` | `/health` | 无 | `200` | 检查后端是否存活 | 系统状态/开发验收 |
-| `POST` | `/documents` | Session Cookie；`multipart/form-data` 的 `file` | 新建 `201`；同用户重复 `200` | 上传、绑定当前用户并按内容去重 | 用户功能；已隔离 |
+| `POST` | `/documents` | Session Cookie；`multipart/form-data` 的 `file` | 新建 `201`；同用户重复 `200`；用户并发满额 `429`；全局满额 `503` | 上传、绑定当前用户并按内容去重 | 用户功能；已隔离/并发背压 |
 | `POST` | `/documents/preflight` | Session Cookie；JSON：`sha256`、`size_bytes` | `200` | 上传文件正文前检查当前用户是否已有相同二进制内容 | 用户功能；已隔离/性能优化 |
 | `GET` | `/documents` | Session Cookie；`page`、`page_size` | `200` | 分页获取当前用户文档 | 用户功能；已隔离 |
 | `GET` | `/documents/:id` | Session Cookie；路径参数 `id` | `200` | 获取当前用户文档详情 | 用户功能；已隔离 |
 | `GET` | `/documents/:id/chunks` | Session Cookie；路径参数 `id`，可选 `page`、`page_size` | `200` | 查看当前用户 ready 文档的文本块 | 用户功能；已隔离 |
 | `DELETE` | `/documents/:id` | Session Cookie；路径参数 `id` | `204` | 删除当前用户文档及其关联数据 | 用户功能；已隔离，需二次确认 |
-| `POST` | `/documents/:id/process` | Session Cookie；路径参数 `id` | `202` | 为当前用户文档创建异步解析任务 | 用户功能；已隔离 |
+| `POST` | `/documents/:id/process` | Session Cookie；路径参数 `id` | `202`；重复任务 `409`；用户满额 `429`；全局满额 `503` | 为当前用户文档创建异步解析任务 | 用户功能；已隔离/背压 |
 | `GET` | `/processing-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的解析任务状态 | 用户功能；已隔离/轮询 |
 | `GET` | `/search` | Session Cookie；完整短语 `q`，或重复 `term` + 可选 `operator`、`within`；另可选 `document_id`、`page`、`page_size` | `200` | 在当前用户文档的同一文本块内执行短语或多关键词检索 | 用户功能；已隔离 |
 | `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | 新建 `202`；活动任务已存在 `200`；用户满额 `429`；全局满额 `503` | 保存当前用户的向量化意图 | 用户功能；已隔离/幂等/背压 |
@@ -112,7 +112,25 @@ Cookie: rag_session=...
 `POST /documents` 仍依靠 `(owner_user_id, sha256)` 唯一约束确保同一用户只保留一份内容。
 不同用户之间不会通过预检互相看到文档。第一版直接查询 PostgreSQL，不引入 Redis。
 
-### 2.2 关键词检索模式
+### 2.2 上传并发背压
+
+`POST /documents` 在开始读取文件正文前进入单用户和全局容量闸门。默认同一用户最多同时执行 2 条上传，
+单个后端实例全局最多执行 16 条；最多等待 `UPLOAD_QUEUE_WAIT_TIMEOUT=2s`。槽位覆盖文件流读取、
+物理存储、文档记录入库、重复文件补偿删除和失败清理，确保重型链路结束后才释放。
+
+| 状态码 | 稳定 `code` | 含义 | 建议行为 |
+| --- | --- | --- | --- |
+| `429` | `upload_owner_concurrency_exhausted` | 当前用户已有上传长时间占用其槽位 | 按 `Retry-After` 等待，不要并行重复上传 |
+| `503` | `upload_capacity_exhausted` | 后端全局上传槽位已满 | 按 `Retry-After` 退避，保留文件供用户稍后重试 |
+
+两种响应都包含 `Retry-After: 2`。闸门是单进程保护，不是每分钟请求次数限制，也不会替代
+`STORAGE_MAX_FILE_SIZE_BYTES`、同用户 SHA-256 去重或数据库约束。多后端副本部署时还需要在网关或
+分布式协调层建立跨实例容量边界。
+
+结构化日志记录 admitted/rejected/released、等待与执行耗时、读取字节数、是否重复以及单用户/全局
+在途数量，不记录文件名、内容、哈希、存储路径或用户标识。
+
+### 2.3 关键词检索模式
 
 `GET /search` 保留原有完整短语模式：
 
@@ -136,7 +154,26 @@ GET /search?term=磁悬浮&term=振动&operator=all&within=chunk&page=1&page_siz
 
 当前 chunk 不等于自然句或自然段。`within=sentence/paragraph` 尚未实现，不能由前端在分页结果上二次过滤冒充。
 
-### 2.3 按文档批量发现最新向量任务
+### 2.4 文档解析任务入队背压
+
+活动解析任务只包含 `queued` 和 `processing`。默认每个用户最多保留 5 条活动任务，整个系统最多 40 条；
+部署时可通过 `PROCESSING_MAX_ACTIVE_JOBS_PER_USER` 和 `PROCESSING_MAX_ACTIVE_JOBS_GLOBAL` 调整，
+但全局值不能小于单用户值。
+
+`POST /documents/:id/process` 在创建任务前原子检查容量：
+
+| 状态码 | 稳定 `code` | 含义 | 建议行为 |
+| --- | --- | --- | --- |
+| `429` | `processing_owner_active_job_limit` | 当前用户活动解析任务达到上限 | 按 `Retry-After` 等待并轮询已有任务 |
+| `503` | `processing_queue_capacity_exhausted` | 系统全局解析队列达到上限 | 按 `Retry-After` 退避，避免立即重试洪峰 |
+
+两种响应都包含 `Retry-After: 5`。同一文档已经存在活动任务时仍优先返回原有的 `409` 冲突语义，
+避免容量已满掩盖重复申请。成功或失败的历史任务不占用名额。
+
+容量统计和任务插入位于同一 PostgreSQL 事务，并通过文档行锁与事务级 advisory lock 防止并发请求
+同时越过最后一个名额。锁只覆盖短暂的准入临界区，不覆盖实际 Python 解析过程。
+
+### 2.5 按文档批量发现最新向量任务
 
 `POST /embedding-jobs/latest` 用于页面首次进入、刷新或换设备后，从已知文档 ID 恢复服务端真实任务状态：
 
@@ -164,7 +201,7 @@ GET /search?term=磁悬浮&term=振动&operator=all&within=chunk&page=1&page_siz
 - 页面初始化时调用一次，随后只对 `waiting_document/queued/processing` 任务复用 `GET /embedding-jobs/:id` 有界轮询；
 - 最新任务 `succeeded` 目前只表示最近任务成功，不等同于已经证明其向量匹配当前文档 revision。版本和 stale 语义后续单独设计。
 
-### 2.4 向量任务入队背压
+### 2.6 向量任务入队背压
 
 活动任务定义为 `waiting_document`、`queued` 或 `processing`。默认每个用户最多同时保留 100 条活动任务，
 整个系统最多 500 条；部署时可以通过 `EMBEDDING_MAX_ACTIVE_JOBS_PER_USER` 和
@@ -185,7 +222,7 @@ GET /search?term=磁悬浮&term=振动&operator=all&within=chunk&page=1&page_siz
 容量检查和任务插入位于同一 PostgreSQL 事务，并由事务级 advisory lock 串行化最后一个名额的竞争；
 Handler 中的预检查不能替代这一数据库原子边界。
 
-### 2.5 远程 Embedding 分类隔离与全局闸门
+### 2.7 远程 Embedding 分类隔离与全局闸门
 
 后台向量 Worker 与在线语义能力先经过独立分类闸门，再经过进程内全局闸门：Worker 默认最多占用 2 个槽位，
 `POST /semantic-search` 和 `POST /answers` 内部语义检索共享另外 2 个在线槽位，所有入口合计默认不超过 4。
