@@ -4,10 +4,12 @@
 # 没变化时可以复用模块下载缓存。
 FROM golang:1.25.6-bookworm AS go-builder
 
+ARG GOPROXY=https://proxy.golang.org,direct
+
 WORKDIR /src/backend
 
 COPY backend/go.mod backend/go.sum ./
-RUN go mod download
+RUN GOPROXY="${GOPROXY}" go mod download
 
 COPY backend/ ./
 RUN CGO_ENABLED=0 GOOS=linux go build \
@@ -19,6 +21,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # 第二阶段是实际运行镜像。它不包含 Go 编译器，但保留 Python 3.11，
 # 因为当前 Go Worker 会通过受控子进程调用 rag_ai 处理 PDF。
 FROM python:3.11.16-slim-bookworm AS runtime
+
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_DEFAULT_TIMEOUT=120
+ARG PIP_RETRIES=10
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -34,7 +40,12 @@ WORKDIR /app
 
 COPY ai/pyproject.toml /app/ai/pyproject.toml
 COPY ai/src/ /app/ai/src/
-RUN python3 -m pip install /app/ai
+RUN python3 -m pip install \
+    --disable-pip-version-check \
+    --index-url "${PIP_INDEX_URL}" \
+    --timeout "${PIP_DEFAULT_TIMEOUT}" \
+    --retries "${PIP_RETRIES}" \
+    /app/ai
 
 COPY --from=go-builder /out/rag-server /usr/local/bin/rag-server
 
