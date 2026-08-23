@@ -23,17 +23,20 @@ const {
   actionsByDocumentId,
   activeJobCount,
   cancel,
+  capacityFailure,
   clearSelection,
   discoveredDocumentIds,
   documents,
   feedbackByDocumentId,
   initialize,
+  isCoolingDown,
   isSubmitting,
   jobsByDocumentId,
   load,
   queueAll,
   queueSelected,
   requestId,
+  retryAfterSeconds,
   selectDocuments,
   selectedCount,
   selectedDocumentIds,
@@ -138,7 +141,7 @@ function toggleFilteredSelection(): void {
 }
 
 function requestQueueSubmission(mode: 'selected' | 'all'): void {
-  if (isSubmitting.value) return
+  if (isSubmitting.value || isCoolingDown.value) return
   const documentIds =
     mode === 'all'
       ? queueableDocuments.value.map((document) => document.id)
@@ -216,9 +219,15 @@ onMounted(() => void initialize())
       class="message-card"
       :class="`message-card--${workspaceMessage.kind}`"
       :role="workspaceMessage.kind === 'error' ? 'alert' : 'status'"
+      aria-live="polite"
     >
-      <span>{{ workspaceMessage.message }}</span>
-      <small v-if="workspaceMessage.requestId">请求编号：{{ workspaceMessage.requestId }}</small>
+      <div>
+        <span>{{ workspaceMessage.message }}</span>
+        <small v-if="workspaceMessage.requestId">请求编号：{{ workspaceMessage.requestId }}</small>
+      </div>
+      <strong v-if="capacityFailure && isCoolingDown" class="capacity-countdown">
+        {{ retryAfterSeconds }} 秒后可重新提交
+      </strong>
     </div>
 
     <div class="workspace-toolbar">
@@ -267,7 +276,7 @@ onMounted(() => void initialize())
         <button
           class="bulk-button"
           type="button"
-          :disabled="queueableDocuments.length === 0 || isSubmitting"
+          :disabled="queueableDocuments.length === 0 || isSubmitting || isCoolingDown"
           @click="requestQueueSubmission('all')"
         >
           全部文档向量化（{{ queueableDocuments.length }}）
@@ -275,10 +284,16 @@ onMounted(() => void initialize())
         <button
           class="primary-button"
           type="button"
-          :disabled="selectedCount === 0 || isSubmitting"
+          :disabled="selectedCount === 0 || isSubmitting || isCoolingDown"
           @click="requestQueueSubmission('selected')"
         >
-          {{ isSubmitting ? '正在提交…' : `开始向量化（${selectedCount}）` }}
+          {{
+            isSubmitting
+              ? '正在提交…'
+              : isCoolingDown
+                ? `等待 ${retryAfterSeconds} 秒`
+                : `开始向量化（${selectedCount}）`
+          }}
         </button>
       </div>
     </div>
@@ -308,7 +323,12 @@ onMounted(() => void initialize())
         <button class="secondary-button" type="button" @click="pendingSubmission = null">
           返回检查
         </button>
-        <button class="primary-button" type="button" @click="confirmQueueSubmission">
+        <button
+          class="primary-button"
+          type="button"
+          :disabled="isCoolingDown"
+          @click="confirmQueueSubmission"
+        >
           确认并提交
         </button>
       </div>
@@ -546,6 +566,29 @@ onMounted(() => void initialize())
 .row-feedback--error {
   background: var(--color-danger-soft);
   color: var(--color-danger);
+}
+
+.message-card--capacity,
+.row-feedback--capacity {
+  border: 1px solid #dccb9a;
+  background: #fff9e8;
+  color: var(--color-text-strong);
+}
+
+.message-card > div {
+  display: grid;
+  gap: 4px;
+}
+
+.message-card small,
+.row-feedback small {
+  color: var(--color-text-subtle);
+}
+
+.capacity-countdown {
+  flex: 0 0 auto;
+  color: #7a5a12;
+  font-size: 12px;
 }
 
 .workspace-toolbar {

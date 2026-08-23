@@ -88,6 +88,42 @@ describe('embedding API response mapping', () => {
     })
   })
 
+  it('接受批量容量暂缓结果并保留稳定 code', () => {
+    expect(
+      mapEmbeddingBatchResponse({
+        items: [
+          {
+            document_id: 42,
+            outcome: 'rate_limited',
+            error: {
+              error: 'owner limit reached',
+              code: 'embedding_owner_active_job_limit',
+            },
+          },
+          {
+            document_id: 43,
+            outcome: 'capacity_exhausted',
+            error: {
+              error: 'queue capacity reached',
+              code: 'embedding_queue_capacity_exhausted',
+            },
+          },
+        ],
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        documentId: 42,
+        outcome: 'rate_limited',
+        errorCode: 'embedding_owner_active_job_limit',
+      }),
+      expect.objectContaining({
+        documentId: 43,
+        outcome: 'capacity_exhausted',
+        errorCode: 'embedding_queue_capacity_exhausted',
+      }),
+    ])
+  })
+
   it('拒绝成功项缺少任务或任务属于另一份文档', () => {
     expect(() =>
       mapEmbeddingBatchResponse({ items: [{ document_id: 42, outcome: 'created' }] }),
@@ -119,6 +155,36 @@ describe('embedding API response mapping', () => {
     await expect(queueEmbeddingJobs([42, 43])).rejects.toThrow(
       new ApiError('invalid-response', '后端批量向量任务未逐项返回请求结果。'),
     )
+  })
+
+  it('保留批量 200 容量结果响应头中的等待时间和请求编号', async () => {
+    postMock.mockResolvedValue({
+      status: 200,
+      headers: { 'retry-after': '5', 'x-request-id': 'batch-capacity-1' },
+      data: {
+        items: [
+          {
+            document_id: 42,
+            outcome: 'capacity_exhausted',
+            error: {
+              error: 'queue capacity reached',
+              code: 'embedding_queue_capacity_exhausted',
+            },
+          },
+        ],
+      },
+    })
+
+    await expect(queueEmbeddingJobs([42])).resolves.toMatchObject({
+      retryAfterSeconds: 5,
+      requestId: 'batch-capacity-1',
+      items: [
+        expect.objectContaining({
+          documentId: 42,
+          outcome: 'capacity_exhausted',
+        }),
+      ],
+    })
   })
 
   it('映射最新任务与后端明确返回的无任务状态', async () => {

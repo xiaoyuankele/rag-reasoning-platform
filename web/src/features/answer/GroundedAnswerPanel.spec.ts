@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GroundedAnswer } from '../../entities/answer/model/grounded-answer'
 import { ApiError } from '../../shared/api/api-error'
 import { askGroundedQuestion } from './api/answer-api'
@@ -30,6 +30,7 @@ const answer: GroundedAnswer = {
 }
 
 beforeEach(() => askGroundedQuestionMock.mockReset())
+afterEach(() => vi.useRealTimers())
 
 function mountPanel(scopeIsValid = true) {
   return mount(GroundedAnswerPanel, {
@@ -101,6 +102,34 @@ describe('GroundedAnswerPanel', () => {
     expect(wrapper.get('[role="alert"]').text()).toContain('向量尚未就绪')
     expect(wrapper.text()).toContain('请求编号：answer-409')
     expect(wrapper.text()).toContain('查看向量化状态')
+    wrapper.unmount()
+  })
+
+  it('问答容量满载时保留输入、展示倒计时并只开放手动重试', async () => {
+    vi.useFakeTimers()
+    askGroundedQuestionMock.mockRejectedValueOnce(
+      new ApiError('server', 'busy', {
+        status: 503,
+        code: 'answer_capacity_exhausted',
+        requestId: 'answer-capacity-ui-1',
+        retryAfterSeconds: 2,
+      }),
+    )
+    const wrapper = mountPanel()
+    await wrapper.get('#answer-query').setValue('容量测试问题')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('.answer-state--capacity').text()).toContain('问答服务暂时繁忙')
+    expect(wrapper.get('.answer-state--capacity').text()).toContain('2 秒')
+    expect(wrapper.get('#answer-query').element).toHaveProperty('value', '容量测试问题')
+    expect(wrapper.get('.primary-button').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.error-actions button').attributes('disabled')).toBeDefined()
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(askGroundedQuestionMock).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('.primary-button').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('.error-actions button').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
   })
 

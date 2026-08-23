@@ -1,5 +1,5 @@
 import { effectScope } from 'vue'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GroundedAnswer } from '../../../entities/answer/model/grounded-answer'
 import { ApiError } from '../../../shared/api/api-error'
 import { askGroundedQuestion } from '../api/answer-api'
@@ -30,6 +30,7 @@ const answer: GroundedAnswer = {
 }
 
 beforeEach(() => askGroundedQuestionMock.mockReset())
+afterEach(() => vi.useRealTimers())
 
 describe('useGroundedAnswer', () => {
   it('区分有来源回答和无证据安全降级', async () => {
@@ -78,6 +79,42 @@ describe('useGroundedAnswer', () => {
     await model.retry()
 
     expect(askGroundedQuestionMock).toHaveBeenNthCalledWith(2, params, expect.any(AbortSignal))
+    expect(model.state.value).toBe('success')
+    scope.stop()
+  })
+
+  it('问答容量满载时遵守 Retry-After，且不会自动或提前重放请求', async () => {
+    vi.useFakeTimers()
+    const scope = effectScope()
+    const model = scope.run(() => useGroundedAnswer())!
+    askGroundedQuestionMock
+      .mockRejectedValueOnce(
+        new ApiError('server', 'busy', {
+          status: 503,
+          code: 'answer_capacity_exhausted',
+          requestId: 'answer-capacity-1',
+          retryAfterSeconds: 2,
+        }),
+      )
+      .mockResolvedValueOnce(answer)
+
+    await model.ask({ query: '问题', topK: 5, responseLanguage: 'zh' })
+
+    expect(model.capacityFailure.value?.title).toContain('问答服务')
+    expect(model.retryAvailable.value).toBe(true)
+    expect(model.canRetry.value).toBe(false)
+    expect(model.retryAfterSeconds.value).toBe(2)
+    expect(model.requestId.value).toBe('answer-capacity-1')
+
+    await model.retry()
+    expect(askGroundedQuestionMock).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(model.canRetry.value).toBe(true)
+    expect(askGroundedQuestionMock).toHaveBeenCalledTimes(1)
+
+    await model.retry()
+    expect(askGroundedQuestionMock).toHaveBeenCalledTimes(2)
     expect(model.state.value).toBe('success')
     scope.stop()
   })

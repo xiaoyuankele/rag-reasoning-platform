@@ -1,7 +1,8 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EmbeddingJob } from '../../entities/embedding-job/model/embedding-job'
 import type { DocumentPage, ResearchDocument } from '../../entities/document/model/document'
+import { ApiError } from '../../shared/api/api-error'
 import {
   getEmbeddingJob,
   getLatestEmbeddingJobs,
@@ -82,6 +83,8 @@ beforeEach(() => {
   )
 })
 
+afterEach(() => vi.useRealTimers())
+
 describe('EmbeddingWorkspacePanel', () => {
   it('选择单篇文档、创建任务并展示后端状态', async () => {
     queueEmbeddingJobMock.mockResolvedValue({ job: queuedJob, created: true })
@@ -129,27 +132,62 @@ describe('EmbeddingWorkspacePanel', () => {
     wrapper.unmount()
   })
 
+  it('容量拒绝时显示倒计时并禁止等待期内重复提交', async () => {
+    vi.useFakeTimers()
+    queueEmbeddingJobMock.mockRejectedValueOnce(
+      new ApiError('rate-limited', 'owner limit reached', {
+        status: 429,
+        code: 'embedding_owner_active_job_limit',
+        requestId: 'embedding-owner-ui-1',
+        retryAfterSeconds: 5,
+      }),
+    )
+    const wrapper = mount(EmbeddingWorkspacePanel, {
+      props: { loadDocumentPage: listDocumentsMock },
+      global: {
+        stubs: { RouterLink: { template: '<a><slot /></a>' } },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await wrapper.get('.primary-button').trigger('click')
+    await wrapper.get('[role="alertdialog"] .primary-button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.message-card--capacity').text()).toContain('活动向量任务已满')
+    expect(wrapper.get('.message-card--capacity').text()).toContain('5 秒后可重新提交')
+    expect(wrapper.text()).toContain('请求编号：embedding-owner-ui-1')
+    expect(wrapper.get('.primary-button').attributes('disabled')).toBeDefined()
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(wrapper.get('.primary-button').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
   it('明确区分文本未解析与向量状态，并支持提交全部文档', async () => {
     listDocumentsMock.mockResolvedValue({
       documents: [readyDocument, uploadedDocument],
       pagination: { page: 1, pageSize: 100, total: 2, totalPages: 1 },
     })
-    queueEmbeddingJobsMock.mockResolvedValue([
-      {
-        documentId: 42,
-        outcome: 'created',
-        job: queuedJob,
-        errorMessage: null,
-        errorCode: null,
-      },
-      {
-        documentId: 43,
-        outcome: 'created',
-        job: { ...queuedJob, id: 143, documentId: 43, status: 'waiting_document' },
-        errorMessage: null,
-        errorCode: null,
-      },
-    ])
+    queueEmbeddingJobsMock.mockResolvedValue({
+      items: [
+        {
+          documentId: 42,
+          outcome: 'created',
+          job: queuedJob,
+          errorMessage: null,
+          errorCode: null,
+        },
+        {
+          documentId: 43,
+          outcome: 'created',
+          job: { ...queuedJob, id: 143, documentId: 43, status: 'waiting_document' },
+          errorMessage: null,
+          errorCode: null,
+        },
+      ],
+    })
 
     const wrapper = mount(EmbeddingWorkspacePanel, {
       props: { loadDocumentPage: listDocumentsMock },

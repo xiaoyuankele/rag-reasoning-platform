@@ -16,13 +16,27 @@ const queryInput = ref('')
 const responseLanguage = ref<AnswerResponseLanguage>('auto')
 const topK = ref(5)
 const formError = ref('')
-const { ask, canRetry, errorMessage, isLoading, requestId, reset, result, retry, state } =
-  useGroundedAnswer()
+const {
+  ask,
+  canRetry,
+  capacityFailure,
+  errorMessage,
+  isCoolingDown,
+  isLoading,
+  requestId,
+  reset,
+  result,
+  retry,
+  retryAfterSeconds,
+  retryAvailable,
+  state,
+} = useGroundedAnswer()
 
 const queryCharacterCount = computed(() => [...queryInput.value].length)
 const canSubmit = computed(
   () =>
     !isLoading.value &&
+    !isCoolingDown.value &&
     props.scopeIsValid &&
     queryInput.value.trim().length > 0 &&
     queryCharacterCount.value <= 1000,
@@ -34,7 +48,7 @@ const scopeKey = computed(() =>
 
 watch(scopeKey, () => {
   formError.value = ''
-  reset()
+  reset({ preserveCapacity: true })
 })
 
 function validateQuestion(): string | null {
@@ -132,7 +146,13 @@ function similarityLabel(similarity: number): string {
       </div>
 
       <button class="primary-button" type="submit" :disabled="!canSubmit">
-        {{ isLoading ? '正在检索证据并生成回答…' : '生成带来源回答' }}
+        {{
+          isLoading
+            ? '正在检索证据并生成回答…'
+            : isCoolingDown
+              ? `服务繁忙，等待 ${retryAfterSeconds} 秒`
+              : '生成带来源回答'
+        }}
       </button>
     </form>
 
@@ -149,14 +169,25 @@ function similarityLabel(similarity: number): string {
       </div>
     </div>
 
-    <div v-else-if="state === 'error'" class="answer-state answer-state--error" role="alert">
+    <div
+      v-else-if="state === 'error'"
+      class="answer-state answer-state--error"
+      :class="{ 'answer-state--capacity': capacityFailure }"
+      role="alert"
+      aria-live="polite"
+    >
       <div>
-        <strong>本次问答没有完成</strong>
+        <strong>{{ capacityFailure?.title ?? '本次问答没有完成' }}</strong>
         <p>{{ errorMessage }}</p>
+        <p v-if="capacityFailure && isCoolingDown" class="cooldown-message">
+          请等待 {{ retryAfterSeconds }} 秒；倒计时结束后可手动重试，不会自动产生新的模型调用。
+        </p>
         <small v-if="requestId">请求编号：{{ requestId }}</small>
       </div>
       <div class="error-actions">
-        <button v-if="canRetry" type="button" @click="retry">重试本次问题</button>
+        <button v-if="retryAvailable" type="button" :disabled="!canRetry" @click="retry">
+          {{ isCoolingDown ? `${retryAfterSeconds} 秒后可重试` : '重试本次问题' }}
+        </button>
         <RouterLink to="/embeddings">查看向量化状态</RouterLink>
       </div>
     </div>
@@ -381,6 +412,15 @@ function similarityLabel(similarity: number): string {
   background: var(--color-danger-soft);
 }
 
+.answer-state--capacity {
+  border-color: #dccb9a;
+  background: #fff9e8;
+}
+
+.cooldown-message {
+  color: #7a5a12;
+}
+
 .answer-state strong {
   color: var(--color-text-strong);
 }
@@ -420,6 +460,11 @@ function similarityLabel(similarity: number): string {
   color: var(--color-accent);
   cursor: pointer;
   font-weight: 650;
+}
+
+.error-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .error-actions a {

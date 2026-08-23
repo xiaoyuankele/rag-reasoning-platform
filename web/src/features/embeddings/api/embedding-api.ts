@@ -2,7 +2,7 @@ import type {
   EmbeddingJob,
   EmbeddingJobStatus,
 } from '../../../entities/embedding-job/model/embedding-job'
-import { ApiError } from '../../../shared/api/api-error'
+import { ApiError, readApiResponseMetadata } from '../../../shared/api/api-error'
 import { httpClient } from '../../../shared/api/http-client'
 
 const supportedStatuses = new Set<EmbeddingJobStatus>([
@@ -52,7 +52,8 @@ interface LatestEmbeddingJobItemDto {
   job: EmbeddingJobDto | null
 }
 
-export type EmbeddingBatchOutcome = 'created' | 'already_active' | 'not_found' | 'failed'
+export type EmbeddingBatchOutcome =
+  'created' | 'already_active' | 'not_found' | 'failed' | 'rate_limited' | 'capacity_exhausted'
 
 export interface EmbeddingQueueResult {
   job: EmbeddingJob
@@ -65,6 +66,12 @@ export interface EmbeddingBatchItem {
   job: EmbeddingJob | null
   errorMessage: string | null
   errorCode: string | null
+}
+
+export interface EmbeddingBatchResult {
+  items: EmbeddingBatchItem[]
+  requestId?: string
+  retryAfterSeconds?: number
 }
 
 export interface LatestEmbeddingJobItem {
@@ -148,7 +155,12 @@ export function mapEmbeddingJobResponse(data: unknown): EmbeddingJob {
 
 function isBatchOutcome(value: unknown): value is EmbeddingBatchOutcome {
   return (
-    value === 'created' || value === 'already_active' || value === 'not_found' || value === 'failed'
+    value === 'created' ||
+    value === 'already_active' ||
+    value === 'not_found' ||
+    value === 'failed' ||
+    value === 'rate_limited' ||
+    value === 'capacity_exhausted'
   )
 }
 
@@ -258,7 +270,7 @@ export async function queueEmbeddingJob(
 export async function queueEmbeddingJobs(
   documentIds: number[],
   signal?: AbortSignal,
-): Promise<EmbeddingBatchItem[]> {
+): Promise<EmbeddingBatchResult> {
   const response = await httpClient.post<unknown>(
     '/embedding-jobs/batch',
     { document_ids: documentIds },
@@ -272,7 +284,7 @@ export async function queueEmbeddingJobs(
   ) {
     throw new ApiError('invalid-response', '后端批量向量任务未逐项返回请求结果。')
   }
-  return items
+  return { items, ...readApiResponseMetadata(response.headers) }
 }
 
 /** 按最多 100 个文档 ID 发现当前用户可见的最新向量任务。 */

@@ -8,6 +8,12 @@ import type { ResearchDocument } from '../../../entities/document/model/document
 import type { DocumentPage } from '../../../entities/document/model/document'
 import { toApiError } from '../../../shared/api/api-error'
 import {
+  capacityFailureFromApiError,
+  createCapacityFailure,
+  type CapacityFailure,
+} from '../../../shared/api/capacity-error'
+import { useRetryCooldown } from '../../../shared/api/use-retry-cooldown'
+import {
   cancelEmbeddingJob,
   getEmbeddingJob,
   getLatestEmbeddingJobs,
@@ -19,7 +25,7 @@ export type EmbeddingWorkspaceState = 'idle' | 'loading' | 'success' | 'empty' |
 export type EmbeddingDocumentAction = 'submitting' | 'cancelling'
 
 export interface EmbeddingDocumentFeedback {
-  kind: 'success' | 'error'
+  kind: 'success' | 'error' | 'capacity'
   message: string
   requestId?: string
 }
@@ -111,6 +117,8 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
   const feedbackByDocumentId = shallowRef<Map<number, EmbeddingDocumentFeedback>>(new Map())
   const workspaceMessage = ref<EmbeddingDocumentFeedback | null>(null)
   const requestId = ref<string | undefined>()
+  const capacityFailure = ref<CapacityFailure | null>(null)
+  const retryCooldown = useRetryCooldown()
 
   const storedJobs = readStoredJobs(storage)
   const activeControllers = new Set<AbortController>()
@@ -127,6 +135,17 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
   const isSubmitting = computed(() =>
     [...actionsByDocumentId.value.values()].some((action) => action === 'submitting'),
   )
+
+  function activateCapacityFailure(failure: CapacityFailure): void {
+    capacityFailure.value = failure
+    requestId.value = failure.requestId
+    retryCooldown.start(failure.retryAfterSeconds)
+  }
+
+  function clearCapacityFailure(): void {
+    capacityFailure.value = null
+    retryCooldown.reset()
+  }
 
   function replaceMapValue<K, V>(source: Map<K, V>, key: K, value: V): Map<K, V> {
     const next = new Map(source)
@@ -311,9 +330,12 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
    */
   async function queueDocuments(documentIds: number[], submissionLabel: string): Promise<void> {
     const uniqueDocumentIds = [...new Set(documentIds)]
-    if (uniqueDocumentIds.length === 0 || isSubmitting.value) return
+    if (uniqueDocumentIds.length === 0 || isSubmitting.value || retryCooldown.isCoolingDown.value) {
+      return
+    }
 
     const controller = createController()
+    clearCapacityFailure()
     workspaceMessage.value = null
     for (const documentId of uniqueDocumentIds) {
       setAction(documentId, 'submitting')
@@ -324,7 +346,9 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
     let created = 0
     let alreadyActive = 0
     let failed = 0
+    let deferred = 0
     let completed = 0
+    let blockedByCapacity: CapacityFailure | null = null
 
     try {
       if (uniqueDocumentIds.length === 1) {
@@ -343,10 +367,10 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
       } else {
         for (let index = 0; index < uniqueDocumentIds.length; index += maximumBatchSize) {
           const batchIds = uniqueDocumentIds.slice(index, index + maximumBatchSize)
-          const results = await queueEmbeddingJobs(batchIds, controller.signal)
+          const batch = await queueEmbeddingJobs(batchIds, controller.signal)
           if (controller.signal.aborted || disposed) return
 
-          for (const item of results) {
+          for (const item of batch.items) {
             if (item.job) {
               rememberJob(item.job)
               successfulIds.push(item.documentId)
@@ -358,6 +382,23 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
                   item.outcome === 'created' ? '向量任务已创建。' : '已有活动任务，已恢复跟踪。',
               })
             } else {
+              const itemCapacity = createCapacityFailure(
+                item.errorCode,
+                batch.retryAfterSeconds,
+                batch.requestId,
+                5,
+              )
+              if (itemCapacity) {
+                blockedByCapacity ??= itemCapacity
+                deferred += 1
+                setFeedback(item.documentId, {
+                  kind: 'capacity',
+                  message: `${itemCapacity.title}。${itemCapacity.message}`,
+                  requestId: itemCapacity.requestId,
+                })
+                continue
+              }
+
               failed += 1
               setFeedback(item.documentId, {
                 kind: 'error',
@@ -366,27 +407,62 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
             }
           }
 
-          completed += results.length
+          completed += batch.items.length
           clearSuccessfulSelections(successfulIds)
+          if (blockedByCapacity) {
+            activateCapacityFailure(blockedByCapacity)
+            break
+          }
         }
       }
 
       clearSuccessfulSelections(successfulIds)
-      workspaceMessage.value = {
-        kind: failed === 0 ? 'success' : 'error',
-        message: `${submissionLabel}处理完成：新建 ${created}，复用 ${alreadyActive}，失败 ${failed}。`,
+      if (blockedByCapacity) {
+        const remaining = uniqueDocumentIds.length - successfulIds.length
+        workspaceMessage.value = {
+          kind: 'capacity',
+          message: `${blockedByCapacity.title}。本次已处理 ${completed}/${uniqueDocumentIds.length} 份，新建 ${created}，复用 ${alreadyActive}，普通失败 ${failed}，容量暂缓 ${deferred}；仍有 ${remaining} 份未成功提交。${blockedByCapacity.message}`,
+          requestId: blockedByCapacity.requestId,
+        }
+      } else {
+        workspaceMessage.value = {
+          kind: failed === 0 ? 'success' : 'error',
+          message: `${submissionLabel}处理完成：新建 ${created}，复用 ${alreadyActive}，失败 ${failed}。`,
+        }
       }
       schedulePoll()
     } catch (error) {
       if (controller.signal.aborted || disposed) return
       const apiError = toApiError(error)
-      workspaceMessage.value = {
-        kind: 'error',
-        message:
-          completed > 0
-            ? `已处理 ${completed}/${uniqueDocumentIds.length} 份文档，后续批次提交失败：${apiError.message}`
-            : apiError.message,
-        requestId: apiError.requestId,
+      const capacity = capacityFailureFromApiError(apiError, 5)
+      if (capacity) {
+        activateCapacityFailure(capacity)
+        const successfulSet = new Set(successfulIds)
+        for (const documentId of uniqueDocumentIds) {
+          if (successfulSet.has(documentId)) continue
+          setFeedback(documentId, {
+            kind: 'capacity',
+            message: `${capacity.title}。${capacity.message}`,
+            requestId: capacity.requestId,
+          })
+        }
+        workspaceMessage.value = {
+          kind: 'capacity',
+          message:
+            completed > 0
+              ? `${capacity.title}。已处理 ${completed}/${uniqueDocumentIds.length} 份；${capacity.message}`
+              : `${capacity.title}。${capacity.message}`,
+          requestId: capacity.requestId,
+        }
+      } else {
+        workspaceMessage.value = {
+          kind: 'error',
+          message:
+            completed > 0
+              ? `已处理 ${completed}/${uniqueDocumentIds.length} 份文档，后续批次提交失败：${apiError.message}`
+              : apiError.message,
+          requestId: apiError.requestId,
+        }
       }
       if (successfulIds.length > 0) schedulePoll()
     } finally {
@@ -532,17 +608,20 @@ export function useEmbeddingWorkspace(options: EmbeddingWorkspaceOptions) {
     actionsByDocumentId,
     activeJobCount,
     cancel,
+    capacityFailure,
     clearSelection,
     discoveredDocumentIds,
     documents,
     feedbackByDocumentId,
     initialize,
+    isCoolingDown: retryCooldown.isCoolingDown,
     isSubmitting,
     jobsByDocumentId,
     load,
     queueAll,
     queueSelected,
     requestId,
+    retryAfterSeconds: retryCooldown.remainingSeconds,
     selectDocuments,
     selectedCount,
     selectedDocumentIds,

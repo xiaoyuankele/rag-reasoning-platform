@@ -2,6 +2,7 @@ import { effectScope } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EmbeddingJob } from '../../../entities/embedding-job/model/embedding-job'
 import type { DocumentPage, ResearchDocument } from '../../../entities/document/model/document'
+import { ApiError } from '../../../shared/api/api-error'
 import {
   cancelEmbeddingJob,
   getEmbeddingJob,
@@ -135,22 +136,24 @@ describe('useEmbeddingWorkspace', () => {
   it('批量逐项保留失败选择，并跟踪成功任务', async () => {
     const storage = createMemoryStorage()
     listDocumentsMock.mockResolvedValue(createPage([createDocument(42), createDocument(43)]))
-    queueEmbeddingJobsMock.mockResolvedValue([
-      {
-        documentId: 42,
-        outcome: 'created',
-        job: createJob(42),
-        errorMessage: null,
-        errorCode: null,
-      },
-      {
-        documentId: 43,
-        outcome: 'not_found',
-        job: null,
-        errorMessage: 'document not found',
-        errorCode: 'document_not_found',
-      },
-    ])
+    queueEmbeddingJobsMock.mockResolvedValue({
+      items: [
+        {
+          documentId: 42,
+          outcome: 'created',
+          job: createJob(42),
+          errorMessage: null,
+          errorCode: null,
+        },
+        {
+          documentId: 43,
+          outcome: 'not_found',
+          job: null,
+          errorMessage: 'document not found',
+          errorCode: 'document_not_found',
+        },
+      ],
+    })
 
     const scope = effectScope()
     const workspace = scope.run(() =>
@@ -170,19 +173,111 @@ describe('useEmbeddingWorkspace', () => {
     scope.stop()
   })
 
+  it('单篇达到用户容量后保留选择，并在 Retry-After 到期前阻止重复提交', async () => {
+    vi.useFakeTimers()
+    listDocumentsMock.mockResolvedValue(createPage([createDocument(42)]))
+    queueEmbeddingJobMock
+      .mockRejectedValueOnce(
+        new ApiError('rate-limited', 'owner limit reached', {
+          status: 429,
+          code: 'embedding_owner_active_job_limit',
+          requestId: 'embedding-owner-1',
+          retryAfterSeconds: 5,
+        }),
+      )
+      .mockResolvedValueOnce({ job: createJob(42), created: true })
+
+    const scope = effectScope()
+    const workspace = scope.run(() =>
+      useEmbeddingWorkspace({
+        loadDocumentPage: listDocumentsMock,
+        storage: createMemoryStorage(),
+      }),
+    )!
+
+    await workspace.initialize()
+    workspace.toggleDocument(42, true)
+    await workspace.queueSelected()
+
+    expect(workspace.selectedCount.value).toBe(1)
+    expect(workspace.capacityFailure.value?.code).toBe('embedding_owner_active_job_limit')
+    expect(workspace.feedbackByDocumentId.value.get(42)?.kind).toBe('capacity')
+    expect(workspace.retryAfterSeconds.value).toBe(5)
+    expect(workspace.isCoolingDown.value).toBe(true)
+
+    await workspace.queueSelected()
+    expect(queueEmbeddingJobMock).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    await workspace.queueSelected()
+    expect(queueEmbeddingJobMock).toHaveBeenCalledTimes(2)
+    expect(workspace.selectedCount.value).toBe(0)
+    scope.stop()
+  })
+
+  it('批量容量结果只暂缓失败项，并保留已成功任务和请求编号', async () => {
+    vi.useFakeTimers()
+    listDocumentsMock.mockResolvedValue(createPage([createDocument(42), createDocument(43)]))
+    queueEmbeddingJobsMock.mockResolvedValue({
+      requestId: 'embedding-queue-1',
+      retryAfterSeconds: 5,
+      items: [
+        {
+          documentId: 42,
+          outcome: 'created',
+          job: createJob(42),
+          errorMessage: null,
+          errorCode: null,
+        },
+        {
+          documentId: 43,
+          outcome: 'capacity_exhausted',
+          job: null,
+          errorMessage: 'queue capacity reached',
+          errorCode: 'embedding_queue_capacity_exhausted',
+        },
+      ],
+    })
+
+    const scope = effectScope()
+    const workspace = scope.run(() =>
+      useEmbeddingWorkspace({
+        loadDocumentPage: listDocumentsMock,
+        storage: createMemoryStorage(),
+      }),
+    )!
+
+    await workspace.initialize()
+    workspace.selectDocuments([42, 43])
+    await workspace.queueSelected()
+
+    expect(workspace.jobsByDocumentId.value.get(42)?.status).toBe('queued')
+    expect([...workspace.selectedDocumentIds.value]).toEqual([43])
+    expect(workspace.feedbackByDocumentId.value.get(43)).toMatchObject({
+      kind: 'capacity',
+      requestId: 'embedding-queue-1',
+    })
+    expect(workspace.workspaceMessage.value).toMatchObject({
+      kind: 'capacity',
+      requestId: 'embedding-queue-1',
+    })
+    expect(workspace.workspaceMessage.value?.message).toContain('容量暂缓 1')
+    scope.stop()
+  })
+
   it('全部文档向量化按每批 100 份顺序拆分请求', async () => {
     const storage = createMemoryStorage()
     const documentIds = Array.from({ length: 201 }, (_, index) => index + 1)
     listDocumentsMock.mockResolvedValue(createPage(documentIds.map((id) => createDocument(id))))
-    queueEmbeddingJobsMock.mockImplementation(async (batchIds) =>
-      batchIds.map((documentId) => ({
+    queueEmbeddingJobsMock.mockImplementation(async (batchIds) => ({
+      items: batchIds.map((documentId) => ({
         documentId,
         outcome: 'created' as const,
         job: createJob(documentId),
         errorMessage: null,
         errorCode: null,
       })),
-    )
+    }))
 
     const scope = effectScope()
     const workspace = scope.run(() =>

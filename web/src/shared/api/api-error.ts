@@ -44,6 +44,11 @@ export interface ApiErrorMetadata {
   retryAfterSeconds?: number
 }
 
+export interface ApiResponseMetadata {
+  requestId?: string
+  retryAfterSeconds?: number
+}
+
 function readSafeClientMessage(data: unknown): string | undefined {
   if (typeof data !== 'object' || data === null) {
     return undefined
@@ -87,6 +92,14 @@ function readRetryAfterSeconds(headers: unknown): number | undefined {
   return Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))
 }
 
+/** 读取成功或失败响应都可能携带的诊断与退避响应头。 */
+export function readApiResponseMetadata(headers: unknown): ApiResponseMetadata {
+  return {
+    requestId: readHeader(headers, 'x-request-id'),
+    retryAfterSeconds: readRetryAfterSeconds(headers),
+  }
+}
+
 /** 把 Axios、运行时和未知异常转换为界面可安全展示的统一错误。 */
 export function toApiError(error: unknown): ApiError {
   if (error instanceof ApiError) {
@@ -106,11 +119,11 @@ export function toApiError(error: unknown): ApiError {
   }
 
   const status = error.response.status
+  const responseMetadata = readApiResponseMetadata(error.response.headers)
   const metadata: ApiErrorMetadata = {
     status,
     code: readErrorCode(error.response.data),
-    requestId: readHeader(error.response.headers, 'x-request-id'),
-    retryAfterSeconds: readRetryAfterSeconds(error.response.headers),
+    ...responseMetadata,
   }
 
   if (status >= 500) {

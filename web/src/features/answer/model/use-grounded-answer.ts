@@ -1,6 +1,11 @@
 import { computed, onScopeDispose, ref, shallowRef } from 'vue'
 import type { GroundedAnswer } from '../../../entities/answer/model/grounded-answer'
 import { toApiError, type ApiError } from '../../../shared/api/api-error'
+import {
+  capacityFailureFromApiError,
+  type CapacityFailure,
+} from '../../../shared/api/capacity-error'
+import { useRetryCooldown } from '../../../shared/api/use-retry-cooldown'
 import { askGroundedQuestion, type AskGroundedQuestionParams } from '../api/answer-api'
 
 export type GroundedAnswerState = 'idle' | 'loading' | 'success' | 'insufficient-evidence' | 'error'
@@ -34,13 +39,19 @@ export function useGroundedAnswer() {
   const result = shallowRef<GroundedAnswer | null>(null)
   const errorMessage = ref('')
   const requestId = ref<string | null>(null)
+  const capacityFailure = ref<CapacityFailure | null>(null)
+  const retryCooldown = useRetryCooldown()
   let activeController: AbortController | null = null
   let lastParams: AskGroundedQuestionParams | null = null
 
   const isLoading = computed(() => state.value === 'loading')
-  const canRetry = computed(() => state.value === 'error' && lastParams !== null)
+  const retryAvailable = computed(() => state.value === 'error' && lastParams !== null)
+  const canRetry = computed(
+    () => retryAvailable.value && !retryCooldown.isCoolingDown.value && !isLoading.value,
+  )
 
   async function ask(params: AskGroundedQuestionParams): Promise<void> {
+    if (retryCooldown.isCoolingDown.value) return
     activeController?.abort()
     const requestController = new AbortController()
     activeController = requestController
@@ -48,6 +59,8 @@ export function useGroundedAnswer() {
     result.value = null
     errorMessage.value = ''
     requestId.value = null
+    capacityFailure.value = null
+    retryCooldown.reset()
     state.value = 'loading'
 
     try {
@@ -60,7 +73,10 @@ export function useGroundedAnswer() {
       if (requestController.signal.aborted) return
 
       const apiError = toApiError(error)
-      errorMessage.value = answerErrorMessage(apiError)
+      const capacity = capacityFailureFromApiError(apiError, 2)
+      capacityFailure.value = capacity
+      if (capacity) retryCooldown.start(capacity.retryAfterSeconds)
+      errorMessage.value = capacity?.message ?? answerErrorMessage(apiError)
       requestId.value = apiError.requestId ?? null
       state.value = 'error'
     } finally {
@@ -69,15 +85,21 @@ export function useGroundedAnswer() {
   }
 
   async function retry(): Promise<void> {
-    if (!lastParams) return
+    if (!lastParams || !canRetry.value) return
     await ask(lastParams)
   }
 
-  function reset(): void {
+  function reset(options: { preserveCapacity?: boolean } = {}): void {
     activeController?.abort()
     activeController = null
     lastParams = null
     result.value = null
+    if (options.preserveCapacity && capacityFailure.value) {
+      state.value = 'error'
+      return
+    }
+    capacityFailure.value = null
+    retryCooldown.reset()
     errorMessage.value = ''
     requestId.value = null
     state.value = 'idle'
@@ -88,11 +110,15 @@ export function useGroundedAnswer() {
   return {
     ask,
     canRetry,
+    capacityFailure,
     errorMessage,
+    isCoolingDown: retryCooldown.isCoolingDown,
     isLoading,
     requestId,
     reset,
     result,
+    retryAfterSeconds: retryCooldown.remainingSeconds,
+    retryAvailable,
     retry,
     state,
   }
