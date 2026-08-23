@@ -1,4 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
+import { createPinia, setActivePinia, type Pinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { DocumentPage, ResearchDocument } from '../entities/document/model/document'
@@ -7,6 +8,7 @@ import type {
   SemanticSearchResult,
 } from '../entities/search-result/model/search-result'
 import { listDocuments } from '../features/documents/api/document-api'
+import { useAuthStore } from '../features/auth/store/auth-store'
 import { searchKeywords } from '../features/search/api/search-keywords'
 import { searchSemantically } from '../features/search/api/search-semantically'
 import SearchPage from './SearchPage.vue'
@@ -59,7 +61,25 @@ const semanticResult: SemanticSearchResult = {
   hits: [],
 }
 
+let pinia: Pinia
+
 beforeEach(() => {
+  localStorage.clear()
+  sessionStorage.clear()
+  pinia = createPinia()
+  setActivePinia(pinia)
+  useAuthStore(pinia).$patch({
+    status: 'authenticated',
+    sessionExpiresAt: null,
+    user: {
+      id: 17,
+      email: 'learner@example.com',
+      phone: null,
+      displayName: 'learner',
+      status: 'active',
+      createdAt: '2026-08-17T08:04:16Z',
+    },
+  })
   listDocumentsMock.mockReset()
   listDocumentsMock.mockResolvedValue(documentPage)
   searchKeywordsMock.mockReset()
@@ -77,7 +97,7 @@ describe('SearchPage document scope integration', () => {
     await router.push('/search?q=bridge&page=2')
     await router.isReady()
 
-    const wrapper = mount(SearchPage, { global: { plugins: [router] } })
+    const wrapper = mount(SearchPage, { global: { plugins: [pinia, router] } })
     await flushPromises()
 
     await wrapper.get('#document-scope').setValue('document:42')
@@ -105,7 +125,7 @@ describe('SearchPage document scope integration', () => {
     await router.push('/search?document_id=42')
     await router.isReady()
 
-    const wrapper = mount(SearchPage, { global: { plugins: [router] } })
+    const wrapper = mount(SearchPage, { global: { plugins: [pinia, router] } })
     await flushPromises()
 
     await wrapper.get('.retrieval-mode-selector button:last-child').trigger('click')

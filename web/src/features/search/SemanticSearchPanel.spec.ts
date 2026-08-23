@@ -26,12 +26,15 @@ const result: SemanticSearchResult = {
   ],
 }
 
-beforeEach(() => searchSemanticallyMock.mockReset())
+beforeEach(() => {
+  sessionStorage.clear()
+  searchSemanticallyMock.mockReset()
+})
 afterEach(() => vi.useRealTimers())
 
 function mountPanel(scopeIsValid = true) {
   return mount(SemanticSearchPanel, {
-    props: { scope: { kind: 'single', documentId: 7 }, scopeIsValid },
+    props: { cacheOwnerUserId: 17, scope: { kind: 'single', documentId: 7 }, scopeIsValid },
     global: {
       stubs: { RouterLink: { template: '<a><slot /></a>' } },
     },
@@ -111,5 +114,27 @@ describe('SemanticSearchPanel', () => {
     expect(wrapper.get('.primary-button').attributes('disabled')).toBeDefined()
     expect(searchSemanticallyMock).not.toHaveBeenCalled()
     wrapper.unmount()
+  })
+
+  it('刷新恢复同一用户和范围的最后结果，不会再次调用远程模型', async () => {
+    searchSemanticallyMock.mockResolvedValueOnce(result)
+    const firstWrapper = mountPanel()
+    await firstWrapper.get('#semantic-query').setValue('如何提高悬浮稳定性？')
+    await firstWrapper.get('select').setValue('10')
+    await firstWrapper.get('form').trigger('submit')
+    await flushPromises()
+    firstWrapper.unmount()
+
+    searchSemanticallyMock.mockClear()
+    const restoredWrapper = mountPanel()
+
+    expect(searchSemanticallyMock).not.toHaveBeenCalled()
+    expect(restoredWrapper.get('#semantic-query').element).toHaveProperty(
+      'value',
+      '如何提高悬浮稳定性？',
+    )
+    expect(restoredWrapper.get('select').element).toHaveProperty('value', '10')
+    expect(restoredWrapper.text()).toContain('Maglev stability study')
+    restoredWrapper.unmount()
   })
 })

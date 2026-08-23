@@ -26,7 +26,10 @@ const result: SemanticSearchResult = {
   ],
 }
 
-beforeEach(() => searchSemanticallyMock.mockReset())
+beforeEach(() => {
+  sessionStorage.clear()
+  searchSemanticallyMock.mockReset()
+})
 afterEach(() => vi.useRealTimers())
 
 describe('useSemanticSearch', () => {
@@ -92,5 +95,38 @@ describe('useSemanticSearch', () => {
     expect(searchSemanticallyMock).toHaveBeenCalledTimes(2)
     expect(model.state.value).toBe('success')
     scope.stop()
+  })
+
+  it('只为同一用户和同一文档范围恢复经过校验的会话缓存', async () => {
+    searchSemanticallyMock.mockResolvedValueOnce(result)
+    const firstScope = effectScope()
+    const firstModel = firstScope.run(() =>
+      useSemanticSearch({ cacheOwnerUserId: 17, initialDocumentId: 7 }),
+    )!
+    await firstModel.search({ query: '问题', documentId: 7, topK: 5 })
+    firstScope.stop()
+
+    const restoredScope = effectScope()
+    const restoredModel = restoredScope.run(() =>
+      useSemanticSearch({ cacheOwnerUserId: 17, initialDocumentId: 7 }),
+    )!
+    expect(restoredModel.state.value).toBe('success')
+    expect(restoredModel.result.value).toEqual(result)
+    expect(restoredModel.restoredParams).toEqual({ query: '问题', documentId: 7, topK: 5 })
+    restoredScope.stop()
+
+    const otherUserScope = effectScope()
+    const otherUserModel = otherUserScope.run(() =>
+      useSemanticSearch({ cacheOwnerUserId: 18, initialDocumentId: 7 }),
+    )!
+    expect(otherUserModel.state.value).toBe('idle')
+    otherUserScope.stop()
+
+    const otherDocumentScope = effectScope()
+    const otherDocumentModel = otherDocumentScope.run(() =>
+      useSemanticSearch({ cacheOwnerUserId: 17, initialDocumentId: 8 }),
+    )!
+    expect(otherDocumentModel.state.value).toBe('idle')
+    otherDocumentScope.stop()
   })
 })

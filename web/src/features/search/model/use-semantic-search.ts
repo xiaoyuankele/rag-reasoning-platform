@@ -7,8 +7,15 @@ import {
 } from '../../../shared/api/capacity-error'
 import { useRetryCooldown } from '../../../shared/api/use-retry-cooldown'
 import { searchSemantically, type SemanticSearchParams } from '../api/search-semantically'
+import { readCachedSemanticSearch, writeCachedSemanticSearch } from './semantic-search-cache'
 
 export type SemanticSearchState = 'idle' | 'loading' | 'success' | 'empty' | 'error'
+
+export interface SemanticSearchOptions {
+  cacheOwnerUserId?: number
+  initialDocumentId?: number
+  restoreCachedResult?: boolean
+}
 
 function semanticSearchErrorMessage(error: ApiError): string {
   if (error.kind === 'conflict') {
@@ -34,7 +41,7 @@ function semanticSearchErrorMessage(error: ApiError): string {
 }
 
 /** 管理一次显式语义检索；不在页面挂载或输入变化时自动调用远程模型。 */
-export function useSemanticSearch() {
+export function useSemanticSearch(options: SemanticSearchOptions = {}) {
   const state = ref<SemanticSearchState>('idle')
   const result = shallowRef<SemanticSearchResult | null>(null)
   const errorMessage = ref('')
@@ -43,7 +50,16 @@ export function useSemanticSearch() {
   const needsVectorization = ref(false)
   const retryCooldown = useRetryCooldown()
   let activeController: AbortController | null = null
-  let lastParams: SemanticSearchParams | null = null
+  const restoredSearch =
+    options.cacheOwnerUserId && options.restoreCachedResult !== false
+      ? readCachedSemanticSearch(options.cacheOwnerUserId, options.initialDocumentId)
+      : null
+  let lastParams: SemanticSearchParams | null = restoredSearch?.params ?? null
+
+  if (restoredSearch) {
+    result.value = restoredSearch.result
+    state.value = restoredSearch.result.hits.length === 0 ? 'empty' : 'success'
+  }
 
   const isLoading = computed(() => state.value === 'loading')
   const retryAvailable = computed(() => state.value === 'error' && lastParams !== null)
@@ -72,6 +88,9 @@ export function useSemanticSearch() {
 
       result.value = nextResult
       state.value = nextResult.hits.length === 0 ? 'empty' : 'success'
+      if (options.cacheOwnerUserId) {
+        writeCachedSemanticSearch(options.cacheOwnerUserId, params, nextResult)
+      }
     } catch (error) {
       if (requestController.signal.aborted) return
 
@@ -126,6 +145,7 @@ export function useSemanticSearch() {
     retry,
     retryAfterSeconds: retryCooldown.remainingSeconds,
     retryAvailable,
+    restoredParams: restoredSearch?.params ?? null,
     search,
     state,
   }

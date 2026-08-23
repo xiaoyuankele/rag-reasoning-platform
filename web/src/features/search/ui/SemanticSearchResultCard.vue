@@ -1,12 +1,40 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { SemanticSearchHit } from '../../../entities/search-result/model/search-result'
+import { highlightKeywords } from '../model/highlight-keyword'
 
 const props = defineProps<{
   hit: SemanticSearchHit
+  query: string
 }>()
 
 const documentLabel = computed(() => props.hit.title?.trim() || props.hit.originalName)
+const contentSegments = computed(() => {
+  const query = props.query.trim()
+  const content = props.hit.content
+  const fragments = new Set<string>()
+
+  // 语义检索不要求完整查询出现在正文中。对中文连续查询，按“最长连续命中”
+  // 选择片段，避免把每个双字片段都高亮造成视觉噪声。
+  for (const match of query.matchAll(/[\u3400-\u9fff]{2,}/gu)) {
+    const text = match[0]
+    for (let length = Math.min(8, text.length); length >= 2; length -= 1) {
+      for (let start = 0; start + length <= text.length; start += 1) {
+        const fragment = text.slice(start, start + length)
+        if (content.includes(fragment)) fragments.add(fragment)
+      }
+    }
+  }
+
+  const selected = [...fragments].sort((left, right) => [...right].length - [...left].length)
+  const nonOverlapping: string[] = []
+  for (const fragment of selected) {
+    if (!nonOverlapping.some((chosen) => chosen.includes(fragment) || fragment.includes(chosen))) {
+      nonOverlapping.push(fragment)
+    }
+  }
+  return highlightKeywords(content, [query, ...nonOverlapping])
+})
 const similarityLabel = computed(
   () => `${Math.round(Math.max(0, Math.min(1, props.hit.similarity)) * 100)}%`,
 )
@@ -31,7 +59,12 @@ const pageLabel = computed(() => {
       </div>
     </header>
 
-    <p class="result-content">{{ hit.content }}</p>
+    <p class="result-content">
+      <template v-for="(segment, index) in contentSegments" :key="index">
+        <mark v-if="segment.highlighted">{{ segment.text }}</mark>
+        <template v-else>{{ segment.text }}</template>
+      </template>
+    </p>
 
     <footer>
       <span>{{ pageLabel }}</span>
@@ -96,6 +129,15 @@ header p {
   font-size: 14px;
   line-height: 1.8;
   white-space: pre-wrap;
+}
+
+mark {
+  padding: 1px 2px;
+  border-radius: 3px;
+  background: var(--color-highlight);
+  color: inherit;
+  font-weight: 650;
+  box-decoration-break: clone;
 }
 
 footer {

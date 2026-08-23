@@ -8,6 +8,7 @@ import { useSemanticSearch } from '../model/use-semantic-search'
 import SemanticSearchResultCard from './SemanticSearchResultCard.vue'
 
 const props = defineProps<{
+  cacheOwnerUserId: number
   scope: DocumentScope
   scopeIsValid: boolean
 }>()
@@ -28,9 +29,19 @@ const {
   retry,
   retryAfterSeconds,
   retryAvailable,
+  restoredParams,
   search,
   state,
-} = useSemanticSearch()
+} = useSemanticSearch({
+  cacheOwnerUserId: props.cacheOwnerUserId,
+  initialDocumentId: documentIdFromScope(props.scope),
+  restoreCachedResult: props.scopeIsValid,
+})
+
+if (restoredParams) {
+  queryInput.value = restoredParams.query
+  topK.value = restoredParams.topK
+}
 
 const queryCharacterCount = computed(() => [...queryInput.value].length)
 const canSubmit = computed(
@@ -186,7 +197,7 @@ function submitSearch(): void {
 
       <ol>
         <li v-for="hit in result.hits" :key="hit.chunkId">
-          <SemanticSearchResultCard :hit="hit" />
+          <SemanticSearchResultCard :hit="hit" :query="result.query" />
         </li>
       </ol>
     </div>

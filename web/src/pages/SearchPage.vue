@@ -7,14 +7,19 @@ import {
   type DocumentScope,
 } from '../entities/document/model/document-scope'
 import DocumentScopePicker from '../features/documents/ui/DocumentScopePicker.vue'
+import { useAuthStore } from '../features/auth/store/auth-store'
 import KeywordSearchPanel from '../features/search/ui/KeywordSearchPanel.vue'
 import SemanticSearchPanel from '../features/search/ui/SemanticSearchPanel.vue'
+import { removeLegacySearchCaches } from '../features/search/model/semantic-search-cache'
 import PageHeader from '../shared/ui/PageHeader.vue'
 
 const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
+removeLegacySearchCaches()
 
 const parsedScope = computed(() => parseDocumentScopeQuery(route.query.document_id))
+const cacheOwnerUserId = computed(() => authStore.user?.id ?? 0)
 const searchPageMode = computed<'keyword' | 'semantic'>(() =>
   route.query.mode === 'semantic' ? 'semantic' : 'keyword',
 )
@@ -88,6 +93,7 @@ function updateScope(scope: DocumentScope): void {
     />
     <SemanticSearchPanel
       v-if="searchPageMode === 'semantic'"
+      :cache-owner-user-id="cacheOwnerUserId"
       :scope="parsedScope.scope"
       :scope-is-valid="parsedScope.isValid"
     />
