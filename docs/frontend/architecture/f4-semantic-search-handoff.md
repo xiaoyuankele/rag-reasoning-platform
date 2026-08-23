@@ -1,0 +1,82 @@
+# F4 语义检索前端交接
+
+## 1. 当前状态
+
+2026-08-23，`POST /semantic-search` 的前端基础切片已经实现并通过自动化门禁。页面入口为现有 `/search` 的“语义检索”模式，
+使用 `/search?mode=semantic` 恢复模式和可选 `document_id`，但不会把问题正文或结果持久化。
+
+当前后端默认 `SEMANTIC_SEARCH_ENABLED=false`。代码完成不等于真实远程链路已验收；启用能力可能调用远程 Embedding，必须由用户
+显式决定并在受控环境完成纵向测试。
+
+## 2. 数据流与分层
+
+```text
+SearchPage
+  ├─ DocumentScopePicker（全部 / 单篇）
+  └─ SemanticSearchPanel（显式提交）
+       → useSemanticSearch（单次状态、取消、错误与冷却）
+       → searchSemantically（HTTP + 运行时 DTO 校验）
+       → POST /semantic-search
+       → SemanticSearchResultCard（来源、页码、正文、相似度）
+```
+
+- 领域模型位于 `entities/search-result`，与后端 snake_case DTO 隔离；
+- API、状态和 UI 位于 `features/search`，但 semantic 文件不复用关键词分页 composable；
+- 页面只组合模式和共享范围，不直接处理 HTTP；
+- 问答来源、关键词命中与语义命中含义不同，不强行合并为一个万能 DTO。
+
+## 3. 正式请求与结果
+
+请求字段：
+
+- `query`：必填，最多 1000 字符；
+- `document_id`：可选正整数，缺省表示当前用户全部可用文档；
+- `top_k`：1～20，当前 UI 提供 3、5、10、20。
+
+结果展示：
+
+- 文档标题或原文件名；
+- MIME 类型、文档 ID、chunk 序号；
+- 页码范围和文本块正文；
+- similarity 百分比，仅表示检索排序相关度，不是概率、答案可信度或文档质量评分。
+
+前端对 query、数组结构、ID、页码和有限的 `[-1, 1]` similarity 做运行时校验，避免 TypeScript 静态类型掩盖异常 HTTP 响应。
+
+## 4. 请求与错误状态
+
+- `idle`：提示远程成本，不自动请求；
+- `loading`：禁用重复提交，并允许新提交取消上一请求；
+- `success` / `empty`：分别显示命中或正常零结果；
+- `409`：提示当前范围尚未完成向量化，并提供向量页面入口；
+- `404`：区分指定文档不存在和后端未启用语义路由的安全提示；
+- `embedding_provider_capacity_exhausted`：遵守 `Retry-After`，等待期不重复 POST，到期后仅开放手动重试；
+- 超时、502、通用 503、响应异常：显示安全中文信息和可用的 `X-Request-ID`。
+
+第一版不会自动重试，因为语义检索可能产生远程模型成本，也不能让多个页面在容量恢复瞬间同时重放。
+
+## 5. 当前完成边界
+
+已完成：
+
+- 关键词/语义显式模式切换；
+- 全部/单篇范围复用；
+- 独立 API、状态模型、UI 和运行时 DTO 校验；
+- 显式提交、取消旧请求、空结果、409 引导、容量冷却和安全错误；
+- API、composable、组件和页面测试。
+
+尚未完成：
+
+- `SEMANTIC_SEARCH_ENABLED=true` 环境的真实远程联调；
+- 后端可证明的当前 revision AI-ready 过滤；
+- 任意多篇文档范围、混合关键词/向量召回、分页或重排序；
+- 相似度阈值配置和结果解释。这些必须先由真实样本与后端契约证明需要。
+
+## 6. 真实验收清单
+
+1. 显式启用后端能力并确认 `/health` 与登录 Session 正常；
+2. 验证页面进入和输入不会产生 `POST /semantic-search`；
+3. 对已向量化单篇文档显式提交，核对来源、页码、正文和排序；
+4. 在全部范围验证 OwnerScope，不出现其他用户文档；
+5. 对未向量化范围验证 409 与向量化入口；
+6. 受控触发 provider 容量，核对倒计时、请求编号、输入保留和无自动重放；
+7. 关闭能力后确认页面给出功能未启用提示，不泄露后端内部异常。

@@ -107,6 +107,11 @@ app → pages → features → entities → shared
 解析 `ready` 项。页面层负责组合文档选择与检索，具体边界见
 [F2-C 单篇 / 全部文档检索范围选择器](f2c-document-scope-picker.md)。
 
+语义检索沿用相同的 `DocumentScope`，但只在 `/search?mode=semantic` 的显式提交中使用。问题正文和单次结果不写入 URL、Pinia
+或浏览器持久化；`features/search` 内的 semantic API、composable 与 UI 独立于关键词分页状态，也独立于问答来源 DTO。
+语义请求使用 30 秒超时，并复用共享容量错误与手动重试冷却；模式切换只负责页面组合，不会让两个检索流程互相自动触发。
+具体边界见 [F4 语义检索前端交接](f4-semantic-search-handoff.md)。
+
 ## 5. HTTP 与契约边界
 
 - 所有 URL、方法、超时和响应解析统一进入 API Client；
@@ -120,6 +125,9 @@ app → pages → features → entities → shared
 带来源问答已经按该边界实现：`AnswerPage` 只组合共享文档范围与 `GroundedAnswerPanel`；`features/answer` 分为 API、model、UI，
 `entities/answer` 保存与 HTTP DTO 解耦的回答模型。问题不会写入 URL、Pinia 或浏览器持久存储；只有用户显式提交才调用
 `POST /answers`。问答请求使用独立 70 秒超时覆盖远程生成窗口，其余 API 继续使用基础 Client 的 10 秒超时。
+
+语义检索也已按同一原则实现，但不会复用问答请求或答案模型：`SearchPage` 组合关键词/语义模式，semantic feature 独立调用
+`POST /semantic-search` 并运行时转换命中结果；只有显式提交才可能产生在线 Embedding 调用。
 
 当前开发环境约定：浏览器请求以 `/api` 为基础路径，Vite 开发代理将其转发到默认
 `http://localhost:8080` 并移除 `/api` 前缀。生产环境仍需由部署层提供同源反向代理，
@@ -206,7 +214,7 @@ Element Plus 只用于弹窗、分页、选择器、消息等行为成熟的组�
 ```
 
 - Vite 负责转换和构建，类型检查必须由 `vue-tsc` 单独执行；
-- Vitest 验证状态转换、错误转换和纯逻辑；当前 30 个测试文件、111 个测试通过；
+- Vitest 验证状态转换、错误转换和纯逻辑；当前 35 个测试文件、138 个测试通过；
 - Vue Test Utils 验证组件渲染和用户交互；
 - Playwright 在 F5 验证上传、处理、搜索和问答主流程；
 - 测试优先断言用户可观察结果，不依赖组件内部实现细节。

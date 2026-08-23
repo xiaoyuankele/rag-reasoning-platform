@@ -12,6 +12,9 @@
 > 证明它匹配当前 document revision。
 > F2-C 第一阶段“单篇 / 全部文档”共享检索范围选择器已经接入，F3 关键词检索不再要求手填文档 ID，
 > 并已完成真实后端结果联调、零命中辨识、文本块关键词安全高亮，以及 2～8 个关键词的 all/any + within=chunk 检索；
+> F4 语义检索基础切片已经在同一检索页以显式模式接入，复用全部/单篇范围，支持 top_k、来源页码、相似度、409 向量化引导、
+> 容量冷却和安全错误状态；它使用独立 DTO、API、composable 与结果组件，不会随输入、页面挂载或模式切换自动调用远程模型。
+> 当前 `SEMANTIC_SEARCH_ENABLED=false`，真实远程 Embedding 纵向联调等待用户显式启用。
 > F4 带来源问答基础页已经按正式 `/answers` 契约接入全部/单篇范围、语言、top_k、来源、Token、重试和安全错误状态。
 > 当前 `ANSWER_ENABLED=false`，真实 Generation 与费用链路等待用户显式启用。
 > F100-1 第一批容量交互已经接入：向量化页面识别 owner/global 容量拒绝和批量逐项暂缓，问答页面识别 Answer/在线
@@ -47,9 +50,10 @@
 15. [F3 检索对 Chunk 质量的依赖](architecture/f3-chunk-quality-dependency.md)；
 16. [F3 文档解析器替换与并行评估](architecture/f3-document-parser-package-evaluation.md)；
 17. [用户可选向量化与文档编辑前端交接](architecture/document-vectorization-editing-handoff.md)（基础向量化页面已实现）；
-18. [F4 带来源问答基础页面](architecture/f4-grounded-answer-handoff.md)；
-19. [100 人在线并发前端交接](architecture/100-user-concurrency-handoff.md)；
-20. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
+18. [F4 语义检索基础页面](architecture/f4-semantic-search-handoff.md)；
+19. [F4 带来源问答基础页面](architecture/f4-grounded-answer-handoff.md)；
+20. [100 人在线并发前端交接](architecture/100-user-concurrency-handoff.md)；
+21. Git 忽略目录中的 `chatgpt/前端/README.md` 和当前进度记录。
 
 ## 文档边界
 
