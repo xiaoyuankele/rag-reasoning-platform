@@ -358,6 +358,10 @@ Token、成功/失败/跳过状态以及平均、P50、P95 耗时。重试前已
 该版本只读取现有 JSONL，不访问数据库或远程模型。旧日志没有异步问答事件时，`answer_jobs` 保持空汇总；
 同一个 v6 异步事件若只缺失部分队列字段，则报告器会拒绝该损坏样本，避免产生相互矛盾的容量结论。
 
+异步问答保留期清理成功删除一批数据时输出 `answer_jobs_cleaned`，字段为 `deleted_count`、
+`completed_before`、`batch_size` 和 `duration_ms`。没有过期数据时不反复写空日志；数据库清理失败由 WorkerLoop
+输出 `answer_job_retention_error`。两种事件均禁止记录问题、答案、来源和 Owner ID。
+
 完整冻结条件、PowerShell 命令、字段口径和金额换算方法见
 [模型调用成本基线](../performance/model-call-cost-baseline.md)。真实付费批次必须单独获得授权。
 

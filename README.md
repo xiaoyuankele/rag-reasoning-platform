@@ -458,6 +458,9 @@ Go 后端当前支持以下环境变量：
 | `ANSWER_JOB_MAX_ATTEMPTS` | `3` | 临时失败允许的最大执行次数 |
 | `ANSWER_JOB_RETRY_BASE_DELAY` | `2s` | 第一次重试的基础退避时间 |
 | `ANSWER_JOB_RETRY_MAX_DELAY` | `30s` | 指数退避的最长等待时间 |
+| `ANSWER_JOB_RETENTION` | `168h` | succeeded/failed/canceled 异步问答结果的保留期；到期后问题、答案和来源快照一并删除 |
+| `ANSWER_JOB_CLEANUP_INTERVAL` | `1h` | 后台保留期清理在队列为空时的检查间隔 |
+| `ANSWER_JOB_CLEANUP_BATCH_SIZE` | `500` | 每个短事务最多删除的过期终态任务数，范围 1～10000 |
 | `DASHSCOPE_GENERATION_ENDPOINT` | 百炼中国内地兼容地址 | DashScope Chat Completions HTTP API 地址 |
 | `GENERATION_MODEL` | `qwen3.6-flash` | 第一版回答生成模型；由后端配置，不接受前端任意指定 |
 | `GENERATION_HTTP_TIMEOUT` | `60s` | 单次远程回答生成请求超时 |
