@@ -122,7 +122,7 @@ func (s *SemanticSearchService) Search(
 	scope accessdomain.OwnerScope,
 	input SemanticSearchInput,
 ) (SemanticSearchOutput, error) {
-	query, err := validateSemanticSearchInput(input)
+	query, err := ValidateSemanticSearchInput(input)
 	if err != nil {
 		return SemanticSearchOutput{}, err
 	}
@@ -205,7 +205,9 @@ func (s *SemanticSearchService) Search(
 	}, nil
 }
 
-func validateSemanticSearchInput(input SemanticSearchInput) (string, error) {
+// ValidateSemanticSearchInput 校验并规范化语义检索输入，但不会调用远程模型。
+// 异步问答排队服务复用它，避免把无效问题持久化后才由 Worker 发现。
+func ValidateSemanticSearchInput(input SemanticSearchInput) (string, error) {
 	query := strings.TrimSpace(input.Query)
 	if query == "" {
 		return "", ErrSemanticSearchQueryRequired
