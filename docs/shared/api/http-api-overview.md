@@ -37,6 +37,7 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `POST` | `/semantic-search` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k` | `200`；远程 Embedding 容量等待超时 `503` | 在当前用户文档中进行语义检索 | 用户功能；已隔离，受功能开关和共享闸门控制 |
 | `POST` | `/answers` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200`；问答或远程 Embedding 容量等待超时 `503` | 基于当前用户来源生成回答 | 用户功能；已隔离，受功能开关和并发闸门控制 |
 | `POST` | `/answer-jobs` | Session Cookie；JSON 同 `/answers` | `202`；用户排队满额 `429`；全局排队满额 `503` | 创建可跨请求恢复的异步问答任务 | 用户功能；默认关闭/已隔离/持久化背压 |
+| `GET` | `/answer-jobs` | Session Cookie；查询参数 `page`、`page_size` | `200` | 分页列出当前用户仍在保留期内的异步问答任务 | 用户功能；已隔离/不调用远程模型 |
 | `GET` | `/answer-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户异步问答状态和可选结果 | 用户功能；已隔离/轮询 |
 | `POST` | `/answer-jobs/:id/cancel` | Session Cookie；路径参数 `id` | `200` | 幂等取消 queued 问答任务 | 用户功能；processing/成功/失败返回 `409` |
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册或密码重置验证码挑战 | 认证功能；`purpose` 为 `register` 或 `password_reset` |
@@ -331,6 +332,43 @@ Content-Type: application/json
 }
 ```
 
+页面刷新或更换设备后，可以通过 `GET /answer-jobs?page=1&page_size=20` 重新发现当前用户的任务。`page`
+默认 1，`page_size` 默认 20、最大 100；结果按 `created_at DESC, id DESC` 排序。列表不会调用检索或远程生成
+模型，也不会占用问答执行槽位：
+
+```json
+{
+  "jobs": [
+    {
+      "id": 51,
+      "document_id": 20,
+      "query": "磁悬浮系统如何抑制振动？",
+      "top_k": 5,
+      "requested_response_language": "zh",
+      "status": "queued",
+      "cancelable": true,
+      "attempt_count": 0,
+      "error_message": null,
+      "result": null,
+      "next_attempt_at": "2026-08-24T10:00:00Z",
+      "created_at": "2026-08-24T10:00:00Z",
+      "updated_at": "2026-08-24T10:00:00Z",
+      "started_at": null,
+      "completed_at": null
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total": 1,
+    "total_pages": 1
+  }
+}
+```
+
+没有任务时 `jobs` 固定为 `[]`，不会返回 `null`。列表只统计当前 Session 对应 OwnerScope 的任务；已超过
+保留期并被清理的任务自然不再出现。
+
 状态机是 `queued → processing → succeeded|failed`，另有 `queued → canceled`。只有 `queued` 可取消；
 对已经 `canceled` 的任务重复取消仍返回 `200`，`processing` 或成功/失败终态返回 `409`。成功后 `result`
 包含与同步问答一致的 `answer`、`response_language`、`sources` 和 `usage`。
@@ -341,6 +379,8 @@ Content-Type: application/json
 | --- | --- | --- |
 | JSON、query、document_id、top_k 或语言无效 | `400` | `invalid_answer_job_request` |
 | 路径任务 ID 无效 | `400` | `invalid_answer_job_id` |
+| 列表 `page` 不是正整数 | `400` | `invalid_answer_job_page` |
+| 列表 `page_size` 不在 1～100 | `400` | `invalid_answer_job_page_size` |
 | 任务不存在或属于其他用户 | `404` | `answer_job_not_found` |
 | processing 任务不可取消 | `409` | `answer_job_processing` |
 | 成功/失败终态不可取消 | `409` | `answer_job_terminal` |
@@ -353,7 +393,8 @@ Content-Type: application/json
 
 成功、失败和取消任务默认保留 7 天，随后由后端有界批量删除；问题、答案、来源和 Token 快照会随任务行一并
 删除。到期后继续查询该 ID 返回与不存在相同的 `404 answer_job_not_found`。`queued/processing` 不受保留期
-清理影响。第一版尚未提供任务列表；多后端副本的全局生成容量仍需要 Redis/数据库分布式准入。
+清理影响。任务列表只提供分页发现，第一版尚未提供状态筛选或全文搜索；多后端副本的全局生成容量仍需要
+Redis/数据库分布式准入。
 
 ## 3. P6 认证接口状态
 
