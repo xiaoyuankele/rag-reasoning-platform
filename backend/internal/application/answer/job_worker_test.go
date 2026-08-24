@@ -14,6 +14,8 @@ import (
 type fakeAnswerJobWorkerRepository struct {
 	job             Job
 	claimErr        error
+	queueStats      JobQueueStats
+	queueStatsErr   error
 	succeededOutput Output
 	succeededID     int64
 	requeuedID      int64
@@ -25,6 +27,11 @@ type fakeAnswerJobWorkerRepository struct {
 
 func (f *fakeAnswerJobWorkerRepository) ClaimNextAnswerJob(context.Context) (Job, error) {
 	return f.job, f.claimErr
+}
+func (f *fakeAnswerJobWorkerRepository) GetAnswerJobQueueStats(
+	context.Context,
+) (JobQueueStats, error) {
+	return f.queueStats, f.queueStatsErr
 }
 func (f *fakeAnswerJobWorkerRepository) MarkAnswerJobSucceeded(
 	_ context.Context,
@@ -171,10 +178,113 @@ func TestAnswerJobWorkerReturnsIdleForEmptyQueue(t *testing.T) {
 	}
 }
 
+func TestAnswerJobWorkerReportsRecoveredAttemptAndQueueStats(t *testing.T) {
+	createdAt := time.Now().Add(-5 * time.Second)
+	startedAt := createdAt.Add(2 * time.Second)
+	repository := &fakeAnswerJobWorkerRepository{
+		job: Job{
+			ID:                        14,
+			OwnerUserID:               42,
+			Query:                     "question",
+			TopK:                      5,
+			RequestedResponseLanguage: ResponseLanguageAuto,
+			Status:                    JobStatusProcessing,
+			AttemptCount:              2,
+			CreatedAt:                 createdAt,
+			NextAttemptAt:             createdAt.Add(time.Second),
+			StartedAt:                 &startedAt,
+		},
+		queueStats: JobQueueStats{
+			QueuedCount:             3,
+			ReadyQueuedCount:        2,
+			ProcessingCount:         1,
+			MaxOwnerProcessingCount: 1,
+			OldestReadyWait:         4 * time.Second,
+		},
+	}
+	answerer := &fakeAnswerer{answer: func(
+		context.Context,
+		accessdomain.OwnerScope,
+		Input,
+	) (Output, error) {
+		return Output{Answer: "answer", Sources: []Source{}}, nil
+	}}
+	observer := &recordingAnswerJobObserver{}
+	worker := newAnswerJobWorkerWithObserverForTest(t, repository, answerer, observer)
+
+	handled, err := worker.RunOnce(t.Context())
+	if err != nil || !handled {
+		t.Fatalf("RunOnce() = %t, %v", handled, err)
+	}
+	if len(observer.events) != 2 {
+		t.Fatalf("events = %d, want started and succeeded", len(observer.events))
+	}
+	finalEvent := observer.events[1]
+	if finalEvent.Type != JobEventSucceeded || finalEvent.RetryCount != 1 ||
+		!finalEvent.Recovered || finalEvent.QueueWait != time.Second ||
+		finalEvent.ExecutionDuration < 0 || finalEvent.TotalDuration < 5*time.Second ||
+		finalEvent.QueueStats == nil || finalEvent.QueueStats.QueuedCount != 3 {
+		t.Fatalf("final event = %+v, want recovered attempt with timings and queue stats", finalEvent)
+	}
+}
+
+func TestAnswerJobWorkerIgnoresQueueStatsFailure(t *testing.T) {
+	repository := &fakeAnswerJobWorkerRepository{
+		job:           testClaimedAnswerJob(15, 1),
+		queueStatsErr: errors.New("stats unavailable"),
+	}
+	answerer := &fakeAnswerer{answer: func(
+		context.Context,
+		accessdomain.OwnerScope,
+		Input,
+	) (Output, error) {
+		return Output{Answer: "answer", Sources: []Source{}}, nil
+	}}
+	observer := &recordingAnswerJobObserver{}
+	worker := newAnswerJobWorkerWithObserverForTest(t, repository, answerer, observer)
+
+	handled, err := worker.RunOnce(t.Context())
+	if err != nil || !handled || repository.succeededID != 15 {
+		t.Fatalf("RunOnce() = %t, %v, succeededID=%d", handled, err, repository.succeededID)
+	}
+	if len(observer.events) != 2 || observer.events[1].QueueStatsError == nil {
+		t.Fatalf("events = %+v, want non-fatal queue stats error", observer.events)
+	}
+}
+
+func TestAnswerJobQueueWaitUsesRetryReadyTime(t *testing.T) {
+	createdAt := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	readyAt := createdAt.Add(3 * time.Second)
+	startedAt := readyAt.Add(2 * time.Second)
+	job := Job{
+		CreatedAt:     createdAt,
+		NextAttemptAt: readyAt,
+		StartedAt:     &startedAt,
+	}
+
+	if got := answerJobQueueWait(job, startedAt.Add(time.Minute)); got != 2*time.Second {
+		t.Fatalf("answerJobQueueWait() = %s, want 2s", got)
+	}
+}
+
 func newAnswerJobWorkerForTest(
 	t *testing.T,
 	repository JobWorkerRepository,
 	answerer answerer,
+) *JobWorker {
+	return newAnswerJobWorkerWithObserverForTest(
+		t,
+		repository,
+		answerer,
+		&recordingAnswerJobObserver{},
+	)
+}
+
+func newAnswerJobWorkerWithObserverForTest(
+	t *testing.T,
+	repository JobWorkerRepository,
+	answerer answerer,
+	observer JobEventObserver,
 ) *JobWorker {
 	t.Helper()
 	retryPolicy, err := NewJobRetryPolicy(3, time.Second, 10*time.Second)
@@ -184,7 +294,7 @@ func newAnswerJobWorkerForTest(
 	worker, err := NewJobWorker(
 		repository,
 		answerer,
-		&recordingAnswerJobObserver{},
+		observer,
 		time.Minute,
 		retryPolicy,
 	)

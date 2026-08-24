@@ -385,6 +385,62 @@ func (r *AnswerJobRepository) ClaimNextAnswerJob(
 	return claimed, nil
 }
 
+// GetAnswerJobQueueStats 返回不含用户内容的全局队列快照。
+// 该查询只用于观测，不能参与任务是否成功的业务判断。
+func (r *AnswerJobRepository) GetAnswerJobQueueStats(
+	ctx context.Context,
+) (answerapplication.JobQueueStats, error) {
+	const query = `
+		SELECT
+			COUNT(*) FILTER (WHERE status = 'queued'),
+			COUNT(*) FILTER (
+				WHERE status = 'queued'
+				  AND next_attempt_at <= CURRENT_TIMESTAMP
+			),
+			COUNT(*) FILTER (WHERE status = 'processing'),
+			COALESCE((
+				SELECT MAX(owner_processing_count)
+				FROM (
+					SELECT COUNT(*) AS owner_processing_count
+					FROM answer_jobs
+					WHERE status = 'processing'
+					GROUP BY owner_user_id
+				) AS processing_by_owner
+			), 0),
+			COALESCE((
+				EXTRACT(EPOCH FROM (
+					CURRENT_TIMESTAMP -
+					MIN(GREATEST(created_at, next_attempt_at)) FILTER (
+						WHERE status = 'queued'
+						  AND next_attempt_at <= CURRENT_TIMESTAMP
+					)
+				)) * 1000
+			)::BIGINT, 0)
+		FROM answer_jobs
+	`
+	var stats answerapplication.JobQueueStats
+	var oldestReadyWaitMilliseconds int64
+	if err := r.pool.QueryRow(ctx, query).Scan(
+		&stats.QueuedCount,
+		&stats.ReadyQueuedCount,
+		&stats.ProcessingCount,
+		&stats.MaxOwnerProcessingCount,
+		&oldestReadyWaitMilliseconds,
+	); err != nil {
+		return answerapplication.JobQueueStats{}, fmt.Errorf(
+			"get answer job queue stats: %w",
+			err,
+		)
+	}
+	stats.OldestReadyWait = time.Duration(oldestReadyWaitMilliseconds) * time.Millisecond
+	if !stats.IsValid() {
+		return answerapplication.JobQueueStats{}, errors.New(
+			"get answer job queue stats: database returned invalid counts",
+		)
+	}
+	return stats, nil
+}
+
 func selectNextAnswerOwner(
 	ctx context.Context,
 	tx pgx.Tx,

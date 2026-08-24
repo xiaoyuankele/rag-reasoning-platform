@@ -202,6 +202,16 @@ func TestAnswerJobRepository(t *testing.T) {
 		if len(claimedOwners) != 2 {
 			t.Fatalf("claimed owners = %v, want two distinct owners", claimedOwners)
 		}
+		queueStats, err := repository.GetAnswerJobQueueStats(ctx)
+		if err != nil {
+			t.Fatalf("get answer job queue stats after claim: %v", err)
+		}
+		if queueStats.QueuedCount != 0 || queueStats.ReadyQueuedCount != 0 ||
+			queueStats.ProcessingCount != 2 ||
+			queueStats.MaxOwnerProcessingCount != 1 ||
+			queueStats.OldestReadyWait != 0 {
+			t.Fatalf("queue stats after claim = %+v, want two owners processing", queueStats)
+		}
 
 		for _, job := range claimedJobs {
 			output := answerapplication.Output{
@@ -229,6 +239,13 @@ func TestAnswerJobRepository(t *testing.T) {
 				stored.Result.Sources == nil {
 				t.Fatalf("stored answer job = %+v, want complete result snapshot", stored)
 			}
+		}
+		queueStats, err = repository.GetAnswerJobQueueStats(ctx)
+		if err != nil {
+			t.Fatalf("get answer job queue stats after completion: %v", err)
+		}
+		if queueStats.QueuedCount != 0 || queueStats.ProcessingCount != 0 {
+			t.Fatalf("queue stats after completion = %+v, want an idle queue", queueStats)
 		}
 	})
 }

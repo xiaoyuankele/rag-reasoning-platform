@@ -43,16 +43,50 @@ const (
 	JobEventUnfinished  JobEventType = "answer_job_unfinished"
 )
 
+// JobErrorCategory 是后端报告使用的稳定诊断分类。
+// 它不替代返回前端的 JobErrorCode，也不会包含供应商原始响应。
+type JobErrorCategory string
+
+const (
+	JobErrorCategoryInvalidInput             JobErrorCategory = "invalid_input"
+	JobErrorCategoryDocumentNotFound         JobErrorCategory = "document_not_found"
+	JobErrorCategoryEmbeddingsNotReady       JobErrorCategory = "document_embeddings_not_ready"
+	JobErrorCategoryAnswerCapacity           JobErrorCategory = "answer_capacity"
+	JobErrorCategoryEmbeddingCapacity        JobErrorCategory = "embedding_capacity"
+	JobErrorCategoryEmbeddingAuthentication  JobErrorCategory = "embedding_authentication"
+	JobErrorCategoryEmbeddingQuota           JobErrorCategory = "embedding_quota"
+	JobErrorCategoryEmbeddingRateLimit       JobErrorCategory = "embedding_rate_limit"
+	JobErrorCategoryEmbeddingRequest         JobErrorCategory = "embedding_request_rejected"
+	JobErrorCategoryEmbeddingResponse        JobErrorCategory = "embedding_invalid_response"
+	JobErrorCategoryEmbeddingUnavailable     JobErrorCategory = "embedding_unavailable"
+	JobErrorCategoryGenerationAuthentication JobErrorCategory = "generation_authentication"
+	JobErrorCategoryGenerationQuota          JobErrorCategory = "generation_quota"
+	JobErrorCategoryGenerationRateLimit      JobErrorCategory = "generation_rate_limit"
+	JobErrorCategoryGenerationRequest        JobErrorCategory = "generation_request_rejected"
+	JobErrorCategoryGenerationResponse       JobErrorCategory = "generation_invalid_response"
+	JobErrorCategoryGenerationUnavailable    JobErrorCategory = "generation_unavailable"
+	JobErrorCategoryTimeout                  JobErrorCategory = "timeout"
+	JobErrorCategoryCanceled                 JobErrorCategory = "canceled"
+	JobErrorCategoryInternal                 JobErrorCategory = "internal"
+)
+
 // JobEvent 不包含 Owner ID、问题、Prompt、答案或来源正文。
 type JobEvent struct {
-	Type          JobEventType
-	JobID         int64
-	Status        JobStatus
-	AttemptCount  int
-	Duration      time.Duration
-	NextAttemptAt *time.Time
-	ErrorCode     JobErrorCode
-	Err           error
+	Type              JobEventType
+	JobID             int64
+	Status            JobStatus
+	AttemptCount      int
+	RetryCount        int
+	Recovered         bool
+	QueueWait         time.Duration
+	ExecutionDuration time.Duration
+	TotalDuration     time.Duration
+	QueueStats        *JobQueueStats
+	QueueStatsError   error
+	NextAttemptAt     *time.Time
+	ErrorCode         JobErrorCode
+	ErrorCategory     JobErrorCategory
+	Err               error
 }
 
 // JobEventObserver 是 Worker 向 Observability 输出事件的端口。
@@ -152,22 +186,36 @@ func (w *JobWorker) RunOnce(ctx context.Context) (handled bool, err error) {
 	}
 
 	startedAt := time.Now()
+	queueWait := answerJobQueueWait(job, startedAt)
+	retryCount := max(job.AttemptCount-1, 0)
 	finalEvent := JobEvent{
 		Type:         JobEventUnfinished,
 		JobID:        job.ID,
 		Status:       JobStatusProcessing,
 		AttemptCount: job.AttemptCount,
+		RetryCount:   retryCount,
+		QueueWait:    queueWait,
 	}
-	w.events.ObserveAnswerJobEvent(ctx, JobEvent{
+	w.observeJobEvent(ctx, JobEvent{
 		Type:         JobEventStarted,
 		JobID:        job.ID,
 		Status:       JobStatusProcessing,
 		AttemptCount: job.AttemptCount,
+		RetryCount:   retryCount,
+		QueueWait:    queueWait,
 	})
 	defer func() {
-		finalEvent.Duration = time.Since(startedAt)
+		finishedAt := time.Now()
+		finalEvent.ExecutionDuration = finishedAt.Sub(startedAt)
+		finalEvent.TotalDuration = answerJobTotalDuration(
+			job,
+			finishedAt,
+			finalEvent.ExecutionDuration,
+		)
+		finalEvent.Recovered = finalEvent.Type == JobEventSucceeded && retryCount > 0
+		finalEvent.ErrorCategory = classifyAnswerJobError(err)
 		finalEvent.Err = err
-		w.events.ObserveAnswerJobEvent(ctx, finalEvent)
+		w.observeJobEvent(ctx, finalEvent)
 	}()
 
 	scope, scopeErr := accessdomain.NewOwnerScope(job.OwnerUserID)
@@ -244,6 +292,49 @@ func (w *JobWorker) RunOnce(ctx context.Context) (handled bool, err error) {
 	return true, nil
 }
 
+// observeJobEvent 尽力附加数据库队列快照。观测查询失败只写入事件，
+// 不能改变已经完成的任务状态或 RunOnce 返回值。
+func (w *JobWorker) observeJobEvent(ctx context.Context, event JobEvent) {
+	if ctx.Err() == nil {
+		stats, err := w.jobs.GetAnswerJobQueueStats(ctx)
+		if err != nil {
+			event.QueueStatsError = err
+		} else {
+			event.QueueStats = &stats
+		}
+	}
+	w.events.ObserveAnswerJobEvent(ctx, event)
+}
+
+// answerJobQueueWait 计算“本次到期可领取”到数据库真正领取之间的时间。
+// 重试任务从 next_attempt_at 开始计算，指数退避本身由 total_ms 体现。
+func answerJobQueueWait(job Job, fallbackStartedAt time.Time) time.Duration {
+	startedAt := fallbackStartedAt
+	if job.StartedAt != nil && !job.StartedAt.IsZero() {
+		startedAt = *job.StartedAt
+	}
+	readyAt := job.NextAttemptAt
+	if readyAt.IsZero() {
+		readyAt = job.CreatedAt
+	}
+	if readyAt.IsZero() || startedAt.Before(readyAt) {
+		return 0
+	}
+	return startedAt.Sub(readyAt)
+}
+
+// answerJobTotalDuration 计算用户创建任务到当前事件的端到端时间。
+func answerJobTotalDuration(
+	job Job,
+	finishedAt time.Time,
+	fallback time.Duration,
+) time.Duration {
+	if job.CreatedAt.IsZero() || finishedAt.Before(job.CreatedAt) {
+		return max(fallback, 0)
+	}
+	return finishedAt.Sub(job.CreatedAt)
+}
+
 func (w *JobWorker) failJob(
 	ctx context.Context,
 	job Job,
@@ -280,6 +371,59 @@ func isPermanentAnswerJobError(err error) bool {
 		errors.Is(err, generationdomain.ErrGenerationQuotaExceeded) ||
 		errors.Is(err, generationdomain.ErrGenerationRequestRejected) ||
 		errors.Is(err, generationdomain.ErrInvalidGenerationResponse)
+}
+
+func classifyAnswerJobError(err error) JobErrorCategory {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.DeadlineExceeded):
+		return JobErrorCategoryTimeout
+	case errors.Is(err, context.Canceled):
+		return JobErrorCategoryCanceled
+	case errors.Is(err, ErrAnswerCapacityExhausted),
+		errors.Is(err, ErrAnswerOwnerCapacityExhausted):
+		return JobErrorCategoryAnswerCapacity
+	case errors.Is(err, embeddingapplication.ErrEmbeddingProviderCapacityExhausted):
+		return JobErrorCategoryEmbeddingCapacity
+	case errors.Is(err, embeddingapplication.ErrDocumentEmbeddingsNotReady):
+		return JobErrorCategoryEmbeddingsNotReady
+	case errors.Is(err, documentdomain.ErrNotFound):
+		return JobErrorCategoryDocumentNotFound
+	case errors.Is(err, embeddingapplication.ErrSemanticSearchQueryRequired),
+		errors.Is(err, embeddingapplication.ErrSemanticSearchQueryInvalidUTF8),
+		errors.Is(err, embeddingapplication.ErrSemanticSearchQueryTooLong),
+		errors.Is(err, embeddingapplication.ErrInvalidSemanticSearchTopK),
+		errors.Is(err, embeddingapplication.ErrInvalidDocumentID),
+		errors.Is(err, ErrInvalidResponseLanguage):
+		return JobErrorCategoryInvalidInput
+	case errors.Is(err, embeddingdomain.ErrEmbeddingAuthentication):
+		return JobErrorCategoryEmbeddingAuthentication
+	case errors.Is(err, embeddingdomain.ErrEmbeddingQuotaExceeded):
+		return JobErrorCategoryEmbeddingQuota
+	case errors.Is(err, embeddingdomain.ErrEmbeddingRateLimited):
+		return JobErrorCategoryEmbeddingRateLimit
+	case errors.Is(err, embeddingdomain.ErrEmbeddingRequestRejected):
+		return JobErrorCategoryEmbeddingRequest
+	case errors.Is(err, embeddingdomain.ErrInvalidEmbeddingResponse):
+		return JobErrorCategoryEmbeddingResponse
+	case errors.Is(err, embeddingdomain.ErrEmbeddingUnavailable):
+		return JobErrorCategoryEmbeddingUnavailable
+	case errors.Is(err, generationdomain.ErrGenerationAuthentication):
+		return JobErrorCategoryGenerationAuthentication
+	case errors.Is(err, generationdomain.ErrGenerationQuotaExceeded):
+		return JobErrorCategoryGenerationQuota
+	case errors.Is(err, generationdomain.ErrGenerationRateLimited):
+		return JobErrorCategoryGenerationRateLimit
+	case errors.Is(err, generationdomain.ErrGenerationRequestRejected):
+		return JobErrorCategoryGenerationRequest
+	case errors.Is(err, generationdomain.ErrInvalidGenerationResponse):
+		return JobErrorCategoryGenerationResponse
+	case errors.Is(err, generationdomain.ErrGenerationUnavailable):
+		return JobErrorCategoryGenerationUnavailable
+	default:
+		return JobErrorCategoryInternal
+	}
 }
 
 // InterruptedJobRecoveryService 编排启动时恢复遗留 processing 任务。

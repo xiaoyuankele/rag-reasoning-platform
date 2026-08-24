@@ -132,6 +132,29 @@ type JobSchedulingPolicy struct {
 	StarvationThreshold         time.Duration
 }
 
+// JobQueueStats 是 PostgreSQL 在某个时刻返回的全局异步问答队列快照。
+//
+// 它只包含数量和等待时间，不包含 Owner、问题或答案，因此可以安全进入
+// 结构化日志。ReadyQueuedCount 排除尚未到达 next_attempt_at 的退避任务。
+type JobQueueStats struct {
+	QueuedCount             int64
+	ReadyQueuedCount        int64
+	ProcessingCount         int64
+	MaxOwnerProcessingCount int64
+	OldestReadyWait         time.Duration
+}
+
+// IsValid 判断数据库返回的队列快照是否自洽。
+func (s JobQueueStats) IsValid() bool {
+	return s.QueuedCount >= 0 &&
+		s.ReadyQueuedCount >= 0 &&
+		s.ReadyQueuedCount <= s.QueuedCount &&
+		s.ProcessingCount >= 0 &&
+		s.MaxOwnerProcessingCount >= 0 &&
+		s.MaxOwnerProcessingCount <= s.ProcessingCount &&
+		s.OldestReadyWait >= 0
+}
+
 // IsValid 判断基础并发、借用上限和防饥饿阈值是否有效。
 func (p JobSchedulingPolicy) IsValid() bool {
 	return p.MaxInFlightPerOwner > 0 &&
@@ -161,6 +184,7 @@ type ScopedJobRepository interface {
 // JobWorkerRepository 组合 Worker 的领取、成功、重排和失败收尾能力。
 type JobWorkerRepository interface {
 	ClaimNextAnswerJob(ctx context.Context) (Job, error)
+	GetAnswerJobQueueStats(ctx context.Context) (JobQueueStats, error)
 	MarkAnswerJobSucceeded(
 		ctx context.Context,
 		jobID int64,
