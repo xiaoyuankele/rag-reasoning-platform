@@ -200,7 +200,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			MaxActiveJobsGlobal:   workerConfig.ActiveJobsGlobalLimit,
 		},
 	)
-	embeddingJobRepository := postgres.NewEmbeddingJobRepository(databasePool)
+	embeddingJobRepository :=
+		postgres.NewEmbeddingJobRepositoryWithSchedulingPolicy(
+			databasePool,
+			embeddingdomain.JobSchedulingPolicy{
+				MaxInFlightPerOwner:         embeddingConfig.OwnerInFlightLimit,
+				MaxBorrowedInFlightPerOwner: embeddingConfig.OwnerBorrowedLimit,
+				StarvationThreshold:         embeddingConfig.StarvationThreshold,
+			},
+		)
 	scopedEmbeddingJobRepository := postgres.NewScopedEmbeddingJobRepository(
 		databasePool,
 		embeddingdomain.JobAdmissionLimits{
@@ -705,6 +713,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			"Embedding worker pool configured",
 			"event", "embedding_worker_pool_configured",
 			"concurrency", embeddingConfig.WorkerConcurrency,
+			"owner_in_flight_limit", embeddingConfig.OwnerInFlightLimit,
+			"owner_borrowed_limit", embeddingConfig.OwnerBorrowedLimit,
+			"starvation_threshold_ms",
+			embeddingConfig.StarvationThreshold.Milliseconds(),
 		)
 	}
 

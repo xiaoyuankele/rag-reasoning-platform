@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,7 +15,14 @@ import (
 
 // EmbeddingJobRepository 使用 PostgreSQL 保存向量任务。
 type EmbeddingJobRepository struct {
-	pool *pgxpool.Pool
+	pool             *pgxpool.Pool
+	schedulingPolicy embeddingdomain.JobSchedulingPolicy
+}
+
+var defaultEmbeddingJobSchedulingPolicy = embeddingdomain.JobSchedulingPolicy{
+	MaxInFlightPerOwner:         1,
+	MaxBorrowedInFlightPerOwner: 2,
+	StarvationThreshold:         2 * time.Minute,
 }
 
 var _ embeddingdomain.JobCreator = (*EmbeddingJobRepository)(nil)
@@ -24,7 +32,21 @@ var _ embeddingdomain.JobFinder = (*EmbeddingJobRepository)(nil)
 func NewEmbeddingJobRepository(
 	pool *pgxpool.Pool,
 ) *EmbeddingJobRepository {
-	return &EmbeddingJobRepository{pool: pool}
+	return NewEmbeddingJobRepositoryWithSchedulingPolicy(
+		pool,
+		defaultEmbeddingJobSchedulingPolicy,
+	)
+}
+
+// NewEmbeddingJobRepositoryWithSchedulingPolicy 创建使用指定 Owner 公平策略的仓储。
+func NewEmbeddingJobRepositoryWithSchedulingPolicy(
+	pool *pgxpool.Pool,
+	policy embeddingdomain.JobSchedulingPolicy,
+) *EmbeddingJobRepository {
+	return &EmbeddingJobRepository{
+		pool:             pool,
+		schedulingPolicy: policy,
+	}
 }
 
 // CreateEmbeddingJob 为文档创建 queued 状态的向量任务。
@@ -34,7 +56,49 @@ func (r *EmbeddingJobRepository) CreateEmbeddingJob(
 	modelName string,
 	dimensions int,
 ) (embeddingdomain.Job, error) {
-	const query = `
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf(
+			"begin embedding job transaction: %w",
+			err,
+		)
+	}
+	defer func() {
+		_ = transaction.Rollback(context.Background())
+	}()
+
+	// 系统级创建入口也必须登记 Owner，防止测试、维护命令或未来内部调用
+	// 创建出调度器永远看不到的 queued 任务。
+	const lockDocumentQuery = `
+		SELECT owner_user_id
+		FROM documents
+		WHERE id = $1
+		FOR SHARE
+	`
+	var ownerUserID int64
+	err = transaction.QueryRow(
+		ctx,
+		lockDocumentQuery,
+		documentID,
+	).Scan(&ownerUserID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return embeddingdomain.Job{}, documentdomain.ErrNotFound
+	}
+	if err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf(
+			"lock document before creating embedding job: %w",
+			err,
+		)
+	}
+	if err := ensureEmbeddingOwnerSchedule(
+		ctx,
+		transaction,
+		ownerUserID,
+	); err != nil {
+		return embeddingdomain.Job{}, err
+	}
+
+	const insertJobQuery = `
 		INSERT INTO embedding_jobs (
 			document_id,
 			model_name,
@@ -59,9 +123,9 @@ func (r *EmbeddingJobRepository) CreateEmbeddingJob(
 	`
 
 	createdJob, err := scanEmbeddingJob(
-		r.pool.QueryRow(
+		transaction.QueryRow(
 			ctx,
-			query,
+			insertJobQuery,
 			documentID,
 			modelName,
 			dimensions,
@@ -77,6 +141,12 @@ func (r *EmbeddingJobRepository) CreateEmbeddingJob(
 	if err != nil {
 		return embeddingdomain.Job{}, fmt.Errorf(
 			"create embedding job: %w",
+			err,
+		)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf(
+			"commit embedding job: %w",
 			err,
 		)
 	}

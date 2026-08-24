@@ -60,7 +60,10 @@ func TestLoadEmbeddingUsesDefaults(t *testing.T) {
 		embeddingConfig.RetryBaseDelay != defaultEmbeddingRetryBaseDelay ||
 		embeddingConfig.RetryMaxDelay != defaultEmbeddingRetryMaxDelay ||
 		embeddingConfig.ActiveJobsPerUserLimit != defaultEmbeddingActiveOwnerLimit ||
-		embeddingConfig.ActiveJobsGlobalLimit != defaultEmbeddingActiveGlobalLimit {
+		embeddingConfig.ActiveJobsGlobalLimit != defaultEmbeddingActiveGlobalLimit ||
+		embeddingConfig.OwnerInFlightLimit != defaultEmbeddingOwnerInFlightLimit ||
+		embeddingConfig.OwnerBorrowedLimit != defaultEmbeddingOwnerBorrowedLimit ||
+		embeddingConfig.StarvationThreshold != defaultEmbeddingStarvationThreshold {
 		t.Fatalf("default worker configuration was not loaded")
 	}
 }
@@ -87,6 +90,9 @@ func TestLoadEmbeddingUsesOpenAIEnvironment(t *testing.T) {
 	t.Setenv("EMBEDDING_RETRY_MAX_DELAY", "1m")
 	t.Setenv("EMBEDDING_MAX_ACTIVE_JOBS_PER_USER", "25")
 	t.Setenv("EMBEDDING_MAX_ACTIVE_JOBS_GLOBAL", "200")
+	t.Setenv("EMBEDDING_MAX_IN_FLIGHT_PER_OWNER", "2")
+	t.Setenv("EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", "3")
+	t.Setenv("EMBEDDING_STARVATION_THRESHOLD", "90s")
 
 	embeddingConfig, err := LoadEmbedding()
 	if err != nil {
@@ -112,7 +118,10 @@ func TestLoadEmbeddingUsesOpenAIEnvironment(t *testing.T) {
 		embeddingConfig.RetryBaseDelay != 3*time.Second ||
 		embeddingConfig.RetryMaxDelay != time.Minute ||
 		embeddingConfig.ActiveJobsPerUserLimit != 25 ||
-		embeddingConfig.ActiveJobsGlobalLimit != 200 {
+		embeddingConfig.ActiveJobsGlobalLimit != 200 ||
+		embeddingConfig.OwnerInFlightLimit != 2 ||
+		embeddingConfig.OwnerBorrowedLimit != 3 ||
+		embeddingConfig.StarvationThreshold != 90*time.Second {
 		t.Fatal("LoadEmbedding() did not preserve configured values")
 	}
 }
@@ -371,6 +380,53 @@ func TestLoadEmbeddingRejectsInvalidActiveJobLimits(t *testing.T) {
 	})
 }
 
+func TestLoadEmbeddingRejectsInvalidOwnerScheduling(t *testing.T) {
+	t.Run("invalid individual values", func(t *testing.T) {
+		testCases := []struct {
+			name        string
+			environment string
+			value       string
+		}{
+			{name: "non-numeric base", environment: "EMBEDDING_MAX_IN_FLIGHT_PER_OWNER", value: "one"},
+			{name: "zero base", environment: "EMBEDDING_MAX_IN_FLIGHT_PER_OWNER", value: "0"},
+			{name: "base above maximum", environment: "EMBEDDING_MAX_IN_FLIGHT_PER_OWNER", value: "65"},
+			{name: "non-numeric borrowed", environment: "EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", value: "two"},
+			{name: "zero borrowed", environment: "EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", value: "0"},
+			{name: "borrowed above maximum", environment: "EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", value: "65"},
+			{name: "invalid starvation threshold", environment: "EMBEDDING_STARVATION_THRESHOLD", value: "later"},
+			{name: "zero starvation threshold", environment: "EMBEDDING_STARVATION_THRESHOLD", value: "0s"},
+		}
+
+		for _, testCase := range testCases {
+			t.Run(testCase.name, func(t *testing.T) {
+				clearEmbeddingEnvironment(t)
+				t.Setenv(testCase.environment, testCase.value)
+				if _, err := LoadEmbedding(); err == nil {
+					t.Fatalf(
+						"LoadEmbedding() error = nil for %s=%q",
+						testCase.environment,
+						testCase.value,
+					)
+				}
+			})
+		}
+	})
+
+	t.Run("borrowed limit below base", func(t *testing.T) {
+		clearEmbeddingEnvironment(t)
+		t.Setenv("EMBEDDING_MAX_IN_FLIGHT_PER_OWNER", "3")
+		t.Setenv("EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", "2")
+
+		_, err := LoadEmbedding()
+		if !errors.Is(err, ErrInvalidEmbeddingOwnerSchedulingLimits) {
+			t.Fatalf(
+				"LoadEmbedding() error = %v, want ErrInvalidEmbeddingOwnerSchedulingLimits",
+				err,
+			)
+		}
+	})
+}
+
 func clearEmbeddingEnvironment(t *testing.T) {
 	t.Helper()
 
@@ -398,6 +454,9 @@ func clearEmbeddingEnvironment(t *testing.T) {
 		"EMBEDDING_RETRY_MAX_DELAY",
 		"EMBEDDING_MAX_ACTIVE_JOBS_PER_USER",
 		"EMBEDDING_MAX_ACTIVE_JOBS_GLOBAL",
+		"EMBEDDING_MAX_IN_FLIGHT_PER_OWNER",
+		"EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER",
+		"EMBEDDING_STARVATION_THRESHOLD",
 	} {
 		t.Setenv(name, "")
 	}

@@ -86,15 +86,24 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 			claimedJob.AttemptCount != 1 || claimedJob.StartedAt == nil {
 			t.Fatalf("claimed job = %+v, want first processing attempt", claimedJob)
 		}
+		if err := jobRepository.MarkEmbeddingJobFailed(
+			ctx,
+			claimedJob.ID,
+			"embedding claim integration test cleanup",
+		); err != nil {
+			t.Fatalf("finalize claimed embedding job: %v", err)
+		}
 	})
 
 	t.Run("concurrent claimers receive different jobs", func(t *testing.T) {
+		ownerA := newOwnedDocumentFixture(t, ctx, pool)
+		ownerB := newOwnedDocumentFixture(t, ctx, pool)
 		fixtures := []embeddingWorkerFixture{
 			createEmbeddingWorkerFixture(
 				t,
 				ctx,
 				pool,
-				documentRepository,
+				ownerA,
 				chunkRepository,
 				jobRepository,
 				"concurrent-claim-a",
@@ -104,7 +113,7 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 				t,
 				ctx,
 				pool,
-				documentRepository,
+				ownerB,
 				chunkRepository,
 				jobRepository,
 				"concurrent-claim-b",
@@ -173,6 +182,15 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 				len(claimedIDs),
 				len(fixtures),
 			)
+		}
+		for claimedID := range claimedIDs {
+			if err := jobRepository.MarkEmbeddingJobFailed(
+				ctx,
+				claimedID,
+				"concurrent embedding claim integration test cleanup",
+			); err != nil {
+				t.Fatalf("finalize concurrently claimed job %d: %v", claimedID, err)
+			}
 		}
 	})
 

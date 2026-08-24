@@ -37,6 +37,9 @@ var (
 
 	// ErrInvalidJobAdmissionLimits 表示内部组装了无效的向量任务容量配置。
 	ErrInvalidJobAdmissionLimits = errors.New("embedding job admission limits are invalid")
+
+	// ErrInvalidJobSchedulingPolicy 表示 Worker 收到了无效的 Owner 公平策略。
+	ErrInvalidJobSchedulingPolicy = errors.New("embedding job scheduling policy is invalid")
 )
 
 // JobStatus 是向量任务的生命周期状态。
@@ -107,6 +110,24 @@ type JobAdmissionLimits struct {
 func (l JobAdmissionLimits) IsValid() bool {
 	return l.MaxActiveJobsPerOwner > 0 &&
 		l.MaxActiveJobsGlobal >= l.MaxActiveJobsPerOwner
+}
+
+// JobSchedulingPolicy 定义 Embedding Worker 领取任务时的 Owner 公平规则。
+//
+// MaxInFlightPerOwner 是多个用户竞争时的基础并发上限；
+// MaxBorrowedInFlightPerOwner 是没有其他用户可获得基础槽位时的绝对上限；
+// StarvationThreshold 控制一个已到执行时间的 queued 任务等待多久后优先处理。
+type JobSchedulingPolicy struct {
+	MaxInFlightPerOwner         int
+	MaxBorrowedInFlightPerOwner int
+	StarvationThreshold         time.Duration
+}
+
+// IsValid 判断公平、借用和防饥饿规则能否组成有效策略。
+func (p JobSchedulingPolicy) IsValid() bool {
+	return p.MaxInFlightPerOwner > 0 &&
+		p.MaxBorrowedInFlightPerOwner >= p.MaxInFlightPerOwner &&
+		p.StarvationThreshold > 0
 }
 
 // JobCreator 定义创建向量任务所需的最小持久化能力。

@@ -1,6 +1,9 @@
 package embedding
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestJobAdmissionLimitsIsValid(t *testing.T) {
 	testCases := []struct {
@@ -18,6 +21,66 @@ func TestJobAdmissionLimitsIsValid(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			if actual := testCase.limits.IsValid(); actual != testCase.want {
 				t.Fatalf("IsValid() = %v, want %v", actual, testCase.want)
+			}
+		})
+	}
+}
+
+func TestJobSchedulingPolicyIsValid(t *testing.T) {
+	testCases := []struct {
+		name   string
+		policy JobSchedulingPolicy
+		want   bool
+	}{
+		{
+			name: "fair base with borrowed capacity",
+			policy: JobSchedulingPolicy{
+				MaxInFlightPerOwner:         1,
+				MaxBorrowedInFlightPerOwner: 2,
+				StarvationThreshold:         2 * time.Minute,
+			},
+			want: true,
+		},
+		{
+			name: "borrowing disabled",
+			policy: JobSchedulingPolicy{
+				MaxInFlightPerOwner:         1,
+				MaxBorrowedInFlightPerOwner: 1,
+				StarvationThreshold:         time.Minute,
+			},
+			want: true,
+		},
+		{
+			name: "missing base limit",
+			policy: JobSchedulingPolicy{
+				MaxBorrowedInFlightPerOwner: 2,
+				StarvationThreshold:         time.Minute,
+			},
+			want: false,
+		},
+		{
+			name: "borrowed limit below base",
+			policy: JobSchedulingPolicy{
+				MaxInFlightPerOwner:         2,
+				MaxBorrowedInFlightPerOwner: 1,
+				StarvationThreshold:         time.Minute,
+			},
+			want: false,
+		},
+		{
+			name: "missing starvation threshold",
+			policy: JobSchedulingPolicy{
+				MaxInFlightPerOwner:         1,
+				MaxBorrowedInFlightPerOwner: 2,
+			},
+			want: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := testCase.policy.IsValid(); got != testCase.want {
+				t.Fatalf("IsValid() = %t, want %t", got, testCase.want)
 			}
 		})
 	}

@@ -10,7 +10,7 @@
 - PostgreSQL documents、document_jobs、text_chunks、embedding_jobs、chunk_embeddings；
 - 文档任务使用 SKIP LOCKED 领取，文档 Worker 与 Python Process Pool 都是固定大小；
 - Python stream 协议支持惰性启动、超时取消、崩溃替换与按任务数回收；
-- 向量任务已经有活动任务幂等、用户/全局准入、Embedding Worker Pool 与 Provider 并发闸门；
+- 向量任务已经有活动任务幂等、用户/全局准入、Owner 公平领取、Embedding Worker Pool 与 Provider 并发闸门；
 - Answer Service 已有进程内并发闸门，容量不足返回 503 与 Retry-After；
 - 文件存储、文档处理器、Embedding Provider 都已经位于 Infrastructure Port 后面，具备替换基础。
 
@@ -79,7 +79,11 @@ advisory lock 只覆盖“计数 + 插入”的短临界区，绝不能覆盖 PD
 
 真实 PostgreSQL 集成测试已经覆盖：不同 Owner 先获得基础槽位、同一 Owner 借用空闲容量、达到借用上限后继续排队、任务结束后释放槽位、防饥饿优先，以及两个并发 Worker 不重复领取且优先选择不同 Owner。
 
-下一项工作不是继续猜测调高限额，而是使用固定账号、固定文件和分阶段并发压测，记录吞吐、P95/P99、容量拒绝、队列等待、资源和数据库连接池指标，寻找当前单机拐点。
+### 2.5 已落地 Embedding Owner 公平领取
+
+向量任务使用独立的 `embedding_owner_schedules`，不与文档解析调度游标混用。默认基础/借用上限同样为 `1/2`，防饥饿阈值为 `2m`；重试任务只在到达 `next_attempt_at` 后参与调度，并从真正可执行的时间开始计算等待。真实 PostgreSQL 测试已覆盖不同 Owner 优先、借用、上限、释放、防饥饿和两个并发 Worker 领取不同 Owner。
+
+付费压测与参数拐点调优暂后置；当前先批量完成排队取消、状态可见和多实例安全等功能，再统一执行固定场景验收。
 
 ## 3. B100-2：API 与 Worker 角色拆分
 

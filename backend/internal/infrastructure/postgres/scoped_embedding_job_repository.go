@@ -191,6 +191,13 @@ func (r *ScopedEmbeddingJobRepository) RequestEmbeddingJob(
 	if globalActiveJobCount >= int64(r.admissionLimits.MaxActiveJobsGlobal) {
 		return embeddingdomain.JobRequestResult{}, embeddingdomain.ErrGlobalActiveJobLimitExceeded
 	}
+	if err := ensureEmbeddingOwnerSchedule(
+		ctx,
+		transaction,
+		scope.OwnerUserID(),
+	); err != nil {
+		return embeddingdomain.JobRequestResult{}, err
+	}
 
 	initialStatus := embeddingdomain.JobStatusWaitingDocument
 	if documentStatus == documentdomain.StatusReady {

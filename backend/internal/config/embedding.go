@@ -28,6 +28,10 @@ const (
 	defaultEmbeddingActiveOwnerLimit          = 100
 	defaultEmbeddingActiveGlobalLimit         = 500
 	maximumEmbeddingActiveJobLimit            = 10000
+	defaultEmbeddingOwnerInFlightLimit        = 1
+	defaultEmbeddingOwnerBorrowedLimit        = 2
+	maximumEmbeddingOwnerInFlightLimit        = 64
+	defaultEmbeddingStarvationThreshold       = 2 * time.Minute
 )
 
 // EmbeddingProvider 是远程向量服务提供方的配置枚举。
@@ -78,6 +82,9 @@ var (
 	ErrInvalidEmbeddingProviderAllocation = errors.New(
 		"embedding worker and online provider concurrency must not exceed global provider concurrency",
 	)
+	ErrInvalidEmbeddingOwnerSchedulingLimits = errors.New(
+		"embedding borrowed owner in-flight limit must not be smaller than the base owner limit",
+	)
 )
 
 // EmbeddingConfig 保存任务入队、后台执行和在线语义检索需要的向量配置。
@@ -105,6 +112,9 @@ type EmbeddingConfig struct {
 	RetryMaxDelay             time.Duration
 	ActiveJobsPerUserLimit    int
 	ActiveJobsGlobalLimit     int
+	OwnerInFlightLimit        int
+	OwnerBorrowedLimit        int
+	StarvationThreshold       time.Duration
 }
 
 // LoadEmbedding 从环境变量加载向量任务、Worker 与语义检索配置。
@@ -309,6 +319,44 @@ func LoadEmbedding() (EmbeddingConfig, error) {
 		return EmbeddingConfig{}, ErrInvalidEmbeddingActiveJobLimits
 	}
 
+	ownerInFlightLimit, err := loadPositiveBoundedInt(
+		"EMBEDDING_MAX_IN_FLIGHT_PER_OWNER",
+		defaultEmbeddingOwnerInFlightLimit,
+		maximumEmbeddingOwnerInFlightLimit,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding owner in-flight limit: %w",
+			err,
+		)
+	}
+
+	ownerBorrowedLimit, err := loadPositiveBoundedInt(
+		"EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER",
+		defaultEmbeddingOwnerBorrowedLimit,
+		maximumEmbeddingOwnerInFlightLimit,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding borrowed owner in-flight limit: %w",
+			err,
+		)
+	}
+	if ownerBorrowedLimit < ownerInFlightLimit {
+		return EmbeddingConfig{}, ErrInvalidEmbeddingOwnerSchedulingLimits
+	}
+
+	starvationThreshold, err := loadPositiveDuration(
+		"EMBEDDING_STARVATION_THRESHOLD",
+		defaultEmbeddingStarvationThreshold,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding starvation threshold: %w",
+			err,
+		)
+	}
+
 	return EmbeddingConfig{
 		WorkerEnabled:             workerEnabled,
 		WorkerConcurrency:         workerConcurrency,
@@ -331,6 +379,9 @@ func LoadEmbedding() (EmbeddingConfig, error) {
 		RetryMaxDelay:             retryMaxDelay,
 		ActiveJobsPerUserLimit:    activeJobsPerUserLimit,
 		ActiveJobsGlobalLimit:     activeJobsGlobalLimit,
+		OwnerInFlightLimit:        ownerInFlightLimit,
+		OwnerBorrowedLimit:        ownerBorrowedLimit,
+		StarvationThreshold:       starvationThreshold,
 	}, nil
 }
 
