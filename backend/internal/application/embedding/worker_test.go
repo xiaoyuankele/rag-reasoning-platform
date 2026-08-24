@@ -248,8 +248,49 @@ func TestEmbeddingWorkerBatchesChunksAndCompletesJob(t *testing.T) {
 	if events.events[1].ProviderCallCount != 2 ||
 		events.events[1].PromptTokens != 6 ||
 		events.events[1].TotalTokens != 9 ||
-		events.events[1].GeneratedVectorCount != 3 {
+		events.events[1].GeneratedVectorCount != 3 ||
+		events.events[1].RetryCount != 0 ||
+		events.events[1].Recovered {
 		t.Fatalf("succeeded metrics = %+v", events.events[1])
+	}
+	if events.events[1].FinalizationDuration == nil {
+		t.Fatal("succeeded event finalization duration = nil, want measured duration")
+	}
+}
+
+func TestEmbeddingWorkerMarksSuccessfulRetryAsRecovered(t *testing.T) {
+	job := embeddingdomain.Job{
+		ID: 17, DocumentID: 21, ModelName: "test-model", Dimensions: 2,
+		Status: embeddingdomain.JobStatusProcessing, AttemptCount: 2,
+	}
+	jobs := &fakeEmbeddingJobWorkerRepository{
+		claimFunc: func(context.Context) (embeddingdomain.Job, error) { return job, nil },
+		succeedFunc: func(context.Context, int64, embeddingdomain.JobCompletion) error {
+			return nil
+		},
+		requeueFunc: failOnEmbeddingRequeue(t),
+		failFunc:    failOnEmbeddingFailure(t),
+	}
+	embedder := &fakeEmbedder{
+		embedFunc: func(context.Context, embeddingdomain.EmbedRequest) (embeddingdomain.EmbedResult, error) {
+			return embeddingdomain.EmbedResult{
+				Vectors: [][]float32{{1, 1}},
+			}, nil
+		},
+	}
+	events := newRecordingJobEventObserver()
+	worker := newTestEmbeddingWorker(t, jobs, oneChunkLister(), embedder, 1, time.Now, events)
+
+	handled, err := worker.RunOnce(context.Background())
+
+	if err != nil || !handled {
+		t.Fatalf("RunOnce() = handled %v, error %v; want handled success", handled, err)
+	}
+	finalEvent := events.events[1]
+	if finalEvent.Type != JobEventSucceeded ||
+		finalEvent.RetryCount != 1 ||
+		!finalEvent.Recovered {
+		t.Fatalf("recovered event = %+v, want one successful retry", finalEvent)
 	}
 }
 

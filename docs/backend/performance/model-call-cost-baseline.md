@@ -97,7 +97,11 @@ Get-Content .\server.jsonl |
 - `provider_call_count`、`prompt_tokens`、`total_tokens` 会累计成功、重试和失败尝试，因为已经发生的调用可能已经计费；
 - `generated_vector_count` 包含后来因事务回滚而没有保留的部分向量；
 - `persisted_vector_count` 只统计 `embedding_job_succeeded` 中已经原子落库的向量；
-- `worker_duration` 是一次 Worker 尝试的总耗时，`provider_duration` 只累计远程 Embed 调用耗时。
+- `retried_job_count` 只统计至少重试一次并已进入 `succeeded`/`failed` 终态的任务；
+- `recovered_job_count` 和 `retry_exhausted_count` 分别表示重试后恢复与重试后仍失败；
+- `recovery_rate` 的分母是上述已知终态重试任务，不包含仍在排队或停机中断的任务；
+- `worker_duration` 是一次 Worker 尝试的总耗时，`provider_duration` 只累计远程 Embed 调用耗时；
+- `finalization_duration` 覆盖向量原子写入与任务终态更新；旧日志没有该字段时不会生成虚假的 0 毫秒样本。
 
 ### 5.3 Generation
 
@@ -145,5 +149,8 @@ Generation 金额 = prompt_tokens / 1,000,000 × 当日输入单价
 
 2026-08-22 报告结构升级为 `schema_version=2`，同一命令能够额外汇总问答并发准入、容量超时、取消等待、
 等待/执行耗时和最大观测并发。该扩展同样只读取日志，不会发起远程问答。
+
+2026-08-24 报告结构升级为 `schema_version=3`，增加 Embedding 重试恢复、重试耗尽、恢复率和数据库收尾耗时。
+旧 JSONL 中已有 `attempt_count` 时可以推导恢复结果；缺少收尾耗时的历史事件仍可汇总，但不会进入该耗时样本。
 
 下一次真实成本批次需要冻结语料和问题集，并在用户明确同意产生远程费用后执行。

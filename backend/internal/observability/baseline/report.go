@@ -18,7 +18,7 @@ import (
 
 const (
 	// SchemaVersion 是基线报告结构版本；字段含义变化时必须递增。
-	SchemaVersion       = 2
+	SchemaVersion       = 3
 	maximumLogLineBytes = 1 << 20
 )
 
@@ -63,8 +63,13 @@ type EmbeddingSummary struct {
 	TotalTokens          int             `json:"total_tokens"`
 	GeneratedVectorCount int             `json:"generated_vector_count"`
 	PersistedVectorCount int             `json:"persisted_vector_count"`
+	RetriedJobCount      int             `json:"retried_job_count"`
+	RecoveredJobCount    int             `json:"recovered_job_count"`
+	RetryExhaustedCount  int             `json:"retry_exhausted_count"`
+	RecoveryRate         float64         `json:"recovery_rate"`
 	WorkerDuration       DurationSummary `json:"worker_duration"`
 	ProviderDuration     DurationSummary `json:"provider_duration"`
+	FinalizationDuration DurationSummary `json:"finalization_duration"`
 }
 
 // GenerationSummary 汇总在线问答的成功、失败和无证据跳过事件。
@@ -110,6 +115,10 @@ type logEntry struct {
 	CompletionTokens     *int   `json:"completion_tokens"`
 	TotalTokens          *int   `json:"total_tokens"`
 	GeneratedVectorCount *int   `json:"generated_vector_count"`
+	AttemptCount         *int   `json:"attempt_count"`
+	RetryCount           *int   `json:"retry_count"`
+	Recovered            *bool  `json:"recovered"`
+	FinalizationDuration *int64 `json:"finalization_duration_ms"`
 	EvidenceCount        *int   `json:"evidence_count"`
 	ErrorCategory        string `json:"error_category"`
 	Outcome              string `json:"outcome"`
@@ -135,6 +144,7 @@ func Summarize(reader io.Reader, generatedAt time.Time) (Report, error) {
 	report := newReport(generatedAt)
 	var embeddingWorkerDurations durationAccumulator
 	var embeddingProviderDurations durationAccumulator
+	var embeddingFinalizationDurations durationAccumulator
 	var generationProviderDurations durationAccumulator
 	var answerWaitDurations durationAccumulator
 	var answerExecutionDurations durationAccumulator
@@ -164,6 +174,7 @@ func Summarize(reader io.Reader, generatedAt time.Time) (Report, error) {
 			entry,
 			&embeddingWorkerDurations,
 			&embeddingProviderDurations,
+			&embeddingFinalizationDurations,
 			&generationProviderDurations,
 			&answerWaitDurations,
 			&answerExecutionDurations,
@@ -187,6 +198,11 @@ func Summarize(reader io.Reader, generatedAt time.Time) (Report, error) {
 
 	report.Embedding.WorkerDuration = embeddingWorkerDurations.summary()
 	report.Embedding.ProviderDuration = embeddingProviderDurations.summary()
+	report.Embedding.FinalizationDuration = embeddingFinalizationDurations.summary()
+	if report.Embedding.RetriedJobCount > 0 {
+		report.Embedding.RecoveryRate =
+			float64(report.Embedding.RecoveredJobCount) / float64(report.Embedding.RetriedJobCount)
+	}
 	report.Generation.ProviderDuration = generationProviderDurations.summary()
 	report.AnswerAdmission.WaitDuration = answerWaitDurations.summary()
 	report.AnswerAdmission.ExecutionDuration = answerExecutionDurations.summary()
@@ -225,6 +241,7 @@ func aggregateEntry(
 	entry logEntry,
 	embeddingWorkerDurations *durationAccumulator,
 	embeddingProviderDurations *durationAccumulator,
+	embeddingFinalizationDurations *durationAccumulator,
 	generationProviderDurations *durationAccumulator,
 	answerWaitDurations *durationAccumulator,
 	answerExecutionDurations *durationAccumulator,
@@ -240,6 +257,7 @@ func aggregateEntry(
 			entry,
 			embeddingWorkerDurations,
 			embeddingProviderDurations,
+			embeddingFinalizationDurations,
 		)
 	case string(answerapplication.GenerationEventSucceeded),
 		string(answerapplication.GenerationEventFailed),
@@ -333,6 +351,7 @@ func aggregateEmbeddingEntry(
 	entry logEntry,
 	workerDurations *durationAccumulator,
 	providerDurations *durationAccumulator,
+	finalizationDurations *durationAccumulator,
 ) error {
 	if err := requireNonNegativeEmbeddingFields(entry); err != nil {
 		return err
@@ -349,9 +368,43 @@ func aggregateEmbeddingEntry(
 	if entry.Event == string(embeddingapplication.JobEventSucceeded) {
 		summary.PersistedVectorCount += *entry.GeneratedVectorCount
 	}
+	retryCount := embeddingRetryCount(entry)
+	recovered := entry.Event == string(embeddingapplication.JobEventSucceeded) && retryCount > 0
+	if entry.Recovered != nil && *entry.Recovered != recovered {
+		return errors.New("embedding recovered flag is inconsistent with event and retry_count")
+	}
+	if isTerminalEmbeddingEvent(entry.Event) && retryCount > 0 {
+		summary.RetriedJobCount++
+		if entry.Event == string(embeddingapplication.JobEventSucceeded) {
+			summary.RecoveredJobCount++
+		} else if entry.Event == string(embeddingapplication.JobEventFailed) {
+			summary.RetryExhaustedCount++
+		}
+	}
 	workerDurations.add(*entry.DurationMS)
 	providerDurations.add(*entry.ProviderDurationMS)
+	if entry.FinalizationDuration != nil {
+		if *entry.FinalizationDuration < 0 {
+			return errors.New("embedding event requires non-negative finalization_duration_ms")
+		}
+		finalizationDurations.add(*entry.FinalizationDuration)
+	}
 	return nil
+}
+
+func embeddingRetryCount(entry logEntry) int {
+	if entry.RetryCount != nil {
+		return *entry.RetryCount
+	}
+	if entry.AttemptCount != nil {
+		return max(*entry.AttemptCount-1, 0)
+	}
+	return 0
+}
+
+func isTerminalEmbeddingEvent(event string) bool {
+	return event == string(embeddingapplication.JobEventSucceeded) ||
+		event == string(embeddingapplication.JobEventFailed)
 }
 
 func aggregateGenerationEntry(
@@ -406,6 +459,12 @@ func requireNonNegativeEmbeddingFields(entry logEntry) error {
 	}
 	if entry.Dimensions == nil || *entry.Dimensions <= 0 {
 		return errors.New("embedding event requires positive dimensions")
+	}
+	if entry.AttemptCount != nil && *entry.AttemptCount <= 0 {
+		return errors.New("embedding event requires positive attempt_count when provided")
+	}
+	if entry.RetryCount != nil && *entry.RetryCount < 0 {
+		return errors.New("embedding event requires non-negative retry_count when provided")
 	}
 	fields := []struct {
 		name  string

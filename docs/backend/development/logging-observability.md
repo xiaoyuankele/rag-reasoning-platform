@@ -199,6 +199,18 @@ Application 定义事件，`internal/observability` 使用 slog 实现，`main.g
 成本统计遵循“调用已经发生就必须记录”的原则：如果第一批向量成功而第二批失败，第一批产生的 Token、
 远程耗时和调用次数仍然保留在日志中；这些部分向量不会被持久化，只有 `succeeded` 才表示全部向量已经落库。
 
+2026-08-24 在既有重试机制上补充恢复观测，不增加业务表或重复状态字段：
+
+- `retry_count=max(attempt_count-1, 0)`，表示当前任务已经经历的重试次数；
+- `recovered=true` 只出现在“至少重试一次后最终成功”的 `embedding_job_succeeded`；
+- `finalization_duration_ms` 记录数据库收尾耗时。成功时覆盖“替换该文档全部向量 + 更新 Job 为
+  `succeeded`”的原子事务；失败或重排队时覆盖对应的 Job 状态写入；
+- `attempt_count` 继续由 PostgreSQL 在原子领取任务时递增，是恢复判定的事实来源。日志只是投影，不能反向改变任务状态。
+
+因此，一次提供方超时后恢复会形成两条可关联事实：第一次尝试写
+`embedding_job_requeued`，第二次尝试写 `embedding_job_succeeded` 且 `retry_count=1`、
+`recovered=true`。如果数据库收尾本身失败，则事件仍是 `embedding_job_unfinished`，不能误报恢复成功。
+
 ### 7.3 Generation 在线调用与拒答
 
 P5.2.5 在 Answer Application 定义 `GenerationEventObserver`，由 `internal/observability` 的 slog 适配器实现。
@@ -270,6 +282,17 @@ Token、成功/失败/跳过状态以及平均、P50、P95 耗时。重试前已
 容量等待超时和客户端取消，并输出等待耗时、执行耗时和 `max_observed_in_flight`。同一条成功请求会同时写
 `admitted` 与 `released`，所以等待耗时只采用 `released` 或 `rejected` 终结事件，避免重复计算；执行耗时
 只采用 `released`。
+
+2026-08-24 报告结构升级为 `schema_version=3`，Embedding 汇总增加：
+
+- `retried_job_count`：进入 `succeeded` 或 `failed` 终态且至少重试过一次的任务数；
+- `recovered_job_count`：重试后成功的任务数；
+- `retry_exhausted_count`：重试后仍进入 `failed` 的任务数；
+- `recovery_rate=recovered_job_count/retried_job_count`，只使用已经确定的成功/失败终态；
+- `finalization_duration`：数据库原子收尾阶段的 Count、平均值、P50、P95 和最大值。
+
+汇总器能够从旧日志已有的 `attempt_count` 推导重试次数，因此历史结构化日志仍可使用；旧日志没有
+`finalization_duration_ms` 时，该耗时样本为空，不会伪造为 0 毫秒。
 
 完整冻结条件、PowerShell 命令、字段口径和金额换算方法见
 [模型调用成本基线](../performance/model-call-cost-baseline.md)。真实付费批次必须单独获得授权。

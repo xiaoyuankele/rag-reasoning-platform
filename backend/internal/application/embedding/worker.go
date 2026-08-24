@@ -129,6 +129,7 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 	finalStatus := embeddingdomain.JobStatusProcessing
 	var completion embeddingdomain.JobCompletion
 	var metrics embeddingProcessingMetrics
+	var finalizationDuration *time.Duration
 	var nextAttemptAt *time.Time
 	var processingErr error
 
@@ -142,6 +143,7 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 		Status:       finalStatus,
 	})
 	defer func() {
+		retryCount := max(job.AttemptCount-1, 0)
 		w.events.ObserveEmbeddingJobEvent(ctx, JobEvent{
 			Type:                 finalEventType,
 			JobID:                job.ID,
@@ -152,10 +154,13 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 			Status:               finalStatus,
 			Duration:             time.Since(startedAt),
 			ProviderDuration:     metrics.providerDuration,
+			FinalizationDuration: finalizationDuration,
 			ProviderCallCount:    metrics.providerCallCount,
 			PromptTokens:         completion.PromptTokens,
 			TotalTokens:          completion.TotalTokens,
 			GeneratedVectorCount: len(completion.Vectors),
+			RetryCount:           retryCount,
+			Recovered:            finalEventType == JobEventSucceeded && retryCount > 0,
 			NextAttemptAt:        nextAttemptAt,
 			ErrorCategory:        classifyJobError(err),
 			Err:                  err,
@@ -180,18 +185,25 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 	}
 
 	if processingErr != nil {
+		finalizationStartedAt := time.Now()
 		outcome, failureErr := w.finalizeFailure(ctx, job, processingErr)
+		elapsed := time.Since(finalizationStartedAt)
+		finalizationDuration = &elapsed
 		finalEventType = outcome.eventType
 		finalStatus = outcome.status
 		nextAttemptAt = outcome.nextAttemptAt
 		return true, failureErr
 	}
 
-	if err := w.jobs.MarkEmbeddingJobSucceeded(ctx, job.ID, completion); err != nil {
+	finalizationStartedAt := time.Now()
+	finalizationErr := w.jobs.MarkEmbeddingJobSucceeded(ctx, job.ID, completion)
+	elapsed := time.Since(finalizationStartedAt)
+	finalizationDuration = &elapsed
+	if finalizationErr != nil {
 		return true, fmt.Errorf(
 			"mark embedding job %d succeeded: %w",
 			job.ID,
-			err,
+			finalizationErr,
 		)
 	}
 

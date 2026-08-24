@@ -39,8 +39,10 @@ const (
 // JobEvent 是 Application 交给可观测性适配器的向量任务事件。
 //
 // ProviderDuration 只累计远程 Embed 调用时间；Duration 是整条 Worker 执行时间。
+// FinalizationDuration 覆盖向量原子写入和任务终态更新；没有执行数据库收尾时为 nil。
 // Token 和向量数量也会保留失败前已经发生的部分成本，但只有 succeeded 事件
-// 表示这些向量已经成功持久化。
+// 表示这些向量已经成功持久化。RetryCount 是当前任务已经经历的重试次数；
+// Recovered 只表示“曾经失败过，但本次最终成功”。
 type JobEvent struct {
 	Type                 JobEventType
 	JobID                int64
@@ -51,10 +53,13 @@ type JobEvent struct {
 	Status               embeddingdomain.JobStatus
 	Duration             time.Duration
 	ProviderDuration     time.Duration
+	FinalizationDuration *time.Duration
 	ProviderCallCount    int
 	PromptTokens         int
 	TotalTokens          int
 	GeneratedVectorCount int
+	RetryCount           int
+	Recovered            bool
 	NextAttemptAt        *time.Time
 	ErrorCategory        JobErrorCategory
 	Err                  error
