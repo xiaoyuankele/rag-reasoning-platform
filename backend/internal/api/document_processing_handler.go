@@ -49,6 +49,7 @@ type processingJobResponse struct {
 	ID           int64                              `json:"id"`
 	DocumentID   int64                              `json:"document_id"`
 	Status       documentdomain.ProcessingJobStatus `json:"status"`
+	Cancelable   bool                               `json:"cancelable"`
 	AttemptCount int                                `json:"attempt_count"`
 	ErrorMessage *string                            `json:"error_message"`
 	CreatedAt    time.Time                          `json:"created_at"`
@@ -64,6 +65,7 @@ func newProcessingJobResponse(
 		ID:           job.ID,
 		DocumentID:   job.DocumentID,
 		Status:       job.Status,
+		Cancelable:   job.Status == documentdomain.ProcessingJobStatusQueued,
 		AttemptCount: job.AttemptCount,
 		ErrorMessage: job.ErrorMessage,
 		CreatedAt:    job.CreatedAt,

@@ -386,6 +386,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	processingJobService := documentapplication.NewProcessingJobService(
 		scopedProcessingJobRepository,
 	)
+	processingJobLatestService :=
+		documentapplication.NewProcessingJobLatestService(
+			scopedProcessingJobRepository,
+		)
+	processingJobCancelService :=
+		documentapplication.NewProcessingJobCancelService(
+			scopedProcessingJobRepository,
+		)
 	embeddingQueueService := embeddingapplication.NewQueueService(
 		scopedEmbeddingJobRepository,
 		embeddingConfig.ModelName,
@@ -774,6 +782,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		processingJobService,
 		logger,
 	)
+	processingJobLatestHandler := api.NewProcessingJobLatestHandler(
+		processingJobLatestService,
+		logger,
+	)
+	processingJobCancelHandler := api.NewProcessingJobCancelHandler(
+		processingJobCancelService,
+		logger,
+	)
 	documentEmbeddingHandler := api.NewDocumentEmbeddingHandler(
 		embeddingQueueService,
 	)
@@ -848,6 +864,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentChunkHandler.RegisterRoutes(protectedRoutes)
 	documentProcessingHandler.RegisterRoutes(protectedRoutes)
 	processingJobHandler.RegisterRoutes(protectedRoutes)
+	processingJobLatestHandler.RegisterRoutes(protectedRoutes)
+	processingJobCancelHandler.RegisterRoutes(protectedRoutes)
 	documentEmbeddingHandler.RegisterRoutes(protectedRoutes)
 	documentEmbeddingBatchHandler.RegisterRoutes(protectedRoutes)
 	embeddingJobHandler.RegisterRoutes(protectedRoutes)

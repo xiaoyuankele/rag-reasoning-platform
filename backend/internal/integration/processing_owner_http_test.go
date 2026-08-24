@@ -1,6 +1,7 @@
 package integration_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -150,6 +151,14 @@ func TestProcessingOwnerHTTPWithPostgreSQL(t *testing.T) {
 		documentapplication.NewProcessingJobService(scopedJobs),
 		logger,
 	).RegisterRoutes(protectedRoutes)
+	api.NewProcessingJobLatestHandler(
+		documentapplication.NewProcessingJobLatestService(scopedJobs),
+		logger,
+	).RegisterRoutes(protectedRoutes)
+	api.NewProcessingJobCancelHandler(
+		documentapplication.NewProcessingJobCancelService(scopedJobs),
+		logger,
+	).RegisterRoutes(protectedRoutes)
 	api.NewDocumentChunkHandler(
 		documentapplication.NewChunkListService(scopedDocuments, scopedChunks),
 	).RegisterRoutes(protectedRoutes)
@@ -204,6 +213,91 @@ func TestProcessingOwnerHTTPWithPostgreSQL(t *testing.T) {
 		router, http.MethodGet, jobPath, nil, ownerACookie, "",
 	)
 	assertProcessingOwnerStatus(t, ownerAJob.Code, http.StatusOK, ownerAJob.Body.String())
+
+	latestBody := []byte(fmt.Sprintf(
+		`{"document_ids":[%d,%d]}`,
+		queuedDocument.ID,
+		readyDocument.ID,
+	))
+	ownerBLatest := performDocumentOwnerRequest(
+		router,
+		http.MethodPost,
+		"/processing-jobs/latest",
+		bytes.NewReader(latestBody),
+		ownerBCookie,
+		"application/json",
+	)
+	assertProcessingOwnerStatus(t, ownerBLatest.Code, http.StatusOK, ownerBLatest.Body.String())
+	var ownerBLatestResponse struct {
+		Items []struct {
+			Job json.RawMessage `json:"job"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(ownerBLatest.Body.Bytes(), &ownerBLatestResponse); err != nil {
+		t.Fatalf("decode owner B latest response: %v", err)
+	}
+	if len(ownerBLatestResponse.Items) != 2 ||
+		string(ownerBLatestResponse.Items[0].Job) != "null" ||
+		string(ownerBLatestResponse.Items[1].Job) != "null" {
+		t.Fatalf("owner B latest response leaked jobs: %s", ownerBLatest.Body.String())
+	}
+
+	ownerALatest := performDocumentOwnerRequest(
+		router,
+		http.MethodPost,
+		"/processing-jobs/latest",
+		bytes.NewReader(latestBody),
+		ownerACookie,
+		"application/json",
+	)
+	assertProcessingOwnerStatus(t, ownerALatest.Code, http.StatusOK, ownerALatest.Body.String())
+	var ownerALatestResponse struct {
+		Items []struct {
+			DocumentID int64 `json:"document_id"`
+			Job        *struct {
+				ID         int64  `json:"id"`
+				Status     string `json:"status"`
+				Cancelable bool   `json:"cancelable"`
+			} `json:"job"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(ownerALatest.Body.Bytes(), &ownerALatestResponse); err != nil {
+		t.Fatalf("decode owner A latest response: %v", err)
+	}
+	if len(ownerALatestResponse.Items) != 2 ||
+		ownerALatestResponse.Items[0].DocumentID != queuedDocument.ID ||
+		ownerALatestResponse.Items[0].Job == nil ||
+		ownerALatestResponse.Items[0].Job.ID != queuedJob.ID ||
+		!ownerALatestResponse.Items[0].Job.Cancelable ||
+		ownerALatestResponse.Items[1].DocumentID != readyDocument.ID ||
+		ownerALatestResponse.Items[1].Job != nil {
+		t.Fatalf("unexpected owner A latest response: %s", ownerALatest.Body.String())
+	}
+
+	cancelPath := fmt.Sprintf("/processing-jobs/%d/cancel", queuedJob.ID)
+	ownerBCancel := performDocumentOwnerRequest(
+		router, http.MethodPost, cancelPath, nil, ownerBCookie, "",
+	)
+	assertProcessingOwnerStatus(t, ownerBCancel.Code, http.StatusNotFound, ownerBCancel.Body.String())
+	ownerACancel := performDocumentOwnerRequest(
+		router, http.MethodPost, cancelPath, nil, ownerACookie, "",
+	)
+	assertProcessingOwnerStatus(t, ownerACancel.Code, http.StatusOK, ownerACancel.Body.String())
+	var canceledJob struct {
+		ID         int64  `json:"id"`
+		Status     string `json:"status"`
+		Cancelable bool   `json:"cancelable"`
+	}
+	if err := json.Unmarshal(ownerACancel.Body.Bytes(), &canceledJob); err != nil {
+		t.Fatalf("decode canceled processing job: %v", err)
+	}
+	if canceledJob.ID != queuedJob.ID || canceledJob.Status != "canceled" || canceledJob.Cancelable {
+		t.Fatalf("unexpected canceled job response: %+v", canceledJob)
+	}
+	repeatedCancel := performDocumentOwnerRequest(
+		router, http.MethodPost, cancelPath, nil, ownerACookie, "",
+	)
+	assertProcessingOwnerStatus(t, repeatedCancel.Code, http.StatusOK, repeatedCancel.Body.String())
 
 	chunksPath := fmt.Sprintf("/documents/%d/chunks", readyDocument.ID)
 	unauthenticatedChunks := performDocumentOwnerRequest(

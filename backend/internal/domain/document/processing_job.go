@@ -38,6 +38,18 @@ var ErrProcessingJobNotFound = errors.New(
 	"document processing job not found",
 )
 
+// ErrProcessingJobProcessingCannotCancel 表示任务已经被 Worker 领取，
+// 第一版不允许用户强制终止正在执行的 Python 文档处理。
+var ErrProcessingJobProcessingCannotCancel = errors.New(
+	"processing document job cannot be canceled",
+)
+
+// ErrProcessingJobTerminalCannotCancel 表示成功或失败的历史任务已经结束，
+// 不能再转换为 canceled。
+var ErrProcessingJobTerminalCannotCancel = errors.New(
+	"terminal document processing job cannot be canceled",
+)
+
 // ErrNoQueuedProcessingJob 表示当前没有可以被 Worker 领取的排队任务。
 //
 // 这不是系统故障，而是 Worker 空闲时的正常结果。
@@ -59,6 +71,7 @@ const (
 	ProcessingJobStatusProcessing ProcessingJobStatus = "processing"
 	ProcessingJobStatusSucceeded  ProcessingJobStatus = "succeeded"
 	ProcessingJobStatusFailed     ProcessingJobStatus = "failed"
+	ProcessingJobStatusCanceled   ProcessingJobStatus = "canceled"
 )
 
 // IsValid 判断任务状态是否由当前系统支持。
@@ -67,7 +80,8 @@ func (s ProcessingJobStatus) IsValid() bool {
 	case ProcessingJobStatusQueued,
 		ProcessingJobStatusProcessing,
 		ProcessingJobStatusSucceeded,
-		ProcessingJobStatusFailed:
+		ProcessingJobStatusFailed,
+		ProcessingJobStatusCanceled:
 		return true
 	default:
 		return false
@@ -183,6 +197,29 @@ type ScopedProcessingJobCreator interface {
 // 任务不存在和任务属于其他用户都必须返回 ErrProcessingJobNotFound。
 type ScopedProcessingJobFinder interface {
 	GetProcessingJobByID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		jobID int64,
+	) (ProcessingJob, error)
+}
+
+// ScopedLatestProcessingJobFinder 定义按照一批文档 ID 查询各自最新解析任务的能力。
+//
+// 实现只能返回当前 OwnerScope 可见文档关联的任务。文档不存在、没有任务或
+// 属于其他用户都通过“结果中没有该 document_id”表达，避免泄露资源存在性。
+type ScopedLatestProcessingJobFinder interface {
+	FindLatestProcessingJobsByDocumentIDs(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		documentIDs []int64,
+	) ([]ProcessingJob, error)
+}
+
+// ScopedProcessingJobCanceler 定义在所有者边界内取消解析任务的能力。
+// queued 可以取消；canceled 重复取消保持幂等；processing、succeeded 和
+// failed 必须返回对应的稳定领域错误。
+type ScopedProcessingJobCanceler interface {
+	CancelProcessingJob(
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
 		jobID int64,

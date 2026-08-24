@@ -1,12 +1,12 @@
 # HTTP API 总览
 
-> 更新时间：2026-08-22。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
+> 更新时间：2026-08-24。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
 > Handler 测试和后续 OpenAPI 文件为最终校验依据。
 
 ## 1. 当前访问边界
 
 当前 API 是个人版、单工作区接口。验证码、注册、登录、密码重置、Session、当前用户和退出已经实现；文档增删查、
-解析任务创建、processing job 查询、chunks 浏览、向量任务申请/批量/查询/取消、关键词检索、语义检索和问答均已接入
+解析任务创建/恢复/查询/取消、chunks 浏览、向量任务申请/批量/查询/取消、关键词检索、语义检索和问答均已接入
 Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成显式认领，数据库也已通过 `NOT NULL`
 禁止再次产生无主文档；后端双用户数据隔离发布验收已经通过。公开互联网部署仍需配套 HTTPS、真实邮件渠道、
 反向代理与生产环境安全配置。
@@ -26,6 +26,8 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `DELETE` | `/documents/:id` | Session Cookie；路径参数 `id` | `204` | 删除当前用户文档及其关联数据 | 用户功能；已隔离，需二次确认 |
 | `POST` | `/documents/:id/process` | Session Cookie；路径参数 `id` | `202`；重复任务 `409`；用户满额 `429`；全局满额 `503` | 为当前用户文档创建异步解析任务 | 用户功能；已隔离/背压 |
 | `GET` | `/processing-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户文档的解析任务状态 | 用户功能；已隔离/轮询 |
+| `POST` | `/processing-jobs/latest` | Session Cookie；JSON：`document_ids`，最多100项 | `200` | 按文档批量恢复当前用户可见的最新解析任务 | 用户功能；已隔离/状态恢复 |
+| `POST` | `/processing-jobs/:id/cancel` | Session Cookie；路径参数 `id` | `200` | 取消 queued 解析任务 | 用户功能；processing/终态返回 `409` |
 | `GET` | `/search` | Session Cookie；完整短语 `q`，或重复 `term` + 可选 `operator`、`within`；另可选 `document_id`、`page`、`page_size` | `200` | 在当前用户文档的同一文本块内执行短语或多关键词检索 | 用户功能；已隔离 |
 | `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | 新建 `202`；活动任务已存在 `200`；用户满额 `429`；全局满额 `503` | 保存当前用户的向量化意图 | 用户功能；已隔离/幂等/背压 |
 | `POST` | `/embedding-jobs/batch` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 对多份文档逐项创建或复用向量任务 | 用户功能；已隔离/逐项结果/背压 |
@@ -172,6 +174,50 @@ GET /search?term=磁悬浮&term=振动&operator=all&within=chunk&page=1&page_siz
 
 容量统计和任务插入位于同一 PostgreSQL 事务，并通过文档行锁与事务级 advisory lock 防止并发请求
 同时越过最后一个名额。锁只覆盖短暂的准入临界区，不覆盖实际 Python 解析过程。
+
+#### 2.4.1 解析任务状态恢复与排队取消
+
+解析任务的正式状态为 `queued`、`processing`、`succeeded`、`failed` 和 `canceled`。所有返回
+`processingJobResponse` 的接口都包含 `cancelable`：只有 `queued` 为 `true`，其余状态均为 `false`。
+
+`POST /processing-jobs/latest` 用于页面首次进入、刷新或换设备后恢复任务状态。请求必须包含1～100个
+正整数文档 ID：
+
+```json
+{"document_ids":[600,595,593]}
+```
+
+服务端去重后仍按第一次出现顺序返回：
+
+```json
+{
+  "items": [
+    {"document_id":600,"job":{"id":812,"document_id":600,"status":"queued","cancelable":true}},
+    {"document_id":595,"job":{"id":807,"document_id":595,"status":"succeeded","cancelable":false}},
+    {"document_id":593,"job":null}
+  ]
+}
+```
+
+- 格式、数量或 ID 边界错误返回 `400`、`invalid_processing_job_lookup`；
+- 文档不存在、属于其他用户或从未创建任务都返回 `job:null`，不泄露资源存在性；
+- “最新”按 `document_jobs.id DESC` 定义；返回值是调用时刻快照，不是队列预约；
+- 前端只轮询活动任务，进入 `succeeded/failed/canceled` 后必须停止；
+- Owner 公平调度、取消、重试和并发领取会动态改变顺序，因此第一版不返回容易误导的准确队列名次。
+
+`POST /processing-jobs/:id/cancel` 只允许取消 `queued`。取消与 Worker 领取通过 PostgreSQL 行级锁原子竞争：
+取消先提交后 Worker 不会再领取；Worker 先把任务转换为 `processing` 后，取消返回稳定冲突。
+
+| 状态码 | 稳定 `code` | 含义 |
+| --- | --- | --- |
+| `400` | `invalid_processing_job_id` | job ID 不是正整数 |
+| `404` | `processing_job_not_found` | 任务不存在或不属于当前用户 |
+| `409` | `processing_job_processing` | Worker 已经领取，第一版不能强制终止 Python 处理 |
+| `409` | `processing_job_terminal` | succeeded 或 failed 历史任务不能取消 |
+| `500` | `internal_error` | 后端内部异常 |
+
+`canceled` 重复取消幂等返回 `200`。取消 queued 任务不会修改文档状态：任务被 Worker 领取前，文档本来仍是
+`uploaded` 或 `failed`。`completed_at` 记录取消完成时间，取消不写入伪造的错误消息或执行指标。
 
 ### 2.5 按文档批量发现最新向量任务
 

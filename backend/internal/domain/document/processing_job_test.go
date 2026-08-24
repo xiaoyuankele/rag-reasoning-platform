@@ -140,6 +140,11 @@ func TestProcessingJobStatusIsValid(t *testing.T) {
 			valid:  true,
 		},
 		{
+			name:   "canceled",
+			status: ProcessingJobStatusCanceled,
+			valid:  true,
+		},
+		{
 			name:   "unknown",
 			status: ProcessingJobStatus("unknown"),
 			valid:  false,
