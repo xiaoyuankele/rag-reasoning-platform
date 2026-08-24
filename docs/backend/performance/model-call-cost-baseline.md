@@ -68,7 +68,9 @@ Gin debug 文本和 JSON 日志可以共存。汇总器会计数并忽略普通�
 ```powershell
 go run ./cmd/observability-report `
     -input  "..\chatgpt\后端\评估\模型成本\2026-08-15\server.jsonl" `
-    -output "..\chatgpt\后端\评估\模型成本\2026-08-15\cost-report.json"
+    -output "..\chatgpt\后端\评估\模型成本\2026-08-15\cost-report.json" `
+    -processing-slow-threshold 60s `
+    -processing-slow-task-limit 20
 ```
 
 也可以使用标准输入/输出：
@@ -129,6 +131,20 @@ Get-Content .\server.jsonl |
 耗时统计统一提供 `count`、`total_ms`、`average_ms`、`min_ms`、`p50_ms`、`p95_ms` 和 `max_ms`。
 P50/P95 使用 nearest-rank：先从小到大排序，再取向上取整后的第 50%/95% 位置。
 
+### 5.5 Document Processing
+
+`document_processing` 使用文档解析终结事件定位吞吐和长尾：
+
+- `worker_duration` 对应 `total_ms`，从 Worker 领取任务后开始，不含排队；
+- `end_to_end_duration` 等于 `queue_wait_ms + total_ms`，更接近用户等待解析的时间；
+- `processor_duration` 包含 Go 调用处理器、Python 进程池等待和协议往返；
+- `python_duration` 及 `source_open/text_extract/text_split` 等字段只来自支持阶段指标的 Python 处理器；
+- `chunk_write_duration` 和 `finalization_duration` 分别描述 chunks 替换和 Job/Document 终态回写；
+- `slow_task_bottlenecks` 是阶段最大值的第一轮定位结果，不替代 CPU profile、SQL 分析或 PDF 样本复现。
+
+默认慢任务阈值是 60 秒，目的是隔离当前压力测试中高于约 48 秒 P95 的长尾，而不是承诺 60 秒 SLA。
+不同机器、文件集和 Worker 配置应显式记录命令参数。报告只保留最慢 N 条安全摘要，完整原始日志仍是审计来源。
+
 ## 6. 金额换算
 
 工具不内置供应商单价，因为价格会变化。批次报告应另行记录查询日期和官方价格，然后计算：
@@ -152,5 +168,8 @@ Generation 金额 = prompt_tokens / 1,000,000 × 当日输入单价
 
 2026-08-24 报告结构升级为 `schema_version=3`，增加 Embedding 重试恢复、重试耗尽、恢复率和数据库收尾耗时。
 旧 JSONL 中已有 `attempt_count` 时可以推导恢复结果；缺少收尾耗时的历史事件仍可汇总，但不会进入该耗时样本。
+
+同日 `schema_version=4` 增加文档处理阶段分布、端到端长尾、瓶颈分类和有界慢任务摘要。该分析继续只读取
+JSONL，不访问数据库、不打开 PDF，也不调用模型。
 
 下一次真实成本批次需要冻结语料和问题集，并在用户明确同意产生远程费用后执行。

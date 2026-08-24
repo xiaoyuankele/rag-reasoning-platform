@@ -1,4 +1,4 @@
-// Package baseline 把后端 JSONL 结构化日志汇总成可重复比较的模型调用基线。
+// Package baseline 把后端 JSONL 结构化日志汇总成可重复比较的运行基线。
 package baseline
 
 import (
@@ -18,7 +18,7 @@ import (
 
 const (
 	// SchemaVersion 是基线报告结构版本；字段含义变化时必须递增。
-	SchemaVersion       = 3
+	SchemaVersion       = 4
 	maximumLogLineBytes = 1 << 20
 )
 
@@ -36,6 +36,7 @@ type Report struct {
 	Embedding               EmbeddingSummary       `json:"embedding"`
 	Generation              GenerationSummary      `json:"generation"`
 	AnswerAdmission         AnswerAdmissionSummary `json:"answer_admission"`
+	DocumentProcessing      ProcessingSummary      `json:"document_processing"`
 }
 
 // DurationSummary 使用毫秒描述一组耗时。
@@ -105,6 +106,9 @@ type AnswerAdmissionSummary struct {
 
 type logEntry struct {
 	Event                string `json:"event"`
+	ProcessingJobID      *int64 `json:"processing_job_id"`
+	DocumentID           *int64 `json:"document_id"`
+	Status               string `json:"status"`
 	ModelName            string `json:"model_name"`
 	Dimensions           *int   `json:"dimensions"`
 	ResponseLanguage     string `json:"response_language"`
@@ -126,6 +130,22 @@ type logEntry struct {
 	ExecutionDurationMS  *int64 `json:"execution_duration_ms"`
 	InFlight             *int   `json:"in_flight"`
 	MaxConcurrency       *int   `json:"max_concurrency"`
+	QueueWaitMS          *int64 `json:"queue_wait_ms"`
+	ProcessorMS          *int64 `json:"processor_ms"`
+	TotalMS              *int64 `json:"total_ms"`
+	FileBytes            *int64 `json:"file_bytes"`
+	ChunkCount           *int   `json:"chunk_count"`
+	ErrorCode            string `json:"error_code"`
+	ChunkWriteMS         *int64 `json:"chunk_write_ms"`
+	FinalizeMS           *int64 `json:"finalize_ms"`
+	PythonTotalMS        *int64 `json:"python_total_ms"`
+	SourceOpenMS         *int64 `json:"source_open_ms"`
+	MetadataReadMS       *int64 `json:"metadata_read_ms"`
+	TextExtractMS        *int64 `json:"text_extract_ms"`
+	TextSplitMS          *int64 `json:"text_split_ms"`
+	PageCount            *int   `json:"page_count"`
+	SlowestPageNumber    *int   `json:"slowest_page_number"`
+	SlowestPageMS        *int64 `json:"slowest_page_ms"`
 }
 
 type durationAccumulator struct {
@@ -137,11 +157,25 @@ type durationAccumulator struct {
 // 非 JSON 行会被计数后忽略；以 "{" 开头却无法解析的行会直接报错，避免悄悄丢失损坏的结构化日志。
 // 模型 started 事件只表示过程开始，为防止重复计数不会进入最终成本统计。
 func Summarize(reader io.Reader, generatedAt time.Time) (Report, error) {
+	return SummarizeWithOptions(reader, generatedAt, DefaultOptions())
+}
+
+// SummarizeWithOptions 使用显式慢任务阈值生成报告。
+// 它与 Summarize 一样只读取日志，不访问数据库或远程服务。
+func SummarizeWithOptions(
+	reader io.Reader,
+	generatedAt time.Time,
+	options Options,
+) (Report, error) {
 	if reader == nil {
 		return Report{}, errors.New("baseline log reader must be provided")
 	}
+	if err := options.validate(); err != nil {
+		return Report{}, err
+	}
 
 	report := newReport(generatedAt)
+	processing := newProcessingAccumulator(options)
 	var embeddingWorkerDurations durationAccumulator
 	var embeddingProviderDurations durationAccumulator
 	var embeddingFinalizationDurations durationAccumulator
@@ -178,6 +212,7 @@ func Summarize(reader io.Reader, generatedAt time.Time) (Report, error) {
 			&generationProviderDurations,
 			&answerWaitDurations,
 			&answerExecutionDurations,
+			&processing,
 		)
 		if err != nil {
 			return Report{}, fmt.Errorf(
@@ -206,6 +241,7 @@ func Summarize(reader io.Reader, generatedAt time.Time) (Report, error) {
 	report.Generation.ProviderDuration = generationProviderDurations.summary()
 	report.AnswerAdmission.WaitDuration = answerWaitDurations.summary()
 	report.AnswerAdmission.ExecutionDuration = answerExecutionDurations.summary()
+	report.DocumentProcessing = processing.summary()
 	if generationEventCount := mapValueTotal(report.Generation.Events); generationEventCount > 0 {
 		report.Generation.AverageEvidenceCount =
 			float64(report.Generation.EvidenceCountTotal) / float64(generationEventCount)
@@ -245,6 +281,7 @@ func aggregateEntry(
 	generationProviderDurations *durationAccumulator,
 	answerWaitDurations *durationAccumulator,
 	answerExecutionDurations *durationAccumulator,
+	processing *processingAccumulator,
 ) (bool, error) {
 	switch entry.Event {
 	case string(embeddingapplication.JobEventSucceeded),
@@ -276,6 +313,10 @@ func aggregateEntry(
 			answerWaitDurations,
 			answerExecutionDurations,
 		)
+	case "processing_job_succeeded",
+		"processing_job_failed",
+		"processing_job_unfinished":
+		return true, processing.aggregate(entry)
 	default:
 		return false, nil
 	}

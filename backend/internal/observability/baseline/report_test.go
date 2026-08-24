@@ -31,7 +31,7 @@ func TestSummarizeAggregatesEmbeddingAndGenerationEvents(t *testing.T) {
 		t.Fatalf("Summarize() error = %v, want nil", err)
 	}
 
-	if report.SchemaVersion != 3 ||
+	if report.SchemaVersion != 4 ||
 		report.GeneratedAt != "2026-08-15T04:00:00Z" ||
 		report.ScannedLineCount != 15 ||
 		report.JSONLineCount != 14 ||

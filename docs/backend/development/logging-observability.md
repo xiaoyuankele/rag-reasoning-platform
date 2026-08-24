@@ -294,6 +294,21 @@ Token、成功/失败/跳过状态以及平均、P50、P95 耗时。重试前已
 汇总器能够从旧日志已有的 `attempt_count` 推导重试次数，因此历史结构化日志仍可使用；旧日志没有
 `finalization_duration_ms` 时，该耗时样本为空，不会伪造为 0 毫秒。
 
+2026-08-24 报告结构继续升级为 `schema_version=4`，在同一个离线命令中增加 `document_processing`：
+
+- 同时统计 `queue_wait`、Worker、Processor、Python 内部阶段、chunk 写入、数据库收尾和用户端到端耗时；
+- 默认以 `queue_wait_ms + total_ms >= 60000` 识别长尾，可通过
+  `-processing-slow-threshold` 调整，阈值不是业务状态规则；
+- 按近似互斥阶段给慢任务标记 `queue_wait`、`source_open`、`metadata_read`、`text_extract`、
+  `text_split`、`python_other`、`processor_bridge_overhead`、`processor`、`chunk_write`、
+  `finalization` 或 `worker_other` 瓶颈；
+- `slow_task_count` 统计全部慢任务，`slowest_tasks` 默认只保存最慢 20 条，避免大日志生成无界 JSON；
+- 慢任务明细只含 Job ID、Document ID、状态、规模和耗时，不记录路径、标题或正文。
+
+`processor_bridge_overhead` 是 `processor_ms - python_total_ms` 的非负部分，包含 Python 进程池等待、
+跨进程协议和 JSON 编解码，不能简单解释为网络时间。`slowest_page_ms` 属于 `text_extract_ms` 的内部线索，
+为了避免重复计算，不参与顶层瓶颈之间的竞争。
+
 完整冻结条件、PowerShell 命令、字段口径和金额换算方法见
 [模型调用成本基线](../performance/model-call-cost-baseline.md)。真实付费批次必须单独获得授权。
 
