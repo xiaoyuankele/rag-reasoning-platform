@@ -44,7 +44,8 @@ func TestVerificationCodeHTTPWithPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	defer pool.Close()
+	// 后注册的数据 Cleanup 会先执行，连接池最后关闭。
+	t.Cleanup(pool.Close)
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
@@ -59,11 +60,13 @@ func TestVerificationCodeHTTPWithPostgreSQL(t *testing.T) {
 			5*time.Second,
 		)
 		defer cleanupCancel()
-		_, _ = pool.Exec(
+		if _, err := pool.Exec(
 			cleanupContext,
 			"DELETE FROM verification_challenges WHERE destination = $1",
 			destination,
-		)
+		); err != nil {
+			t.Errorf("delete verification HTTP challenge: %v", err)
+		}
 	})
 
 	repository := postgresrepository.NewVerificationChallengeRepository(pool)

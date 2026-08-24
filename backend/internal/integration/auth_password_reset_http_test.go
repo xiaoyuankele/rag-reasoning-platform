@@ -54,8 +54,20 @@ func TestPasswordResetHTTPWithPostgreSQL(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
-		_, _ = pool.Exec(cleanupContext, "DELETE FROM users WHERE email = $1", destination)
-		_, _ = pool.Exec(cleanupContext, "DELETE FROM verification_challenges WHERE destination = $1", destination)
+		if _, err := pool.Exec(
+			cleanupContext,
+			"DELETE FROM users WHERE email = $1",
+			destination,
+		); err != nil {
+			t.Errorf("delete password reset HTTP test user: %v", err)
+		}
+		if _, err := pool.Exec(
+			cleanupContext,
+			"DELETE FROM verification_challenges WHERE destination = $1",
+			destination,
+		); err != nil {
+			t.Errorf("delete password reset HTTP verification challenge: %v", err)
+		}
 	})
 
 	passwordHasher, err := passwordinfrastructure.NewArgon2idHasher(
