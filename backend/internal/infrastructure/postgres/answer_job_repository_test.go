@@ -42,6 +42,83 @@ func TestAnswerJobRepository(t *testing.T) {
 	ownerAScope := answerJobTestOwnerScope(t, ctx, pool, "answer-owner-a")
 	ownerBScope := answerJobTestOwnerScope(t, ctx, pool, "answer-owner-b")
 
+	t.Run("lists only current owner jobs with stable pagination", func(t *testing.T) {
+		ownerListAScope := answerJobTestOwnerScope(t, ctx, pool, "answer-list-owner-a")
+		ownerListBScope := answerJobTestOwnerScope(t, ctx, pool, "answer-list-owner-b")
+		ownerAJobs := make([]answerapplication.Job, 0, 3)
+		for index := range 3 {
+			job, err := repository.CreateAnswerJob(
+				ctx,
+				ownerListAScope,
+				answerapplication.Input{
+					Query:            fmt.Sprintf("owner A list question %d", index),
+					TopK:             5,
+					ResponseLanguage: answerapplication.ResponseLanguageAuto,
+				},
+			)
+			if err != nil {
+				t.Fatalf("create owner A list fixture: %v", err)
+			}
+			ownerAJobs = append(ownerAJobs, job)
+		}
+		ownerBJob, err := repository.CreateAnswerJob(
+			ctx,
+			ownerListBScope,
+			answerapplication.Input{
+				Query:            "owner B private question",
+				TopK:             5,
+				ResponseLanguage: answerapplication.ResponseLanguageAuto,
+			},
+		)
+		if err != nil {
+			t.Fatalf("create owner B list fixture: %v", err)
+		}
+
+		firstPage, err := repository.ListAnswerJobs(
+			ctx,
+			ownerListAScope,
+			answerapplication.JobListOptions{Limit: 2, Offset: 0},
+		)
+		if err != nil {
+			t.Fatalf("list owner A first page: %v", err)
+		}
+		if firstPage.Total != 3 || len(firstPage.Jobs) != 2 ||
+			firstPage.Jobs[0].ID != ownerAJobs[2].ID ||
+			firstPage.Jobs[1].ID != ownerAJobs[1].ID {
+			t.Fatalf("first page = %+v, want latest two of three owner A jobs", firstPage)
+		}
+
+		secondPage, err := repository.ListAnswerJobs(
+			ctx,
+			ownerListAScope,
+			answerapplication.JobListOptions{Limit: 2, Offset: 2},
+		)
+		if err != nil || secondPage.Total != 3 || len(secondPage.Jobs) != 1 ||
+			secondPage.Jobs[0].ID != ownerAJobs[0].ID {
+			t.Fatalf("second page = %+v, %v, want oldest owner A job", secondPage, err)
+		}
+
+		ownerBPage, err := repository.ListAnswerJobs(
+			ctx,
+			ownerListBScope,
+			answerapplication.JobListOptions{Limit: 20, Offset: 0},
+		)
+		if err != nil || ownerBPage.Total != 1 || len(ownerBPage.Jobs) != 1 ||
+			ownerBPage.Jobs[0].ID != ownerBJob.ID {
+			t.Fatalf("owner B page = %+v, %v, want only private job", ownerBPage, err)
+		}
+
+		for _, fixture := range append(ownerAJobs, ownerBJob) {
+			scope := ownerListAScope
+			if fixture.OwnerUserID == ownerListBScope.OwnerUserID() {
+				scope = ownerListBScope
+			}
+			if _, err := repository.CancelAnswerJob(ctx, scope, fixture.ID); err != nil {
+				t.Fatalf("cancel list fixture %d: %v", fixture.ID, err)
+			}
+		}
+	})
+
 	t.Run("scopes lookup and makes cancellation idempotent", func(t *testing.T) {
 		job, err := repository.CreateAnswerJob(
 			ctx,

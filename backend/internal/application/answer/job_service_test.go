@@ -16,9 +16,24 @@ type fakeScopedAnswerJobRepository struct {
 	createErr    error
 	getResult    Job
 	getErr       error
+	listScope    accessdomain.OwnerScope
+	listOptions  JobListOptions
+	listResult   JobListResult
+	listErr      error
 	cancelResult Job
 	cancelErr    error
 	callCount    int
+}
+
+func (f *fakeScopedAnswerJobRepository) ListAnswerJobs(
+	_ context.Context,
+	scope accessdomain.OwnerScope,
+	options JobListOptions,
+) (JobListResult, error) {
+	f.callCount++
+	f.listScope = scope
+	f.listOptions = options
+	return f.listResult, f.listErr
 }
 
 func (f *fakeScopedAnswerJobRepository) CreateAnswerJob(
@@ -116,5 +131,82 @@ func TestJobServiceGetAndCancelValidateJobID(t *testing.T) {
 	}
 	if repository.callCount != 0 {
 		t.Fatalf("repository calls = %d, want 0", repository.callCount)
+	}
+}
+
+func TestJobServiceListCalculatesPagination(t *testing.T) {
+	repository := &fakeScopedAnswerJobRepository{
+		listResult: JobListResult{
+			Jobs:  []Job{{ID: 3}, {ID: 2}},
+			Total: 41,
+		},
+	}
+	service, _ := NewJobService(repository)
+	scope := testAnswerOwnerScope(t)
+
+	result, err := service.List(t.Context(), scope, JobListInput{
+		Page:     2,
+		PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if repository.listScope.OwnerUserID() != scope.OwnerUserID() ||
+		repository.listOptions.Limit != 20 || repository.listOptions.Offset != 20 {
+		t.Fatalf(
+			"repository input = scope %d, %+v; want scope %d, limit 20, offset 20",
+			repository.listScope.OwnerUserID(),
+			repository.listOptions,
+			scope.OwnerUserID(),
+		)
+	}
+	if len(result.Jobs) != 2 || result.Total != 41 || result.TotalPages != 3 ||
+		result.Page != 2 || result.PageSize != 20 {
+		t.Fatalf("List() result = %+v, want page 2 of 3", result)
+	}
+}
+
+func TestJobServiceListRejectsInvalidPaginationBeforePersistence(t *testing.T) {
+	testCases := []struct {
+		name  string
+		input JobListInput
+		want  error
+	}{
+		{name: "zero page", input: JobListInput{Page: 0, PageSize: 20}, want: ErrInvalidAnswerJobPage},
+		{name: "zero page size", input: JobListInput{Page: 1, PageSize: 0}, want: ErrInvalidAnswerJobPageSize},
+		{name: "oversized page", input: JobListInput{Page: 1, PageSize: 101}, want: ErrInvalidAnswerJobPageSize},
+		{name: "offset overflow", input: JobListInput{Page: 1<<62 + 1, PageSize: 20}, want: ErrInvalidAnswerJobPage},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			repository := &fakeScopedAnswerJobRepository{}
+			service, _ := NewJobService(repository)
+			_, err := service.List(t.Context(), testAnswerOwnerScope(t), testCase.input)
+			if !errors.Is(err, testCase.want) {
+				t.Fatalf("List() error = %v, want %v", err, testCase.want)
+			}
+			if repository.callCount != 0 {
+				t.Fatalf("repository calls = %d, want 0", repository.callCount)
+			}
+		})
+	}
+}
+
+func TestJobServiceListReturnsNonNilEmptyJobs(t *testing.T) {
+	repository := &fakeScopedAnswerJobRepository{
+		listResult: JobListResult{Jobs: nil, Total: 0},
+	}
+	service, _ := NewJobService(repository)
+
+	result, err := service.List(t.Context(), testAnswerOwnerScope(t), JobListInput{
+		Page:     1,
+		PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if result.Jobs == nil || len(result.Jobs) != 0 || result.TotalPages != 0 {
+		t.Fatalf("List() result = %+v, want non-nil empty jobs and zero pages", result)
 	}
 }

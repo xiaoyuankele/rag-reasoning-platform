@@ -48,6 +48,8 @@ const (
 	errorCodeAnswerCapacityExhausted        = "answer_capacity_exhausted"
 	errorCodeInvalidAnswerJobRequest        = "invalid_answer_job_request"
 	errorCodeInvalidAnswerJobID             = "invalid_answer_job_id"
+	errorCodeInvalidAnswerJobPage           = "invalid_answer_job_page"
+	errorCodeInvalidAnswerJobPageSize       = "invalid_answer_job_page_size"
 	errorCodeAnswerJobNotFound              = "answer_job_not_found"
 	errorCodeAnswerJobProcessing            = "answer_job_processing"
 	errorCodeAnswerJobTerminal              = "answer_job_terminal"

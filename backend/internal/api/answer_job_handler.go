@@ -28,6 +28,11 @@ type answerJobService interface {
 		accessdomain.OwnerScope,
 		int64,
 	) (answerapplication.Job, error)
+	List(
+		context.Context,
+		accessdomain.OwnerScope,
+		answerapplication.JobListInput,
+	) (answerapplication.JobListOutput, error)
 	Cancel(
 		context.Context,
 		accessdomain.OwnerScope,
@@ -55,6 +60,7 @@ func NewAnswerJobHandler(
 // RegisterRoutes 注册受认证中间件保护的异步问答路由。
 func (h *AnswerJobHandler) RegisterRoutes(router gin.IRoutes) {
 	router.POST("/answer-jobs", h.Queue)
+	router.GET("/answer-jobs", h.List)
 	router.GET("/answer-jobs/:id", h.GetByID)
 	router.POST("/answer-jobs/:id/cancel", h.Cancel)
 }
@@ -83,6 +89,11 @@ type answerJobResponse struct {
 	UpdatedAt                 time.Time                      `json:"updated_at"`
 	StartedAt                 *time.Time                     `json:"started_at"`
 	CompletedAt               *time.Time                     `json:"completed_at"`
+}
+
+type answerJobListResponse struct {
+	Jobs       []answerJobResponse `json:"jobs"`
+	Pagination paginationResponse  `json:"pagination"`
 }
 
 func newAnswerJobResponse(job answerapplication.Job) answerJobResponse {
@@ -159,6 +170,65 @@ func (h *AnswerJobHandler) Queue(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusAccepted, newAnswerJobResponse(job))
+}
+
+// List 返回当前用户仍在保留期内的异步问答任务。
+func (h *AnswerJobHandler) List(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
+	page, err := parsePositiveQueryInt(
+		c,
+		"page",
+		answerapplication.DefaultAnswerJobPage,
+	)
+	if err != nil {
+		writeErrorResponse(c, http.StatusBadRequest, errorCodeInvalidAnswerJobPage, "page must be a positive integer")
+		return
+	}
+	pageSize, err := parsePositiveQueryInt(
+		c,
+		"page_size",
+		answerapplication.DefaultAnswerJobPageSize,
+	)
+	if err != nil {
+		writeErrorResponse(c, http.StatusBadRequest, errorCodeInvalidAnswerJobPageSize, "page_size must be between 1 and 100")
+		return
+	}
+
+	result, err := h.service.List(
+		c.Request.Context(),
+		scope,
+		answerapplication.JobListInput{Page: page, PageSize: pageSize},
+	)
+	switch {
+	case errors.Is(err, answerapplication.ErrInvalidAnswerJobPage):
+		writeErrorResponse(c, http.StatusBadRequest, errorCodeInvalidAnswerJobPage, "page must be a positive integer")
+		return
+	case errors.Is(err, answerapplication.ErrInvalidAnswerJobPageSize):
+		writeErrorResponse(c, http.StatusBadRequest, errorCodeInvalidAnswerJobPageSize, "page_size must be between 1 and 100")
+		return
+	case err != nil:
+		writeInternalErrorResponse(c, h.logger, "answer_job_list_failed", err)
+		return
+	}
+
+	jobs := make([]answerJobResponse, 0, len(result.Jobs))
+	for _, job := range result.Jobs {
+		jobs = append(jobs, newAnswerJobResponse(job))
+	}
+	c.JSON(http.StatusOK, answerJobListResponse{
+		Jobs: jobs,
+		Pagination: paginationResponse{
+			Page:       result.Page,
+			PageSize:   result.PageSize,
+			Total:      result.Total,
+			TotalPages: result.TotalPages,
+		},
+	})
 }
 
 // GetByID 返回当前用户可见的任务状态和可选结果。

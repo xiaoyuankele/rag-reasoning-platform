@@ -196,6 +196,65 @@ func (r *AnswerJobRepository) GetAnswerJobByID(
 	return job, nil
 }
 
+// ListAnswerJobs 按创建时间倒序返回当前 OwnerScope 的任务。
+func (r *AnswerJobRepository) ListAnswerJobs(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	options answerapplication.JobListOptions,
+) (answerapplication.JobListResult, error) {
+	if !scope.IsValid() {
+		return answerapplication.JobListResult{}, accessdomain.ErrInvalidOwnerScope
+	}
+
+	const countQuery = `
+		SELECT COUNT(*)
+		FROM answer_jobs
+		WHERE owner_user_id = $1
+	`
+	var total int64
+	if err := r.pool.QueryRow(ctx, countQuery, scope.OwnerUserID()).Scan(&total); err != nil {
+		return answerapplication.JobListResult{}, fmt.Errorf("count scoped answer jobs: %w", err)
+	}
+
+	const listQuery = `
+		SELECT
+			id, owner_user_id, document_id, query, top_k,
+			requested_response_language, status, attempt_count,
+			error_code, error_message, next_attempt_at,
+			answer_text, resolved_response_language, sources,
+			prompt_tokens, completion_tokens, total_tokens,
+			created_at, updated_at, started_at, completed_at
+		FROM answer_jobs
+		WHERE owner_user_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2 OFFSET $3
+	`
+	rows, err := r.pool.Query(
+		ctx,
+		listQuery,
+		scope.OwnerUserID(),
+		options.Limit,
+		options.Offset,
+	)
+	if err != nil {
+		return answerapplication.JobListResult{}, fmt.Errorf("query scoped answer jobs: %w", err)
+	}
+	defer rows.Close()
+
+	jobs := make([]answerapplication.Job, 0)
+	for rows.Next() {
+		job, err := scanAnswerJob(rows)
+		if err != nil {
+			return answerapplication.JobListResult{}, fmt.Errorf("scan scoped answer job list: %w", err)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		return answerapplication.JobListResult{}, fmt.Errorf("iterate scoped answer jobs: %w", err)
+	}
+	return answerapplication.JobListResult{Jobs: jobs, Total: total}, nil
+}
+
 // CancelAnswerJob 原子取消 queued 任务，canceled 重复调用保持幂等。
 func (r *AnswerJobRepository) CancelAnswerJob(
 	ctx context.Context,

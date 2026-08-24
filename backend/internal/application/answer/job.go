@@ -112,6 +112,21 @@ type Job struct {
 	CompletedAt               *time.Time
 }
 
+// JobListOptions 是仓储层使用的分页窗口。
+//
+// Application 负责把面向用户的 page/page_size 转换成 Limit/Offset，
+// Repository 不需要理解 HTTP 分页参数。
+type JobListOptions struct {
+	Limit  int64
+	Offset int64
+}
+
+// JobListResult 保存当前页任务和当前用户的任务总数。
+type JobListResult struct {
+	Jobs  []Job
+	Total int64
+}
+
 // JobAdmissionLimits 约束数据库中 queued 任务数量。
 // processing 已取得执行槽位，不计入等待预算。
 type JobAdmissionLimits struct {
@@ -174,6 +189,11 @@ type ScopedJobRepository interface {
 		scope accessdomain.OwnerScope,
 		jobID int64,
 	) (Job, error)
+	ListAnswerJobs(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		options JobListOptions,
+	) (JobListResult, error)
 	CancelAnswerJob(
 		ctx context.Context,
 		scope accessdomain.OwnerScope,

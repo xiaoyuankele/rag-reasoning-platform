@@ -23,6 +23,7 @@ import (
 type fakeAnswerJobService struct {
 	queueFunc  func(context.Context, accessdomain.OwnerScope, answerapplication.Input) (answerapplication.Job, error)
 	getFunc    func(context.Context, accessdomain.OwnerScope, int64) (answerapplication.Job, error)
+	listFunc   func(context.Context, accessdomain.OwnerScope, answerapplication.JobListInput) (answerapplication.JobListOutput, error)
 	cancelFunc func(context.Context, accessdomain.OwnerScope, int64) (answerapplication.Job, error)
 }
 
@@ -40,6 +41,14 @@ func (f *fakeAnswerJobService) GetByID(
 	jobID int64,
 ) (answerapplication.Job, error) {
 	return f.getFunc(ctx, scope, jobID)
+}
+
+func (f *fakeAnswerJobService) List(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	input answerapplication.JobListInput,
+) (answerapplication.JobListOutput, error) {
+	return f.listFunc(ctx, scope, input)
 }
 
 func (f *fakeAnswerJobService) Cancel(
@@ -171,6 +180,128 @@ func TestAnswerJobHandlerReturnsCompletedResult(t *testing.T) {
 	if body.Cancelable || body.Result == nil || body.Result.Answer != "Stable control.[1]" ||
 		len(body.Result.Sources) != 1 || body.Result.Usage.TotalTokens != 14 {
 		t.Fatalf("response = %+v, want completed result", body)
+	}
+}
+
+func TestAnswerJobHandlerListsCurrentOwnerJobs(t *testing.T) {
+	createdAt := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	service := &fakeAnswerJobService{
+		listFunc: func(
+			_ context.Context,
+			scope accessdomain.OwnerScope,
+			input answerapplication.JobListInput,
+		) (answerapplication.JobListOutput, error) {
+			if scope.OwnerUserID() != testAPIOwnerUserID {
+				t.Fatalf("owner = %d, want %d", scope.OwnerUserID(), testAPIOwnerUserID)
+			}
+			if input.Page != 2 || input.PageSize != 5 {
+				t.Fatalf("input = %+v, want page 2 and page_size 5", input)
+			}
+			return answerapplication.JobListOutput{
+				Jobs: []answerapplication.Job{{
+					ID:                        61,
+					OwnerUserID:               testAPIOwnerUserID,
+					Query:                     "control",
+					TopK:                      5,
+					RequestedResponseLanguage: answerapplication.ResponseLanguageAuto,
+					Status:                    answerapplication.JobStatusQueued,
+					NextAttemptAt:             createdAt,
+					CreatedAt:                 createdAt,
+					UpdatedAt:                 createdAt,
+				}},
+				Page:       2,
+				PageSize:   5,
+				Total:      6,
+				TotalPages: 2,
+			}, nil
+		},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/answer-jobs?page=2&page_size=5", nil)
+	response := httptest.NewRecorder()
+	newAnswerJobTestRouter(service).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	var body answerJobListResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Jobs) != 1 || body.Jobs[0].ID != 61 || !body.Jobs[0].Cancelable ||
+		body.Pagination.Page != 2 || body.Pagination.PageSize != 5 ||
+		body.Pagination.Total != 6 || body.Pagination.TotalPages != 2 {
+		t.Fatalf("response = %+v, want one queued job on page 2", body)
+	}
+	if strings.Contains(response.Body.String(), "owner_user_id") {
+		t.Fatalf("response leaks owner identity: %s", response.Body.String())
+	}
+}
+
+func TestAnswerJobHandlerListUsesPaginationDefaults(t *testing.T) {
+	service := &fakeAnswerJobService{
+		listFunc: func(
+			_ context.Context,
+			_ accessdomain.OwnerScope,
+			input answerapplication.JobListInput,
+		) (answerapplication.JobListOutput, error) {
+			if input.Page != answerapplication.DefaultAnswerJobPage ||
+				input.PageSize != answerapplication.DefaultAnswerJobPageSize {
+				t.Fatalf("input = %+v, want defaults", input)
+			}
+			return answerapplication.JobListOutput{
+				Jobs:     []answerapplication.Job{},
+				Page:     input.Page,
+				PageSize: input.PageSize,
+			}, nil
+		},
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/answer-jobs", nil)
+	response := httptest.NewRecorder()
+	newAnswerJobTestRouter(service).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"jobs":[]`) {
+		t.Fatalf("status/body = %d/%s, want 200 with jobs []", response.Code, response.Body.String())
+	}
+}
+
+func TestAnswerJobHandlerListRejectsInvalidPagination(t *testing.T) {
+	testCases := []struct {
+		name     string
+		path     string
+		wantCode string
+	}{
+		{name: "page", path: "/answer-jobs?page=0", wantCode: errorCodeInvalidAnswerJobPage},
+		{name: "page size", path: "/answer-jobs?page_size=101", wantCode: errorCodeInvalidAnswerJobPageSize},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &fakeAnswerJobService{
+				listFunc: func(
+					context.Context,
+					accessdomain.OwnerScope,
+					answerapplication.JobListInput,
+				) (answerapplication.JobListOutput, error) {
+					return answerapplication.JobListOutput{}, answerapplication.ErrInvalidAnswerJobPageSize
+				},
+			}
+			request := httptest.NewRequest(http.MethodGet, testCase.path, nil)
+			response := httptest.NewRecorder()
+			newAnswerJobTestRouter(service).ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", response.Code)
+			}
+			var body errorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if body.Code != testCase.wantCode {
+				t.Fatalf("code = %q, want %q", body.Code, testCase.wantCode)
+			}
+		})
 	}
 }
 
