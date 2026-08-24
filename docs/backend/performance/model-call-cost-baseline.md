@@ -145,6 +145,21 @@ P50/P95 使用 nearest-rank：先从小到大排序，再取向上取整后的�
 默认慢任务阈值是 60 秒，目的是隔离当前压力测试中高于约 48 秒 P95 的长尾，而不是承诺 60 秒 SLA。
 不同机器、文件集和 Worker 配置应显式记录命令参数。报告只保留最慢 N 条安全摘要，完整原始日志仍是审计来源。
 
+### 5.6 Asynchronous Answer Jobs
+
+`answer_jobs` 不直接计算模型费用，而是解释持久化异步问答的用户等待和队列压力：
+
+- `queue_wait_duration` 统计每次执行尝试达到可领取时间后的排队；
+- `execution_duration` 统计每次 Worker 尝试；
+- `total_duration` 只统计 `succeeded`/`failed` 终态，避免重排任务重复进入端到端样本；
+- `retried_job_count`、`recovered_job_count`、`retry_exhausted_count` 和 `recovery_rate` 描述有限重试效果；
+- `queue_snapshot_count` 与 `queue_snapshot_missing_count` 用于识别观测缺口；
+- `max_observed_queued`、`max_observed_ready_queued`、`max_observed_processing`、
+  `max_observed_owner_processing` 和 `max_observed_oldest_ready_wait_ms` 描述观测窗口内的队列峰值。
+
+队列快照来自 PostgreSQL 业务事实，不包含 Owner ID 或正文。它是在任务生命周期事件附近的离散采样，不等同于
+连续监控时序；峰值只能解释“至少观察到这么高”，不能证明观测间隔内没有更高的瞬时峰值。
+
 ## 6. 金额换算
 
 工具不内置供应商单价，因为价格会变化。批次报告应另行记录查询日期和官方价格，然后计算：
@@ -174,5 +189,8 @@ JSONL，不访问数据库、不打开 PDF，也不调用模型。
 
 同日 `schema_version=5` 增加问答 Owner 公平准入汇总：分别统计单用户等待预算拒绝、全局等待区拒绝、
 等待超时，以及全局/单用户执行与等待峰值。旧日志没有新增字段时仍可汇总，新增指标保持为零。
+
+同日 `schema_version=6` 增加异步问答任务的排队、执行、端到端、重试恢复和队列压力汇总。该版本仍然只读取
+结构化日志；不会启动 Worker、查询数据库或调用付费模型。历史日志没有异步问答事件时输出空汇总。
 
 下一次真实成本批次需要冻结语料和问题集，并在用户明确同意产生远程费用后执行。

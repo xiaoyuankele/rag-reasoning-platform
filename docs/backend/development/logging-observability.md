@@ -261,9 +261,21 @@ HTTP 访问日志负责整次请求的状态与总耗时，Generation 事件只�
 | `answer_job_interrupted` | `ERROR` | shutdown 中断执行，等待下次启动恢复 |
 | `answer_job_unfinished` | `ERROR` | 收尾数据库操作失败，任务仍需恢复 |
 
-事件只记录 `answer_job_id`、状态、尝试次数、执行耗时、安全错误分类和下一次执行时间，不记录 Owner ID、
-问题、Prompt、答案或来源正文。HTTP 创建/查询/取消仍由请求日志使用 `request_id` 关联；Worker 跨越原始 HTTP
-请求，因此使用持久化 `answer_job_id` 作为主关联键。
+事件只记录 `answer_job_id`、状态、尝试/重试次数、耗时、安全错误分类、下一次执行时间和匿名全局队列快照，
+不记录 Owner ID、问题、Prompt、答案或来源正文。HTTP 创建/查询/取消仍由请求日志使用 `request_id` 关联；
+Worker 跨越原始 HTTP 请求，因此使用持久化 `answer_job_id` 作为主关联键。
+
+异步问答耗时采用三个不同口径：
+
+- `queue_wait_ms`：本次任务达到可领取时间到 PostgreSQL 原子领取的等待；重试任务从 `next_attempt_at` 起算，
+  不把主动指数退避伪装成队列拥堵；
+- `execution_duration_ms`：本次 Worker 尝试的实际执行时间；
+- `total_ms`：任务最初创建到当前事件的累计端到端时间，包含历史重试和退避。
+
+队列快照包括 `queued_count`、`ready_queued_count`、`processing_count`、
+`max_owner_processing_count` 和 `oldest_ready_wait_ms`。其中 `ready_queued_count` 排除尚未到达
+`next_attempt_at` 的退避任务。快照查询失败会写 `queue_stats_error` 并提升日志级别，但不会改变任务成功、失败或
+重排结果；可观测性不能成为问答正确性的依赖。
 
 ### 7.5 远程 Embedding 分类隔离与全局准入
 
@@ -333,6 +345,18 @@ Token、成功/失败/跳过状态以及平均、P50、P95 耗时。重试前已
 
 结构化事件只记录容量与耗时，不记录 Owner ID、问题、Prompt、答案或证据。汇总器仍兼容缺少这些新增字段
 的旧 JSONL 日志，便于继续分析已有压测证据。
+
+同日 `schema_version=6` 增加 `answer_jobs` 汇总：
+
+- 分别汇总每次尝试的排队和执行耗时，以及成功/失败终态的端到端耗时；
+- 统计至少重试一次的终态任务、恢复成功、重试后失败和恢复率；
+- 输出队列快照覆盖数/缺失数，以及 queued、ready queued、processing、单 Owner processing 和最老可领取任务
+  等待时间的观测峰值；
+- `answer_job_requeued` 的 `total_ms` 不加入终态端到端分布，避免同一任务被重复累计；
+- started 事件继续只表示过程开始，不进入报告的终结事件计数。
+
+该版本只读取现有 JSONL，不访问数据库或远程模型。旧日志没有异步问答事件时，`answer_jobs` 保持空汇总；
+同一个 v6 异步事件若只缺失部分队列字段，则报告器会拒绝该损坏样本，避免产生相互矛盾的容量结论。
 
 完整冻结条件、PowerShell 命令、字段口径和金额换算方法见
 [模型调用成本基线](../performance/model-call-cost-baseline.md)。真实付费批次必须单独获得授权。
