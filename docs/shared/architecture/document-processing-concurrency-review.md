@@ -172,6 +172,7 @@ PYTHON_PROCESS_MAX_DOCUMENTS=20
 ### 后端实现顺序
 
 1. 已完成第一版必要指标：`queue_wait_ms`、`processor_ms`、`total_ms`、文件大小、chunk 数、状态和错误分类；结构化日志与 `document_jobs` 同时保留数据。
+2. 第二版把重型处理器拆为 `source_open_ms`、`metadata_read_ms`、`text_extract_ms`、`text_split_ms` 和 `python_total_ms`，并记录 `page_count`、最慢页码与最慢页耗时；Go 另外记录 `chunk_write_ms`，`finalize_ms` 只进入结构化日志。
 2. 已完成固定大小 Worker Pool：配置默认 1、上限 4，并发数 2 已通过领取、执行和 shutdown 测试。
 3. 区分“任务已收尾的业务失败”和“领取/数据库等基础设施错误”，避免业务失败统一触发 2 秒轮询退避。
 4. 已完成 Python Process Pool：JSON Lines、惰性启动、固定槽位、超时取消、崩溃替换、20 份文档回收和输出上限均有测试。
@@ -226,6 +227,17 @@ status/error_code
 ```
 
 其中 `processor_ms` 先把 Python 启动、PDF 解析、分块和协议往返作为一个重型阶段整体测量。
+
+第二版可以进一步使用以下关系定位瓶颈：
+
+```text
+processor_ms - python_total_ms
+≈ Python 进程池等待 + 跨进程通信 + JSON 编解码等外围开销
+```
+
+阶段字段在 `document_jobs` 中保持可空。`NULL` 表示历史任务、旧处理器或
+本次没有执行该阶段；`0` 表示阶段确实执行，但耗时不足 1ms。Python
+只返回汇总和最慢页，不返回全部逐页耗时，避免大文档响应和数据库记录膨胀。
 只有数据证明该阶段需要继续拆解时，才升级协议并增加：
 
 ```text

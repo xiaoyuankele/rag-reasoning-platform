@@ -7,6 +7,7 @@ from typing import Any
 from rag_ai.application.ports import DocumentProcessingUseCase
 from rag_ai.contracts.document_processing_v1 import (
     ProcessingChunk,
+    ProcessingMetrics as ContractProcessingMetrics,
     ProcessingRequest,
     success_response,
 )
@@ -58,8 +59,22 @@ def process_request(
         for chunk in result.chunks
     ]
 
+    contract_metrics = None
+    if result.metrics is not None:
+        contract_metrics = ContractProcessingMetrics(
+            python_total_ms=result.metrics.python_total_ms,
+            source_open_ms=result.metrics.source_open_ms,
+            metadata_read_ms=result.metrics.metadata_read_ms,
+            text_extract_ms=result.metrics.text_extract_ms,
+            text_split_ms=result.metrics.text_split_ms,
+            page_count=result.metrics.page_count,
+            slowest_page_number=result.metrics.slowest_page_number,
+            slowest_page_ms=result.metrics.slowest_page_ms,
+        )
+
     return success_response(
         request.request_id,
         contract_chunks,
         detected_title=result.detected_title,
+        metrics=contract_metrics,
     )

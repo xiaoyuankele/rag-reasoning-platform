@@ -270,6 +270,15 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 			error_code = NULL,
 			queue_wait_ms = NULL,
 			processor_ms = NULL,
+			chunk_write_ms = NULL,
+			python_total_ms = NULL,
+			source_open_ms = NULL,
+			metadata_read_ms = NULL,
+			text_extract_ms = NULL,
+			text_split_ms = NULL,
+			page_count = NULL,
+			slowest_page_number = NULL,
+			slowest_page_ms = NULL,
 			total_ms = NULL,
 			file_bytes = NULL,
 			chunk_count = NULL,
@@ -637,12 +646,22 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 			file_bytes = $5,
 			chunk_count = $6,
 			error_code = NULLIF($7, ''),
+			chunk_write_ms = $8,
+			python_total_ms = $9,
+			source_open_ms = $10,
+			metadata_read_ms = $11,
+			text_extract_ms = $12,
+			text_split_ms = $13,
+			page_count = $14,
+			slowest_page_number = $15,
+			slowest_page_ms = $16,
 			updated_at = CURRENT_TIMESTAMP,
 			completed_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 			AND status = 'processing'
 	`
 
+	stageMetrics := newProcessingStageDatabaseMetrics(metrics.ProcessorStages)
 	jobCommandTag, err := transaction.Exec(
 		ctx,
 		updateJobQuery,
@@ -653,6 +672,15 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		metrics.FileBytes,
 		metrics.ChunkCount,
 		string(metrics.ErrorCode),
+		optionalDurationMilliseconds(metrics.ChunkWriteDuration),
+		stageMetrics.PythonTotalMS,
+		stageMetrics.SourceOpenMS,
+		stageMetrics.MetadataReadMS,
+		stageMetrics.TextExtractMS,
+		stageMetrics.TextSplitMS,
+		stageMetrics.PageCount,
+		stageMetrics.SlowestPageNumber,
+		stageMetrics.SlowestPageMS,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -743,6 +771,56 @@ func durationMilliseconds(duration time.Duration) int64 {
 	}
 
 	return duration.Milliseconds()
+}
+
+// optionalDurationMilliseconds 保留“未观测”和“已执行但不足 1ms”的区别。
+func optionalDurationMilliseconds(duration *time.Duration) *int64 {
+	if duration == nil {
+		return nil
+	}
+
+	milliseconds := durationMilliseconds(*duration)
+	return &milliseconds
+}
+
+type processingStageDatabaseMetrics struct {
+	PythonTotalMS     *int64
+	SourceOpenMS      *int64
+	MetadataReadMS    *int64
+	TextExtractMS     *int64
+	TextSplitMS       *int64
+	PageCount         *int
+	SlowestPageNumber *int
+	SlowestPageMS     *int64
+}
+
+// newProcessingStageDatabaseMetrics 把可选处理器阶段指标转换为可空 SQL 参数。
+func newProcessingStageDatabaseMetrics(
+	metrics *document.ProcessorStageMetrics,
+) processingStageDatabaseMetrics {
+	if metrics == nil {
+		return processingStageDatabaseMetrics{}
+	}
+
+	pythonTotalMS := durationMilliseconds(metrics.TotalDuration)
+	sourceOpenMS := durationMilliseconds(metrics.SourceOpenDuration)
+	metadataReadMS := durationMilliseconds(metrics.MetadataReadDuration)
+	textExtractMS := durationMilliseconds(metrics.TextExtractDuration)
+	textSplitMS := durationMilliseconds(metrics.TextSplitDuration)
+	pageCount := metrics.PageCount
+	slowestPageNumber := metrics.SlowestPageNumber
+	slowestPageMS := durationMilliseconds(metrics.SlowestPageDuration)
+
+	return processingStageDatabaseMetrics{
+		PythonTotalMS:     &pythonTotalMS,
+		SourceOpenMS:      &sourceOpenMS,
+		MetadataReadMS:    &metadataReadMS,
+		TextExtractMS:     &textExtractMS,
+		TextSplitMS:       &textSplitMS,
+		PageCount:         &pageCount,
+		SlowestPageNumber: &slowestPageNumber,
+		SlowestPageMS:     &slowestPageMS,
+	}
 }
 
 func scanProcessingJob(

@@ -86,6 +86,20 @@ class ProcessingChunk:
     page_end: int | None = None
 
 
+@dataclass(frozen=True)
+class ProcessingMetrics:
+    """可选的 Python 文档处理分阶段耗时响应 DTO。"""
+
+    python_total_ms: int
+    source_open_ms: int
+    metadata_read_ms: int
+    text_extract_ms: int
+    text_split_ms: int
+    page_count: int
+    slowest_page_number: int
+    slowest_page_ms: int
+
+
 class ContractError(Exception):
     """能够安全跨进程返回的契约或文档处理失败。
 
@@ -157,6 +171,7 @@ def success_response(
     chunks: list[ProcessingChunk],
     *,
     detected_title: str | None = None,
+    metrics: ProcessingMetrics | None = None,
 ) -> dict[str, Any]:
     """校验处理结果并构造供 Go 解码的 v1 成功响应。
 
@@ -164,6 +179,7 @@ def success_response(
         request_id: 必须与请求相同的关联 ID。
         chunks: 格式处理器生成、顺序稳定的统一文本块列表。
         detected_title: 处理器自动识别并规范化的可选标题。
+        metrics: 可选的 Python 内部阶段观测数据。
 
     Returns:
         可以交给 ``json.dump`` 的成功响应字典。
@@ -175,6 +191,7 @@ def success_response(
     _validate_request_id(request_id)
     _validate_processing_chunks(chunks)
     _validate_detected_title(detected_title)
+    _validate_processing_metrics(metrics)
 
     chunk_payloads: list[dict[str, Any]] = []
     for chunk in chunks:
@@ -196,6 +213,17 @@ def success_response(
     }
     if detected_title is not None:
         response["metadata"] = {"title": detected_title}
+    if metrics is not None:
+        response["metrics"] = {
+            "python_total_ms": metrics.python_total_ms,
+            "source_open_ms": metrics.source_open_ms,
+            "metadata_read_ms": metrics.metadata_read_ms,
+            "text_extract_ms": metrics.text_extract_ms,
+            "text_split_ms": metrics.text_split_ms,
+            "page_count": metrics.page_count,
+            "slowest_page_number": metrics.slowest_page_number,
+            "slowest_page_ms": metrics.slowest_page_ms,
+        }
 
     return response
 
@@ -377,6 +405,51 @@ def _validate_detected_title(title: str | None) -> None:
         raise ContractError(
             "internal_error",
             "Python processor produced an invalid document title",
+            retryable=True,
+        )
+
+
+def _validate_processing_metrics(
+    metrics: ProcessingMetrics | None,
+) -> None:
+    """校验可选阶段指标，防止无效观测数据进入 Go 与数据库。"""
+
+    if metrics is None:
+        return
+
+    durations = (
+        metrics.python_total_ms,
+        metrics.source_open_ms,
+        metrics.metadata_read_ms,
+        metrics.text_extract_ms,
+        metrics.text_split_ms,
+        metrics.slowest_page_ms,
+    )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        for value in durations
+    ):
+        raise ContractError(
+            "internal_error",
+            "Python processor produced invalid processing metrics",
+            retryable=True,
+        )
+
+    if (
+        isinstance(metrics.page_count, bool)
+        or not isinstance(metrics.page_count, int)
+        or metrics.page_count < 1
+        or isinstance(metrics.slowest_page_number, bool)
+        or not isinstance(metrics.slowest_page_number, int)
+        or not 1
+        <= metrics.slowest_page_number
+        <= metrics.page_count
+    ):
+        raise ContractError(
+            "internal_error",
+            "Python processor produced invalid page metrics",
             retryable=True,
         )
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from rag_ai.application.ports import (
     DocumentExtractor,
     TextSplitter,
@@ -11,6 +13,7 @@ from rag_ai.domain.models import (
     DocumentSource,
     PageText,
     ProcessingLimits,
+    ProcessingMetrics,
     ProcessingResult,
     TextChunk,
 )
@@ -51,6 +54,8 @@ class ProcessDocumentService:
                 返回其他稳定文档处理错误。
         """
 
+        python_started_ns = time.perf_counter_ns()
+
         if source.mime_type != PDF_MIME_TYPE:
             raise DocumentProcessingError(
                 "unsupported_format",
@@ -63,14 +68,35 @@ class ProcessDocumentService:
             max_pages=limits.max_pages,
         )
         normalized_pages = prepare_pages(extracted_document.pages)
+
+        text_split_started_ns = time.perf_counter_ns()
         chunks = build_chunks(
             normalized_pages,
             self._text_splitter,
             max_chunk_characters=limits.max_chunk_characters,
         )
+        text_split_ms = _elapsed_milliseconds(text_split_started_ns)
+
+        extraction_metrics = extracted_document.metrics
+        processing_metrics = None
+        if extraction_metrics is not None:
+            processing_metrics = ProcessingMetrics(
+                python_total_ms=_elapsed_milliseconds(python_started_ns),
+                source_open_ms=extraction_metrics.source_open_ms,
+                metadata_read_ms=extraction_metrics.metadata_read_ms,
+                text_extract_ms=extraction_metrics.text_extract_ms,
+                text_split_ms=text_split_ms,
+                page_count=extraction_metrics.page_count,
+                slowest_page_number=(
+                    extraction_metrics.slowest_page_number
+                ),
+                slowest_page_ms=extraction_metrics.slowest_page_ms,
+            )
+
         return ProcessingResult(
             chunks=chunks,
             detected_title=extracted_document.detected_title,
+            metrics=processing_metrics,
         )
 
 
@@ -158,3 +184,9 @@ def build_chunks(
             )
 
     return chunks
+
+
+def _elapsed_milliseconds(started_ns: int) -> int:
+    """把单调高精度时钟差转换为非负整数毫秒。"""
+
+    return max(0, (time.perf_counter_ns() - started_ns) // 1_000_000)

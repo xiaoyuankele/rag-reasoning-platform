@@ -111,6 +111,17 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 				embeddingdomain.JobStatusWaitingDocument,
 			)
 		}
+		chunkWriteDuration := 125 * time.Millisecond
+		processorStages := &documentdomain.ProcessorStageMetrics{
+			TotalDuration:        1100 * time.Millisecond,
+			SourceOpenDuration:   75 * time.Millisecond,
+			MetadataReadDuration: 5 * time.Millisecond,
+			TextExtractDuration:  900 * time.Millisecond,
+			TextSplitDuration:    80 * time.Millisecond,
+			PageCount:            12,
+			SlowestPageNumber:    7,
+			SlowestPageDuration:  180 * time.Millisecond,
+		}
 
 		if err := jobRepository.MarkProcessingJobSucceeded(
 			ctx,
@@ -118,9 +129,11 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			documentdomain.ProcessingCompletion{
 				DetectedTitle: &detectedTitle,
 				Metrics: documentdomain.ProcessingExecutionMetrics{
-					ProcessorDuration: 1250 * time.Millisecond,
-					FileBytes:         createdDocument.SizeBytes,
-					ChunkCount:        7,
+					ProcessorDuration:  1250 * time.Millisecond,
+					ChunkWriteDuration: &chunkWriteDuration,
+					ProcessorStages:    processorStages,
+					FileBytes:          createdDocument.SizeBytes,
+					ChunkCount:         7,
 				},
 			},
 		); err != nil {
@@ -148,6 +161,8 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			createdDocument.SizeBytes,
 			7,
 			nil,
+			protocolTestInt64Pointer(125),
+			processorStages,
 		)
 
 		activatedEmbeddingJob, err := embeddingJobs.GetEmbeddingJobByID(
@@ -302,6 +317,8 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 			createdDocument.SizeBytes,
 			0,
 			&errorCode,
+			nil,
+			nil,
 		)
 
 		stillWaitingJob, err := embeddingJobs.GetEmbeddingJobByID(
@@ -499,6 +516,8 @@ func assertPersistedProcessingMetrics(
 	expectedFileBytes int64,
 	expectedChunkCount int,
 	expectedErrorCode *string,
+	expectedChunkWriteMS *int64,
+	expectedStages *documentdomain.ProcessorStageMetrics,
 ) {
 	t.Helper()
 
@@ -508,6 +527,15 @@ func assertPersistedProcessingMetrics(
 	var fileBytes int64
 	var chunkCount int
 	var errorCode *string
+	var chunkWriteMS *int64
+	var pythonTotalMS *int64
+	var sourceOpenMS *int64
+	var metadataReadMS *int64
+	var textExtractMS *int64
+	var textSplitMS *int64
+	var pageCount *int
+	var slowestPageNumber *int
+	var slowestPageMS *int64
 	if err := pool.QueryRow(
 		ctx,
 		`
@@ -517,7 +545,16 @@ func assertPersistedProcessingMetrics(
 				total_ms,
 				file_bytes,
 				chunk_count,
-				error_code
+				error_code,
+				chunk_write_ms,
+				python_total_ms,
+				source_open_ms,
+				metadata_read_ms,
+				text_extract_ms,
+				text_split_ms,
+				page_count,
+				slowest_page_number,
+				slowest_page_ms
 			FROM document_jobs
 			WHERE id = $1
 		`,
@@ -529,6 +566,15 @@ func assertPersistedProcessingMetrics(
 		&fileBytes,
 		&chunkCount,
 		&errorCode,
+		&chunkWriteMS,
+		&pythonTotalMS,
+		&sourceOpenMS,
+		&metadataReadMS,
+		&textExtractMS,
+		&textSplitMS,
+		&pageCount,
+		&slowestPageNumber,
+		&slowestPageMS,
 	); err != nil {
 		t.Fatalf("query persisted processing metrics: %v", err)
 	}
@@ -554,6 +600,90 @@ func assertPersistedProcessingMetrics(
 		errorCode,
 		expectedErrorCode,
 	)
+	assertOptionalInt64(
+		t,
+		"chunk_write_ms",
+		chunkWriteMS,
+		expectedChunkWriteMS,
+	)
+	if expectedStages == nil {
+		if pythonTotalMS != nil || sourceOpenMS != nil ||
+			metadataReadMS != nil || textExtractMS != nil ||
+			textSplitMS != nil || pageCount != nil ||
+			slowestPageNumber != nil || slowestPageMS != nil {
+			t.Fatal("processor stage metrics are present, want all NULL")
+		}
+		return
+	}
+
+	assertOptionalInt64(
+		t,
+		"python_total_ms",
+		pythonTotalMS,
+		protocolTestInt64Pointer(expectedStages.TotalDuration.Milliseconds()),
+	)
+	assertOptionalInt64(
+		t,
+		"source_open_ms",
+		sourceOpenMS,
+		protocolTestInt64Pointer(expectedStages.SourceOpenDuration.Milliseconds()),
+	)
+	assertOptionalInt64(
+		t,
+		"metadata_read_ms",
+		metadataReadMS,
+		protocolTestInt64Pointer(expectedStages.MetadataReadDuration.Milliseconds()),
+	)
+	assertOptionalInt64(
+		t,
+		"text_extract_ms",
+		textExtractMS,
+		protocolTestInt64Pointer(expectedStages.TextExtractDuration.Milliseconds()),
+	)
+	assertOptionalInt64(
+		t,
+		"text_split_ms",
+		textSplitMS,
+		protocolTestInt64Pointer(expectedStages.TextSplitDuration.Milliseconds()),
+	)
+	if pageCount == nil || *pageCount != expectedStages.PageCount {
+		t.Fatalf("page_count = %v, want %d", pageCount, expectedStages.PageCount)
+	}
+	if slowestPageNumber == nil || *slowestPageNumber != expectedStages.SlowestPageNumber {
+		t.Fatalf(
+			"slowest_page_number = %v, want %d",
+			slowestPageNumber,
+			expectedStages.SlowestPageNumber,
+		)
+	}
+	assertOptionalInt64(
+		t,
+		"slowest_page_ms",
+		slowestPageMS,
+		protocolTestInt64Pointer(
+			expectedStages.SlowestPageDuration.Milliseconds(),
+		),
+	)
+}
+
+func protocolTestInt64Pointer(value int64) *int64 {
+	return &value
+}
+
+func assertOptionalInt64(
+	t *testing.T,
+	name string,
+	actual *int64,
+	expected *int64,
+) {
+	t.Helper()
+
+	if actual == nil && expected == nil {
+		return
+	}
+	if actual == nil || expected == nil || *actual != *expected {
+		t.Fatalf("%s = %v, want %v", name, actual, expected)
+	}
 }
 
 func assertOptionalString(

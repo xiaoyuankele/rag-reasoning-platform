@@ -34,18 +34,21 @@ const (
 // ProcessorDuration 表示整个文档处理器调用耗时，TotalDuration 表示 Worker
 // 从领取任务到产生终结事件的总耗时。
 type ProcessingJobEvent struct {
-	Type              ProcessingJobEventType
-	JobID             int64
-	DocumentID        int64
-	AttemptCount      int
-	Status            documentdomain.ProcessingJobStatus
-	QueueWait         time.Duration
-	ProcessorDuration time.Duration
-	TotalDuration     time.Duration
-	FileBytes         int64
-	ChunkCount        int
-	ErrorCode         documentdomain.ProcessingErrorCode
-	Err               error
+	Type               ProcessingJobEventType
+	JobID              int64
+	DocumentID         int64
+	AttemptCount       int
+	Status             documentdomain.ProcessingJobStatus
+	QueueWait          time.Duration
+	ProcessorDuration  time.Duration
+	ChunkWriteDuration *time.Duration
+	FinalizeDuration   *time.Duration
+	ProcessorStages    *documentdomain.ProcessorStageMetrics
+	TotalDuration      time.Duration
+	FileBytes          int64
+	ChunkCount         int
+	ErrorCode          documentdomain.ProcessingErrorCode
+	Err                error
 }
 
 // ProcessingJobEventObserver 是 Application 与任务日志实现之间的插口契约。

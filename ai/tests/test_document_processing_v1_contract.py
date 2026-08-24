@@ -20,6 +20,7 @@ from rag_ai.contracts.document_processing_v1 import (  # noqa: E402
     CONTRACT_VERSION,
     ContractError,
     ProcessingChunk,
+    ProcessingMetrics,
     parse_request,
     success_response,
 )
@@ -165,6 +166,56 @@ class ProcessingContractTests(unittest.TestCase):
                         "job-123",
                         [chunk],
                         detected_title=title,  # type: ignore[arg-type]
+                    )
+
+                self.assertEqual(raised.exception.code, "internal_error")
+
+    def test_success_response_preserves_processing_metrics(self) -> None:
+        metrics = ProcessingMetrics(
+            python_total_ms=75,
+            source_open_ms=5,
+            metadata_read_ms=1,
+            text_extract_ms=60,
+            text_split_ms=4,
+            page_count=3,
+            slowest_page_number=2,
+            slowest_page_ms=30,
+        )
+
+        response = success_response(
+            "job-123",
+            [ProcessingChunk(index=0, content="content")],
+            metrics=metrics,
+        )
+
+        self.assertEqual(
+            response["metrics"],
+            {
+                "python_total_ms": 75,
+                "source_open_ms": 5,
+                "metadata_read_ms": 1,
+                "text_extract_ms": 60,
+                "text_split_ms": 4,
+                "page_count": 3,
+                "slowest_page_number": 2,
+                "slowest_page_ms": 30,
+            },
+        )
+
+    def test_success_response_rejects_invalid_processing_metrics(self) -> None:
+        invalid_metrics = [
+            ProcessingMetrics(-1, 0, 0, 0, 0, 1, 1, 0),
+            ProcessingMetrics(1, 0, 0, 0, 0, 0, 1, 0),
+            ProcessingMetrics(1, 0, 0, 0, 0, 2, 3, 0),
+        ]
+
+        for metrics in invalid_metrics:
+            with self.subTest(metrics=metrics):
+                with self.assertRaises(ContractError) as raised:
+                    success_response(
+                        "job-123",
+                        [ProcessingChunk(index=0, content="content")],
+                        metrics=metrics,
                     )
 
                 self.assertEqual(raised.exception.code, "internal_error")

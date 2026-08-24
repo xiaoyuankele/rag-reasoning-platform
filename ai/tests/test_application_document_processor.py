@@ -17,9 +17,11 @@ from rag_ai.application.document_processor import (  # noqa: E402
 from rag_ai.domain.errors import DocumentProcessingError  # noqa: E402
 from rag_ai.domain.models import (  # noqa: E402
     DocumentSource,
+    ExtractionMetrics,
     ExtractedDocument,
     PageText,
     ProcessingLimits,
+    ProcessingMetrics,
     ProcessingResult,
     TextChunk,
 )
@@ -74,6 +76,14 @@ class ProcessDocumentServiceTests(unittest.TestCase):
                     PageText(page_number=3, text="final"),
                 ],
                 detected_title="Maglev research",
+                metrics=ExtractionMetrics(
+                    source_open_ms=11,
+                    metadata_read_ms=2,
+                    text_extract_ms=37,
+                    page_count=3,
+                    slowest_page_number=1,
+                    slowest_page_ms=20,
+                ),
             )
         )
         splitter = RecordingTextSplitter()
@@ -112,8 +122,24 @@ class ProcessDocumentServiceTests(unittest.TestCase):
                     TextChunk(2, "final", 3, 3),
                 ],
                 detected_title="Maglev research",
+                metrics=ProcessingMetrics(
+                    python_total_ms=result.metrics.python_total_ms,
+                    source_open_ms=11,
+                    metadata_read_ms=2,
+                    text_extract_ms=37,
+                    text_split_ms=result.metrics.text_split_ms,
+                    page_count=3,
+                    slowest_page_number=1,
+                    slowest_page_ms=20,
+                ),
             ),
         )
+
+        self.assertIsNotNone(result.metrics)
+        assert result.metrics is not None
+        self.assertGreaterEqual(result.metrics.python_total_ms, 0)
+        self.assertGreaterEqual(result.metrics.text_split_ms, 0)
+
     def test_process_rejects_unsupported_format_before_using_ports(self) -> None:
         extractor = RecordingDocumentExtractor(ExtractedDocument(pages=[]))
         splitter = RecordingTextSplitter()

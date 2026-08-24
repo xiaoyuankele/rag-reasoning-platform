@@ -145,6 +145,16 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 		{Index: 0, Content: "first normalized chunk"},
 		{Index: 1, Content: "second normalized chunk"},
 	}
+	expectedProcessorStages := &documentdomain.ProcessorStageMetrics{
+		TotalDuration:        75 * time.Millisecond,
+		SourceOpenDuration:   5 * time.Millisecond,
+		MetadataReadDuration: time.Millisecond,
+		TextExtractDuration:  60 * time.Millisecond,
+		TextSplitDuration:    4 * time.Millisecond,
+		PageCount:            3,
+		SlowestPageNumber:    2,
+		SlowestPageDuration:  30 * time.Millisecond,
+	}
 	detectedTitle := "Maglev control study"
 	jobs := &fakeProcessingJobClaimer{
 		claimNextFunc: func(
@@ -192,6 +202,19 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 					completion.Metrics.ErrorCode,
 				)
 			}
+			if completion.Metrics.ChunkWriteDuration == nil {
+				t.Fatal("completion chunk write duration is nil")
+			}
+			if !reflect.DeepEqual(
+				completion.Metrics.ProcessorStages,
+				expectedProcessorStages,
+			) {
+				t.Fatalf(
+					"completion processor stages = %+v, want %+v",
+					completion.Metrics.ProcessorStages,
+					expectedProcessorStages,
+				)
+			}
 			return nil
 		},
 	}
@@ -225,6 +248,7 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 			return ProcessingResult{
 				DetectedTitle: &detectedTitle,
 				Chunks:        expectedChunks,
+				Metrics:       expectedProcessorStages,
 			}, nil
 		},
 	}
@@ -325,6 +349,22 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 			"succeeded event chunk count = %d, want %d",
 			events.events[1].ChunkCount,
 			len(expectedChunks),
+		)
+	}
+	if events.events[1].ChunkWriteDuration == nil {
+		t.Fatal("succeeded event chunk write duration is nil")
+	}
+	if events.events[1].FinalizeDuration == nil {
+		t.Fatal("succeeded event finalize duration is nil")
+	}
+	if !reflect.DeepEqual(
+		events.events[1].ProcessorStages,
+		expectedProcessorStages,
+	) {
+		t.Fatalf(
+			"succeeded event processor stages = %+v, want %+v",
+			events.events[1].ProcessorStages,
+			expectedProcessorStages,
 		)
 	}
 }

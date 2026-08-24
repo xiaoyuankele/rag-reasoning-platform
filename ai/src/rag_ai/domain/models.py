@@ -52,12 +52,38 @@ class PageText:
 
 
 @dataclass(frozen=True)
+class ExtractionMetrics:
+    """文档提取器能够准确测量的内部阶段指标。
+
+    Attributes:
+        source_open_ms: 文件预检、打开并构造解析器所用毫秒数。
+        metadata_read_ms: 尽力读取可选元数据所用毫秒数。
+        text_extract_ms: 遍历全部页面并提取文字所用毫秒数。
+        page_count: 解析器观察到的物理页数。
+        slowest_page_number: 文字提取最慢页面的 1-based 页码。
+        slowest_page_ms: 最慢页面提取文字所用毫秒数。
+
+    Notes:
+        所有耗时都使用单调高精度时钟测量。小于 1ms 的已执行阶段会记为
+        0ms；未执行阶段不应伪造本对象。
+    """
+
+    source_open_ms: int
+    metadata_read_ms: int
+    text_extract_ms: int
+    page_count: int
+    slowest_page_number: int
+    slowest_page_ms: int
+
+
+@dataclass(frozen=True)
 class ExtractedDocument:
     """格式提取器完成一次源文件读取后返回的统一中间结果。
 
     Attributes:
         pages: 按物理页顺序排列的原始页面文字。
         detected_title: 从源文件元数据中尽力识别的可选标题。
+        metrics: 提取器内部阶段的可选观测数据；测试 Fake 或旧实现可不提供。
 
     Notes:
         本模型只保存 Application 后续真正需要的数据，不保留文件句柄、
@@ -67,6 +93,7 @@ class ExtractedDocument:
 
     pages: list[PageText]
     detected_title: str | None = None
+    metrics: ExtractionMetrics | None = None
 
 
 @dataclass(frozen=True)
@@ -87,13 +114,33 @@ class TextChunk:
 
 
 @dataclass(frozen=True)
+class ProcessingMetrics:
+    """一次 Python 文档处理成功后产生的分阶段观测数据。
+
+    ``python_total_ms`` 覆盖提取、页面规范化和分块；其余字段用于定位
+    内部主要耗时。字段使用整数毫秒，避免跨语言传输浮点计时噪声。
+    """
+
+    python_total_ms: int
+    source_open_ms: int
+    metadata_read_ms: int
+    text_extract_ms: int
+    text_split_ms: int
+    page_count: int
+    slowest_page_number: int
+    slowest_page_ms: int
+
+
+@dataclass(frozen=True)
 class ProcessingResult:
     """应用层完成一份文档处理后返回的框架无关结果。
 
     Attributes:
         chunks: 按原文顺序排列的统一文本块。
         detected_title: 处理器自动识别的可选文献标题；缺失时为 ``None``。
+        metrics: Python 内部阶段的可选观测数据。
     """
 
     chunks: list[TextChunk]
     detected_title: str | None = None
+    metrics: ProcessingMetrics | None = None

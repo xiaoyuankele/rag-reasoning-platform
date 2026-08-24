@@ -14,11 +14,14 @@ import (
 )
 
 func TestProcessingJobLoggerWritesStructuredLifecycleEvents(t *testing.T) {
+	chunkWriteDuration := 200 * time.Millisecond
+	finalizeDuration := 50 * time.Millisecond
 	testCases := []struct {
 		name        string
 		event       documentapplication.ProcessingJobEvent
 		wantLevel   string
 		wantMetrics bool
+		wantStages  bool
 		wantError   bool
 	}{
 		{
@@ -36,19 +39,32 @@ func TestProcessingJobLoggerWritesStructuredLifecycleEvents(t *testing.T) {
 		{
 			name: "succeeded",
 			event: documentapplication.ProcessingJobEvent{
-				Type:              documentapplication.ProcessingJobEventSucceeded,
-				JobID:             17,
-				DocumentID:        7,
-				AttemptCount:      1,
-				Status:            documentdomain.ProcessingJobStatusSucceeded,
-				QueueWait:         75 * time.Millisecond,
-				ProcessorDuration: time.Second,
-				TotalDuration:     1250 * time.Millisecond,
-				FileBytes:         4096,
-				ChunkCount:        2,
+				Type:               documentapplication.ProcessingJobEventSucceeded,
+				JobID:              17,
+				DocumentID:         7,
+				AttemptCount:       1,
+				Status:             documentdomain.ProcessingJobStatusSucceeded,
+				QueueWait:          75 * time.Millisecond,
+				ProcessorDuration:  time.Second,
+				ChunkWriteDuration: &chunkWriteDuration,
+				FinalizeDuration:   &finalizeDuration,
+				ProcessorStages: &documentdomain.ProcessorStageMetrics{
+					TotalDuration:        900 * time.Millisecond,
+					SourceOpenDuration:   25 * time.Millisecond,
+					MetadataReadDuration: 5 * time.Millisecond,
+					TextExtractDuration:  800 * time.Millisecond,
+					TextSplitDuration:    40 * time.Millisecond,
+					PageCount:            12,
+					SlowestPageNumber:    7,
+					SlowestPageDuration:  150 * time.Millisecond,
+				},
+				TotalDuration: 1250 * time.Millisecond,
+				FileBytes:     4096,
+				ChunkCount:    2,
 			},
 			wantLevel:   "INFO",
 			wantMetrics: true,
+			wantStages:  true,
 		},
 		{
 			name: "failed",
@@ -130,6 +146,44 @@ func TestProcessingJobLoggerWritesStructuredLifecycleEvents(t *testing.T) {
 			_, hasChunkCount := entry["chunk_count"]
 			if hasChunkCount != testCase.wantMetrics {
 				t.Fatalf("chunk_count presence = %t, want %t", hasChunkCount, testCase.wantMetrics)
+			}
+
+			_, hasChunkWrite := entry["chunk_write_ms"]
+			if hasChunkWrite != (testCase.event.ChunkWriteDuration != nil) {
+				t.Fatalf(
+					"chunk_write_ms presence = %t, want %t",
+					hasChunkWrite,
+					testCase.event.ChunkWriteDuration != nil,
+				)
+			}
+			_, hasFinalize := entry["finalize_ms"]
+			if hasFinalize != (testCase.event.FinalizeDuration != nil) {
+				t.Fatalf(
+					"finalize_ms presence = %t, want %t",
+					hasFinalize,
+					testCase.event.FinalizeDuration != nil,
+				)
+			}
+			stageFields := []string{
+				"python_total_ms",
+				"source_open_ms",
+				"metadata_read_ms",
+				"text_extract_ms",
+				"text_split_ms",
+				"page_count",
+				"slowest_page_number",
+				"slowest_page_ms",
+			}
+			for _, field := range stageFields {
+				_, present := entry[field]
+				if present != testCase.wantStages {
+					t.Fatalf(
+						"%s presence = %t, want %t",
+						field,
+						present,
+						testCase.wantStages,
+					)
+				}
 			}
 
 			_, hasErrorCode := entry["error_code"]

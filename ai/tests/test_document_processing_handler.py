@@ -14,6 +14,7 @@ from rag_ai.contracts.document_processing_v1 import (
 from rag_ai.domain.models import (
     DocumentSource,
     ProcessingLimits,
+    ProcessingMetrics,
     ProcessingResult,
     TextChunk,
 )
@@ -77,6 +78,16 @@ class DocumentProcessorBoundaryTests(unittest.TestCase):
                     ),
                 ],
                 detected_title="Maglev research",
+                metrics=ProcessingMetrics(
+                    python_total_ms=75,
+                    source_open_ms=5,
+                    metadata_read_ms=1,
+                    text_extract_ms=60,
+                    text_split_ms=4,
+                    page_count=1,
+                    slowest_page_number=1,
+                    slowest_page_ms=60,
+                ),
             )
         )
 
@@ -108,6 +119,16 @@ class DocumentProcessorBoundaryTests(unittest.TestCase):
                 "request_id": "request-123",
                 "status": "succeeded",
                 "metadata": {"title": "Maglev research"},
+                "metrics": {
+                    "python_total_ms": 75,
+                    "source_open_ms": 5,
+                    "metadata_read_ms": 1,
+                    "text_extract_ms": 60,
+                    "text_split_ms": 4,
+                    "page_count": 1,
+                    "slowest_page_number": 1,
+                    "slowest_page_ms": 60,
+                },
                 "chunks": [
                     {
                         "index": 0,

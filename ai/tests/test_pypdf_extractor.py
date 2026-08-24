@@ -39,14 +39,20 @@ class PDFPreflightTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            result,
-            ExtractedDocument(
-                pages=[
-                    PageText(page_number=1, text=""),
-                    PageText(page_number=2, text=""),
-                ]
-            ),
+            result.pages,
+            [
+                PageText(page_number=1, text=""),
+                PageText(page_number=2, text=""),
+            ],
         )
+        self.assertIsNotNone(result.metrics)
+        assert result.metrics is not None
+        self.assertEqual(result.metrics.page_count, 2)
+        self.assertIn(result.metrics.slowest_page_number, (1, 2))
+        self.assertGreaterEqual(result.metrics.source_open_ms, 0)
+        self.assertGreaterEqual(result.metrics.metadata_read_ms, 0)
+        self.assertGreaterEqual(result.metrics.text_extract_ms, 0)
+        self.assertGreaterEqual(result.metrics.slowest_page_ms, 0)
 
     def test_preflight_rejects_pdf_requiring_password(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -202,11 +208,10 @@ class PDFTextExtractionTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            result,
-            ExtractedDocument(
-                pages=[PageText(page_number=1, text="adapter page")]
-            ),
+            result.pages,
+            [PageText(page_number=1, text="adapter page")],
         )
+        self.assertIsNotNone(result.metrics)
 
     def test_extract_pdf_document_preserves_page_numbers_and_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

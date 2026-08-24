@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	documentapplication "rag-reasoning-platform/backend/internal/application/document"
@@ -81,8 +82,20 @@ type processResponse struct {
 	RequestID       string           `json:"request_id"`
 	Status          string           `json:"status"`
 	Metadata        *processMetadata `json:"metadata,omitempty"`
+	Metrics         *processMetrics  `json:"metrics,omitempty"`
 	Chunks          []processChunk   `json:"chunks,omitempty"`
 	Error           *processFailure  `json:"error,omitempty"`
+}
+
+type processMetrics struct {
+	PythonTotalMS     int64 `json:"python_total_ms"`
+	SourceOpenMS      int64 `json:"source_open_ms"`
+	MetadataReadMS    int64 `json:"metadata_read_ms"`
+	TextExtractMS     int64 `json:"text_extract_ms"`
+	TextSplitMS       int64 `json:"text_split_ms"`
+	PageCount         int   `json:"page_count"`
+	SlowestPageNumber int   `json:"slowest_page_number"`
+	SlowestPageMS     int64 `json:"slowest_page_ms"`
 }
 
 type processMetadata struct {
@@ -289,6 +302,10 @@ func decodeProcessResponse(
 		if err != nil {
 			return documentapplication.ProcessingResult{}, err
 		}
+		processorMetrics, err := decodeProcessMetrics(response.Metrics)
+		if err != nil {
+			return documentapplication.ProcessingResult{}, err
+		}
 
 		chunks := make(
 			[]documentdomain.ChunkInput,
@@ -306,12 +323,19 @@ func decodeProcessResponse(
 		return documentapplication.ProcessingResult{
 			DetectedTitle: detectedTitle,
 			Chunks:        chunks,
+			Metrics:       processorMetrics,
 		}, nil
 
 	case processStatusFailed:
 		if response.Metadata != nil {
 			return documentapplication.ProcessingResult{}, fmt.Errorf(
 				"%w: failed response must not contain metadata",
+				ErrInvalidProcessResponse,
+			)
+		}
+		if response.Metrics != nil {
+			return documentapplication.ProcessingResult{}, fmt.Errorf(
+				"%w: failed response must not contain metrics",
 				ErrInvalidProcessResponse,
 			)
 		}
@@ -338,6 +362,52 @@ func decodeProcessResponse(
 			response.Status,
 		)
 	}
+}
+
+// decodeProcessMetrics 校验可选的 Python 内部阶段指标并转换为领域值。
+// 整个 metrics 缺失表示旧处理器没有观测能力，不属于协议错误。
+func decodeProcessMetrics(
+	metrics *processMetrics,
+) (*documentdomain.ProcessorStageMetrics, error) {
+	if metrics == nil {
+		return nil, nil
+	}
+
+	durations := []int64{
+		metrics.PythonTotalMS,
+		metrics.SourceOpenMS,
+		metrics.MetadataReadMS,
+		metrics.TextExtractMS,
+		metrics.TextSplitMS,
+		metrics.SlowestPageMS,
+	}
+	for _, duration := range durations {
+		if duration < 0 {
+			return nil, fmt.Errorf(
+				"%w: processing metric duration must be non-negative",
+				ErrInvalidProcessResponse,
+			)
+		}
+	}
+	if metrics.PageCount < 1 ||
+		metrics.SlowestPageNumber < 1 ||
+		metrics.SlowestPageNumber > metrics.PageCount {
+		return nil, fmt.Errorf(
+			"%w: processing page metrics are invalid",
+			ErrInvalidProcessResponse,
+		)
+	}
+
+	return &documentdomain.ProcessorStageMetrics{
+		TotalDuration:        time.Duration(metrics.PythonTotalMS) * time.Millisecond,
+		SourceOpenDuration:   time.Duration(metrics.SourceOpenMS) * time.Millisecond,
+		MetadataReadDuration: time.Duration(metrics.MetadataReadMS) * time.Millisecond,
+		TextExtractDuration:  time.Duration(metrics.TextExtractMS) * time.Millisecond,
+		TextSplitDuration:    time.Duration(metrics.TextSplitMS) * time.Millisecond,
+		PageCount:            metrics.PageCount,
+		SlowestPageNumber:    metrics.SlowestPageNumber,
+		SlowestPageDuration:  time.Duration(metrics.SlowestPageMS) * time.Millisecond,
+	}, nil
 }
 
 // decodeDetectedTitle 校验 Python 返回的可选标题候选。

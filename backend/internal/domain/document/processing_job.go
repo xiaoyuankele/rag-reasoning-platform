@@ -117,10 +117,27 @@ const (
 // QueueWait 和 TotalDuration 由 PostgreSQL 根据任务时间戳计算，Application
 // 只负责提供它能够准确测量的处理器耗时和输入、输出规模。
 type ProcessingExecutionMetrics struct {
-	ProcessorDuration time.Duration
-	FileBytes         int64
-	ChunkCount        int
-	ErrorCode         ProcessingErrorCode
+	ProcessorDuration  time.Duration
+	ChunkWriteDuration *time.Duration
+	ProcessorStages    *ProcessorStageMetrics
+	FileBytes          int64
+	ChunkCount         int
+	ErrorCode          ProcessingErrorCode
+}
+
+// ProcessorStageMetrics 是具体文档处理器返回的可选内部阶段指标。
+//
+// 当前 Python PDF 处理器会提供这些数据；Go 文本处理器或旧版 Python
+// 响应可以不提供。可选指针用于区分“没有观测”与“已执行且不足 1ms”。
+type ProcessorStageMetrics struct {
+	TotalDuration        time.Duration
+	SourceOpenDuration   time.Duration
+	MetadataReadDuration time.Duration
+	TextExtractDuration  time.Duration
+	TextSplitDuration    time.Duration
+	PageCount            int
+	SlowestPageNumber    int
+	SlowestPageDuration  time.Duration
 }
 
 // ProcessingJob 表示一次异步文档解析任务。

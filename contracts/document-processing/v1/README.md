@@ -83,6 +83,16 @@ Schema：`success-response.schema.json`
   "contract_version": "v1",
   "request_id": "job-123",
   "status": "succeeded",
+  "metrics": {
+    "python_total_ms": 8380,
+    "source_open_ms": 35,
+    "metadata_read_ms": 4,
+    "text_extract_ms": 8200,
+    "text_split_ms": 120,
+    "page_count": 164,
+    "slowest_page_number": 83,
+    "slowest_page_ms": 910
+  },
   "chunks": [
     {
       "index": 0,
@@ -103,6 +113,12 @@ Schema：`success-response.schema.json`
 - 页码从 1 开始，且 `page_end` 不能早于 `page_start`；
 - Markdown/TXT 等没有固定页码的来源省略两个页码字段；
 - 块顺序就是最终持久化顺序。
+
+`metrics` 是 v1 的可选观测字段。旧处理器可以省略，新版 Python PDF
+处理器成功时会返回。全部耗时均为非负整数毫秒；`slowest_page_number`
+必须位于 `1..page_count`。小于 1ms 的已执行阶段记录为 `0`，字段整体
+缺失表示该处理器没有提供内部观测，二者不能混为一谈。该字段只用于后端
+性能诊断，不属于前端业务响应。
 
 ## 失败响应
 

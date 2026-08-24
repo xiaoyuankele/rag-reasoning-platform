@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from pypdf import PasswordType, PdfReader
 from pypdf.constants import UserAccessPermissions
 from pypdf.errors import EmptyFileError, LimitReachedError, PdfReadError
 
 from rag_ai.domain.errors import DocumentProcessingError
-from rag_ai.domain.models import ExtractedDocument, PageText
+from rag_ai.domain.models import ExtractionMetrics, ExtractedDocument, PageText
 
 
 PDF_HEADER_PREFIX = b"%PDF-"
@@ -66,6 +67,7 @@ def extract_pdf_document(
     _require_positive_limit(max_pages, "max_pages")
 
     try:
+        source_open_started_ns = time.perf_counter_ns()
         source_size = source_path.stat().st_size
         if source_size > max_file_bytes:
             raise DocumentProcessingError(
@@ -93,10 +95,19 @@ def extract_pdf_document(
 
             page_count = len(reader.pages)
             _validate_page_count(page_count, max_pages)
+
+            source_open_ms = _elapsed_milliseconds(source_open_started_ns)
+
+            metadata_started_ns = time.perf_counter_ns()
             detected_title = _extract_optional_title(reader)
+            metadata_read_ms = _elapsed_milliseconds(metadata_started_ns)
 
             pages: list[PageText] = []
+            text_extract_started_ns = time.perf_counter_ns()
+            slowest_page_number = 1
+            slowest_page_ms = 0
             for page_number, page in enumerate(reader.pages, start=1):
+                page_started_ns = time.perf_counter_ns()
                 try:
                     text = page.extract_text()
                 except (KeyError, TypeError, ValueError, PdfReadError) as error:
@@ -105,6 +116,11 @@ def extract_pdf_document(
                         f"PDF page {page_number} text extraction failed",
                     ) from error
 
+                page_elapsed_ms = _elapsed_milliseconds(page_started_ns)
+                if page_number == 1 or page_elapsed_ms > slowest_page_ms:
+                    slowest_page_number = page_number
+                    slowest_page_ms = page_elapsed_ms
+
                 pages.append(
                     PageText(
                         page_number=page_number,
@@ -112,9 +128,21 @@ def extract_pdf_document(
                     )
                 )
 
+            text_extract_ms = _elapsed_milliseconds(
+                text_extract_started_ns
+            )
+
             return ExtractedDocument(
                 pages=pages,
                 detected_title=detected_title,
+                metrics=ExtractionMetrics(
+                    source_open_ms=source_open_ms,
+                    metadata_read_ms=metadata_read_ms,
+                    text_extract_ms=text_extract_ms,
+                    page_count=page_count,
+                    slowest_page_number=slowest_page_number,
+                    slowest_page_ms=slowest_page_ms,
+                ),
             )
 
     except DocumentProcessingError:
@@ -232,3 +260,9 @@ def _require_text_extraction_permission(reader: PdfReader) -> None:
             "extraction_not_permitted",
             "PDF permissions do not allow text extraction",
         )
+
+
+def _elapsed_milliseconds(started_ns: int) -> int:
+    """把单调高精度时钟差转换为非负整数毫秒。"""
+
+    return max(0, (time.perf_counter_ns() - started_ns) // 1_000_000)

@@ -27,6 +27,7 @@ type processingJobWorkerRepository interface {
 type ProcessingResult struct {
 	DetectedTitle *string
 	Chunks        []documentdomain.ChunkInput
+	Metrics       *documentdomain.ProcessorStageMetrics
 }
 
 // DocumentProcessor 隔离具体的 Go、Python 或其他文档处理实现。
@@ -127,6 +128,9 @@ func (w *Worker) RunOnce(
 	startedAt := time.Now()
 	queueWait := processingJobQueueWait(job, startedAt)
 	processorDuration := time.Duration(0)
+	var chunkWriteDuration *time.Duration
+	var finalizeDuration *time.Duration
+	var processorStages *documentdomain.ProcessorStageMetrics
 	fileBytes := int64(0)
 	chunkCount := 0
 	errorCode := documentdomain.ProcessingErrorCodeNone
@@ -149,18 +153,21 @@ func (w *Worker) RunOnce(
 		}
 
 		w.events.ObserveProcessingJobEvent(ctx, ProcessingJobEvent{
-			Type:              eventType,
-			JobID:             job.ID,
-			DocumentID:        job.DocumentID,
-			AttemptCount:      job.AttemptCount,
-			Status:            finalStatus,
-			QueueWait:         queueWait,
-			ProcessorDuration: processorDuration,
-			TotalDuration:     time.Since(startedAt),
-			FileBytes:         fileBytes,
-			ChunkCount:        chunkCount,
-			ErrorCode:         errorCode,
-			Err:               err,
+			Type:               eventType,
+			JobID:              job.ID,
+			DocumentID:         job.DocumentID,
+			AttemptCount:       job.AttemptCount,
+			Status:             finalStatus,
+			QueueWait:          queueWait,
+			ProcessorDuration:  processorDuration,
+			ChunkWriteDuration: chunkWriteDuration,
+			FinalizeDuration:   finalizeDuration,
+			ProcessorStages:    processorStages,
+			TotalDuration:      time.Since(startedAt),
+			FileBytes:          fileBytes,
+			ChunkCount:         chunkCount,
+			ErrorCode:          errorCode,
+			Err:                err,
 		})
 	}()
 
@@ -203,18 +210,24 @@ func (w *Worker) RunOnce(
 		}
 
 		// 数据库只保存可安全展示给前端的通用失败说明。
+		finalizationStartedAt := time.Now()
 		finalizationErr := w.jobs.MarkProcessingJobFailed(
 			ctx,
 			job.ID,
 			documentdomain.ProcessingFailure{
 				Message: failureMessage,
-				Metrics: documentdomain.ProcessingExecutionMetrics{
-					ProcessorDuration: processorDuration,
-					FileBytes:         fileBytes,
-					ErrorCode:         errorCode,
-				},
+				Metrics: newProcessingExecutionMetrics(
+					processorDuration,
+					chunkWriteDuration,
+					processorStages,
+					fileBytes,
+					chunkCount,
+					errorCode,
+				),
 			},
 		)
+		measuredFinalizationDuration := time.Since(finalizationStartedAt)
+		finalizeDuration = &measuredFinalizationDuration
 		if finalizationErr != nil {
 			wrappedFinalizationErr := fmt.Errorf(
 				"mark processing job %d failed: %w",
@@ -233,9 +246,13 @@ func (w *Worker) RunOnce(
 		finalStatus = documentdomain.ProcessingJobStatusFailed
 		return true, wrappedProcessingErr
 	}
+	processorStages = processingResult.Metrics
 	chunkCount = len(processingResult.Chunks)
 	// 处理器成功后先保存文本块；只有结果成功入库，任务才能进入 succeeded。
+	chunkWriteStartedAt := time.Now()
 	replaceErr := w.chunks.ReplaceForDocument(ctx, foundDocument.ID, processingResult.Chunks)
+	measuredChunkWriteDuration := time.Since(chunkWriteStartedAt)
+	chunkWriteDuration = &measuredChunkWriteDuration
 	if replaceErr != nil {
 		errorCode = documentdomain.ProcessingErrorCodeChunkWrite
 		wrappedReplaceErr := fmt.Errorf(
@@ -244,19 +261,24 @@ func (w *Worker) RunOnce(
 			replaceErr,
 		)
 
+		finalizationStartedAt := time.Now()
 		markFailedErr := w.jobs.MarkProcessingJobFailed(
 			ctx,
 			job.ID,
 			documentdomain.ProcessingFailure{
 				Message: safeProcessingFailureMessage,
-				Metrics: documentdomain.ProcessingExecutionMetrics{
-					ProcessorDuration: processorDuration,
-					FileBytes:         fileBytes,
-					ChunkCount:        chunkCount,
-					ErrorCode:         errorCode,
-				},
+				Metrics: newProcessingExecutionMetrics(
+					processorDuration,
+					chunkWriteDuration,
+					processorStages,
+					fileBytes,
+					chunkCount,
+					errorCode,
+				),
 			},
 		)
+		measuredFinalizationDuration := time.Since(finalizationStartedAt)
+		finalizeDuration = &measuredFinalizationDuration
 		if markFailedErr != nil {
 			wrappedMarkFailedErr := fmt.Errorf(
 				"mark processing job %d failed: %w",
@@ -274,18 +296,24 @@ func (w *Worker) RunOnce(
 	}
 
 	// 只有处理器真正成功后，才能把任务和文档标记为成功。
+	finalizationStartedAt := time.Now()
 	if err := w.jobs.MarkProcessingJobSucceeded(
 		ctx,
 		job.ID,
 		documentdomain.ProcessingCompletion{
 			DetectedTitle: processingResult.DetectedTitle,
-			Metrics: documentdomain.ProcessingExecutionMetrics{
-				ProcessorDuration: processorDuration,
-				FileBytes:         fileBytes,
-				ChunkCount:        chunkCount,
-			},
+			Metrics: newProcessingExecutionMetrics(
+				processorDuration,
+				chunkWriteDuration,
+				processorStages,
+				fileBytes,
+				chunkCount,
+				documentdomain.ProcessingErrorCodeNone,
+			),
 		},
 	); err != nil {
+		measuredFinalizationDuration := time.Since(finalizationStartedAt)
+		finalizeDuration = &measuredFinalizationDuration
 		// 这里不能改写成 failed：文档处理已经成功，
 		// 失败的是数据库状态回写，两者的业务事实不同。
 		errorCode = documentdomain.ProcessingErrorCodeFinalization
@@ -295,9 +323,31 @@ func (w *Worker) RunOnce(
 			err,
 		)
 	}
+	measuredFinalizationDuration := time.Since(finalizationStartedAt)
+	finalizeDuration = &measuredFinalizationDuration
 
 	finalStatus = documentdomain.ProcessingJobStatusSucceeded
 	return true, nil
+}
+
+// newProcessingExecutionMetrics 汇总 Worker 自己测量的阶段和处理器返回的
+// 可选内部指标，确保成功与失败收尾使用完全相同的字段映射。
+func newProcessingExecutionMetrics(
+	processorDuration time.Duration,
+	chunkWriteDuration *time.Duration,
+	processorStages *documentdomain.ProcessorStageMetrics,
+	fileBytes int64,
+	chunkCount int,
+	errorCode documentdomain.ProcessingErrorCode,
+) documentdomain.ProcessingExecutionMetrics {
+	return documentdomain.ProcessingExecutionMetrics{
+		ProcessorDuration:  processorDuration,
+		ChunkWriteDuration: chunkWriteDuration,
+		ProcessorStages:    processorStages,
+		FileBytes:          fileBytes,
+		ChunkCount:         chunkCount,
+		ErrorCode:          errorCode,
+	}
 }
 
 // processingJobQueueWait 优先使用数据库领取事务写入的 StartedAt，避免把

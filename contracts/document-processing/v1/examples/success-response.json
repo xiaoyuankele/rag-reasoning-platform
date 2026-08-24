@@ -2,6 +2,19 @@
   "contract_version": "v1",
   "request_id": "job-123",
   "status": "succeeded",
+  "metadata": {
+    "title": "Example research document"
+  },
+  "metrics": {
+    "python_total_ms": 8380,
+    "source_open_ms": 35,
+    "metadata_read_ms": 4,
+    "text_extract_ms": 8200,
+    "text_split_ms": 120,
+    "page_count": 164,
+    "slowest_page_number": 83,
+    "slowest_page_ms": 910
+  },
   "chunks": [
     {
       "index": 0,

@@ -156,10 +156,16 @@ Application 只报告任务事实，不依赖具体日志框架；`main.go` 负�
 `chunk_count`。失败事件使用稳定 `error_code` 供数据库统计，同时仅在后端日志保留原始
 `error`。日志和指标表都不记录正文、存储路径、密钥或上传内容。
 
-第一版有意只测量最关键的三个时间范围：排队、整个文档处理器调用和 Worker 总执行。
-其中 `processor_ms` 包含 Python 进程启动、PDF 提取、文本切分和 Go/Python 协议往返；
-现阶段不拆分 `python_startup_ms`、`parse_ms`、`split_ms`、`chunk_write_ms` 或
-`finalize_ms`。这些指标同时持久化在对应 `document_jobs` 记录，历史任务保持 `NULL`。
+第一版先测量排队、整个文档处理器调用和 Worker 总执行。第二版继续拆分
+`source_open_ms`、`metadata_read_ms`、`text_extract_ms`、`text_split_ms`、
+`python_total_ms` 和 `chunk_write_ms`，并记录页数、最慢页码和最慢页耗时。
+这些字段持久化在对应 `document_jobs` 记录，历史任务、旧处理器或没有执行的
+阶段保持 `NULL`；真实执行但不足 1ms 的阶段记录为 `0`。
+
+`processor_ms` 仍表示 Go 看到的整个处理器调用，包含 Python 进程池等待、
+协议往返和 JSON 编解码；`python_total_ms` 只表示 Python 应用服务内部的提取、
+规范化和分块。两者的差值可用于定位外围开销。`finalize_ms` 在数据库提交完成后
+才能准确得到，因此只写终结事件日志，不为了持久化它再额外更新一次任务记录。
 
 固定大小 Worker Pool 启动时额外记录 `document_worker_pool_configured`，字段
 `concurrency` 表示同一后端实例内运行的文档 WorkerLoop 数量。Python 处理器组装时记录
