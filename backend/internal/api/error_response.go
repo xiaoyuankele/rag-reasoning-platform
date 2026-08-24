@@ -44,6 +44,7 @@ const (
 	errorCodeInvalidCredentials             = "invalid_credentials"
 	errorCodeInvalidPasswordResetRequest    = "invalid_password_reset_request"
 	errorCodeAuthenticationRequired         = "authentication_required"
+	errorCodeAnswerOwnerCapacityExhausted   = "answer_owner_capacity_exhausted"
 	errorCodeAnswerCapacityExhausted        = "answer_capacity_exhausted"
 	errorCodeInternal                       = "internal_error"
 )

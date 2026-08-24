@@ -545,8 +545,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		answerService, err = answerapplication.NewConcurrentService(
 			baseAnswerService,
 			observability.NewAnswerAdmissionLogger(logger),
-			generationConfig.MaxConcurrency,
-			generationConfig.QueueWaitTimeout,
+			answerapplication.AnswerAdmissionLimits{
+				MaxConcurrencyGlobal:   generationConfig.MaxConcurrency,
+				MaxConcurrencyPerOwner: generationConfig.MaxConcurrencyPerUser,
+				MaxWaitersGlobal:       generationConfig.MaxWaitersGlobal,
+				MaxWaitersPerOwner:     generationConfig.MaxWaitersPerUser,
+				WaitTimeout:            generationConfig.QueueWaitTimeout,
+			},
 		)
 		if err != nil {
 			return fmt.Errorf("create answer concurrency service: %w", err)
@@ -555,7 +560,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		logger.Info(
 			"Answer concurrency configured",
 			"event", "answer_concurrency_configured",
-			"max_concurrency", generationConfig.MaxConcurrency,
+			"max_concurrency_global", generationConfig.MaxConcurrency,
+			"max_concurrency_per_user", generationConfig.MaxConcurrencyPerUser,
+			"max_waiters_global", generationConfig.MaxWaitersGlobal,
+			"max_waiters_per_user", generationConfig.MaxWaitersPerUser,
 			"queue_wait_timeout_ms",
 			generationConfig.QueueWaitTimeout.Milliseconds(),
 		)
@@ -812,7 +820,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	var answerHandler *api.AnswerHandler
 	if answerService != nil {
-		answerHandler = api.NewAnswerHandler(answerService)
+		answerHandler = api.NewAnswerHandler(
+			answerService,
+			generationConfig.QueueWaitTimeout,
+		)
 	}
 	verificationHandler := api.NewVerificationHandler(
 		verificationService,

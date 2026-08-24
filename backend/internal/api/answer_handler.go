@@ -3,7 +3,10 @@ package api
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -31,12 +34,24 @@ type answerService interface {
 
 // AnswerHandler 负责 POST /answers 的 HTTP 边界转换。
 type AnswerHandler struct {
-	service answerService
+	service           answerService
+	retryAfterSeconds string
 }
 
 // NewAnswerHandler 创建带来源问答 Handler，并注入 Application 服务。
-func NewAnswerHandler(service answerService) *AnswerHandler {
-	return &AnswerHandler{service: service}
+// retryAfter 与 Application 闸门的最长同步等待保持一致，供容量响应提示前端退避。
+func NewAnswerHandler(
+	service answerService,
+	retryAfter time.Duration,
+) *AnswerHandler {
+	retryAfterSeconds := int64(math.Ceil(retryAfter.Seconds()))
+	if retryAfterSeconds < 1 {
+		retryAfterSeconds = 1
+	}
+	return &AnswerHandler{
+		service:           service,
+		retryAfterSeconds: strconv.FormatInt(retryAfterSeconds, 10),
+	}
 }
 
 // RegisterRoutes 注册带来源问答路由。
@@ -116,7 +131,7 @@ func (h *AnswerHandler) Answer(c *gin.Context) {
 			ResponseLanguage: answerapplication.ResponseLanguage(request.ResponseLanguage),
 		},
 	)
-	if writeAnswerError(c, err) {
+	if h.writeAnswerError(c, err) {
 		return
 	}
 
@@ -140,7 +155,7 @@ func (h *AnswerHandler) Answer(c *gin.Context) {
 
 // writeAnswerError 把跨层稳定错误映射成安全的 HTTP 状态和公开说明。
 // 返回 true 表示已经写入错误响应，调用方必须立即结束当前 Handler。
-func writeAnswerError(c *gin.Context, err error) bool {
+func (h *AnswerHandler) writeAnswerError(c *gin.Context, err error) bool {
 	if err == nil {
 		return false
 	}
@@ -191,9 +206,17 @@ func writeAnswerError(c *gin.Context, err error) bool {
 		c.JSON(http.StatusBadRequest, errorResponse{
 			Error: "response_language must be auto, zh, or en",
 		})
+	case errors.Is(err, answerapplication.ErrAnswerOwnerCapacityExhausted):
+		c.Header("Retry-After", h.retryAfterSeconds)
+		writeErrorResponse(
+			c,
+			http.StatusTooManyRequests,
+			errorCodeAnswerOwnerCapacityExhausted,
+			"too many answer requests for this user; try again later",
+		)
 	case errors.Is(err, answerapplication.ErrAnswerCapacityExhausted):
 		// Retry-After 使用秒数，提示客户端短暂退避后再提交，而不是立即重试。
-		c.Header("Retry-After", "2")
+		c.Header("Retry-After", h.retryAfterSeconds)
 		writeErrorResponse(
 			c,
 			http.StatusServiceUnavailable,

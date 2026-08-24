@@ -54,17 +54,18 @@ func TestNewConcurrentServiceRejectsInvalidDependenciesAndConfiguration(t *testi
 	observer := &recordingAnswerAdmissionObserver{}
 
 	testCases := []struct {
-		name        string
-		next        answerer
-		events      AnswerAdmissionEventObserver
-		concurrency int
-		waitTimeout time.Duration
-		wantError   error
+		name      string
+		next      answerer
+		events    AnswerAdmissionEventObserver
+		limits    AnswerAdmissionLimits
+		wantError error
 	}{
-		{name: "missing service", events: observer, concurrency: 1, waitTimeout: time.Second, wantError: ErrAnswerConcurrencyDependencies},
-		{name: "missing observer", next: fake, concurrency: 1, waitTimeout: time.Second, wantError: ErrAnswerConcurrencyDependencies},
-		{name: "zero concurrency", next: fake, events: observer, concurrency: 0, waitTimeout: time.Second, wantError: ErrAnswerConcurrencyConfiguration},
-		{name: "zero timeout", next: fake, events: observer, concurrency: 1, waitTimeout: 0, wantError: ErrAnswerConcurrencyConfiguration},
+		{name: "missing service", events: observer, limits: testAnswerAdmissionLimits(1, time.Second), wantError: ErrAnswerConcurrencyDependencies},
+		{name: "missing observer", next: fake, limits: testAnswerAdmissionLimits(1, time.Second), wantError: ErrAnswerConcurrencyDependencies},
+		{name: "zero concurrency", next: fake, events: observer, limits: AnswerAdmissionLimits{MaxConcurrencyPerOwner: 1, MaxWaitersGlobal: 1, MaxWaitersPerOwner: 1, WaitTimeout: time.Second}, wantError: ErrAnswerConcurrencyConfiguration},
+		{name: "owner concurrency exceeds global", next: fake, events: observer, limits: AnswerAdmissionLimits{MaxConcurrencyGlobal: 1, MaxConcurrencyPerOwner: 2, MaxWaitersGlobal: 1, MaxWaitersPerOwner: 1, WaitTimeout: time.Second}, wantError: ErrAnswerConcurrencyConfiguration},
+		{name: "owner waiting exceeds global", next: fake, events: observer, limits: AnswerAdmissionLimits{MaxConcurrencyGlobal: 1, MaxConcurrencyPerOwner: 1, MaxWaitersGlobal: 1, MaxWaitersPerOwner: 2, WaitTimeout: time.Second}, wantError: ErrAnswerConcurrencyConfiguration},
+		{name: "zero timeout", next: fake, events: observer, limits: AnswerAdmissionLimits{MaxConcurrencyGlobal: 1, MaxConcurrencyPerOwner: 1, MaxWaitersGlobal: 1, MaxWaitersPerOwner: 1}, wantError: ErrAnswerConcurrencyConfiguration},
 	}
 
 	for _, testCase := range testCases {
@@ -72,8 +73,7 @@ func TestNewConcurrentServiceRejectsInvalidDependenciesAndConfiguration(t *testi
 			_, err := NewConcurrentService(
 				testCase.next,
 				testCase.events,
-				testCase.concurrency,
-				testCase.waitTimeout,
+				testCase.limits,
 			)
 			if !errors.Is(err, testCase.wantError) {
 				t.Fatalf("NewConcurrentService() error = %v, want %v", err, testCase.wantError)
@@ -117,8 +117,7 @@ func TestConcurrentServiceLimitsParallelAnswersAndRejectsAfterTimeout(t *testing
 	service, err := NewConcurrentService(
 		fake,
 		observer,
-		maxConcurrency,
-		40*time.Millisecond,
+		testAnswerAdmissionLimits(maxConcurrency, 40*time.Millisecond),
 	)
 	if err != nil {
 		t.Fatalf("NewConcurrentService() error = %v", err)
@@ -199,7 +198,11 @@ func TestConcurrentServiceReleasesSlotAfterDownstreamError(t *testing.T) {
 		return Output{Answer: "recovered"}, nil
 	}}
 	observer := &recordingAnswerAdmissionObserver{}
-	service, err := NewConcurrentService(fake, observer, 1, time.Second)
+	service, err := NewConcurrentService(
+		fake,
+		observer,
+		testAnswerAdmissionLimits(1, time.Second),
+	)
 	if err != nil {
 		t.Fatalf("NewConcurrentService() error = %v", err)
 	}
@@ -225,6 +228,34 @@ func TestConcurrentServiceReleasesSlotAfterDownstreamError(t *testing.T) {
 	}
 }
 
+func TestConcurrentServiceRejectsInvalidOwnerWithoutCapacityEvent(t *testing.T) {
+	fake := &fakeAnswerer{answer: func(
+		context.Context,
+		accessdomain.OwnerScope,
+		Input,
+	) (Output, error) {
+		t.Fatal("downstream service must not receive an invalid OwnerScope")
+		return Output{}, nil
+	}}
+	observer := &recordingAnswerAdmissionObserver{}
+	service, err := NewConcurrentService(
+		fake,
+		observer,
+		testAnswerAdmissionLimits(1, time.Second),
+	)
+	if err != nil {
+		t.Fatalf("NewConcurrentService() error = %v", err)
+	}
+
+	_, err = service.Answer(t.Context(), accessdomain.OwnerScope{}, Input{})
+	if !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
+		t.Fatalf("Answer() error = %v, want ErrInvalidOwnerScope", err)
+	}
+	if events := observer.snapshot(); len(events) != 0 {
+		t.Fatalf("invalid OwnerScope events = %+v, want none", events)
+	}
+}
+
 func TestConcurrentServiceStopsWaitingWhenContextIsCanceled(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -242,7 +273,11 @@ func TestConcurrentServiceStopsWaitingWhenContextIsCanceled(t *testing.T) {
 		}
 	}}
 	observer := &recordingAnswerAdmissionObserver{}
-	service, err := NewConcurrentService(fake, observer, 1, time.Second)
+	service, err := NewConcurrentService(
+		fake,
+		observer,
+		testAnswerAdmissionLimits(1, time.Second),
+	)
 	if err != nil {
 		t.Fatalf("NewConcurrentService() error = %v", err)
 	}
@@ -264,6 +299,19 @@ func TestConcurrentServiceStopsWaitingWhenContextIsCanceled(t *testing.T) {
 	close(release)
 	if err := <-firstDone; err != nil {
 		t.Fatalf("first Answer() error = %v, want nil", err)
+	}
+}
+
+func testAnswerAdmissionLimits(
+	maxConcurrency int,
+	waitTimeout time.Duration,
+) AnswerAdmissionLimits {
+	return AnswerAdmissionLimits{
+		MaxConcurrencyGlobal:   maxConcurrency,
+		MaxConcurrencyPerOwner: maxConcurrency,
+		MaxWaitersGlobal:       10,
+		MaxWaitersPerOwner:     10,
+		WaitTimeout:            waitTimeout,
 	}
 }
 

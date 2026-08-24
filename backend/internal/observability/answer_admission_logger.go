@@ -32,6 +32,12 @@ func (l *AnswerAdmissionLogger) ObserveAnswerAdmissionEvent(
 		slog.Int64("wait_duration_ms", event.WaitDuration.Milliseconds()),
 		slog.Int("in_flight", event.InFlight),
 		slog.Int("max_concurrency", event.MaxConcurrency),
+		slog.Int("owner_in_flight", event.OwnerInFlight),
+		slog.Int("owner_max_concurrency", event.OwnerMaxConcurrency),
+		slog.Int("waiting", event.Waiting),
+		slog.Int("max_waiting", event.MaxWaiting),
+		slog.Int("owner_waiting", event.OwnerWaiting),
+		slog.Int("owner_max_waiting", event.OwnerMaxWaiting),
 	}
 	if event.Outcome != "" {
 		attributes = append(
@@ -63,9 +69,13 @@ func (l *AnswerAdmissionLogger) ObserveAnswerAdmissionEvent(
 func answerAdmissionEventLevel(
 	event answerapplication.AnswerAdmissionEvent,
 ) slog.Level {
-	if event.Type == answerapplication.AnswerAdmissionEventRejected &&
-		event.Outcome == answerapplication.AnswerAdmissionOutcomeCapacityTimeout {
-		return slog.LevelWarn
+	if event.Type == answerapplication.AnswerAdmissionEventRejected {
+		switch event.Outcome {
+		case answerapplication.AnswerAdmissionOutcomeCapacityTimeout,
+			answerapplication.AnswerAdmissionOutcomeOwnerCapacity,
+			answerapplication.AnswerAdmissionOutcomeGlobalCapacity:
+			return slog.LevelWarn
+		}
 	}
 	return slog.LevelInfo
 }

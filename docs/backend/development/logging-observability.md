@@ -309,6 +309,16 @@ Token、成功/失败/跳过状态以及平均、P50、P95 耗时。重试前已
 跨进程协议和 JSON 编解码，不能简单解释为网络时间。`slowest_page_ms` 属于 `text_extract_ms` 的内部线索，
 为了避免重复计算，不参与顶层瓶颈之间的竞争。
 
+2026-08-24 报告结构升级为 `schema_version=5`，问答准入汇总增加 Owner 公平容量指标：
+
+- `owner_capacity_count`：同一用户等待预算用尽的拒绝次数，对应公开 `429`；
+- `global_capacity_count`：全局等待区已满的拒绝次数，对应公开 `503`；
+- `capacity_timeout_count`：进入等待区后仍未在时限内取得槽位的次数，对应公开 `503`；
+- `max_observed_waiting`、`max_owner_in_flight`、`max_owner_waiting`：用于判断全局拥塞和单用户挤压。
+
+结构化事件只记录容量与耗时，不记录 Owner ID、问题、Prompt、答案或证据。汇总器仍兼容缺少这些新增字段
+的旧 JSONL 日志，便于继续分析已有压测证据。
+
 完整冻结条件、PowerShell 命令、字段口径和金额换算方法见
 [模型调用成本基线](../performance/model-call-cost-baseline.md)。真实付费批次必须单独获得授权。
 

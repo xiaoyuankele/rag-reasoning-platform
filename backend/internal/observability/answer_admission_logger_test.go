@@ -17,12 +17,18 @@ func TestAnswerAdmissionLoggerWritesSafeCapacityFields(t *testing.T) {
 	ctx := WithRequestID(t.Context(), "answer-capacity-42")
 
 	observer.ObserveAnswerAdmissionEvent(ctx, answerapplication.AnswerAdmissionEvent{
-		Type:              answerapplication.AnswerAdmissionEventReleased,
-		Outcome:           answerapplication.AnswerAdmissionOutcomeSucceeded,
-		WaitDuration:      25 * time.Millisecond,
-		ExecutionDuration: 1500 * time.Millisecond,
-		InFlight:          1,
-		MaxConcurrency:    2,
+		Type:                answerapplication.AnswerAdmissionEventReleased,
+		Outcome:             answerapplication.AnswerAdmissionOutcomeSucceeded,
+		WaitDuration:        25 * time.Millisecond,
+		ExecutionDuration:   1500 * time.Millisecond,
+		InFlight:            8,
+		MaxConcurrency:      10,
+		OwnerInFlight:       1,
+		OwnerMaxConcurrency: 2,
+		Waiting:             20,
+		MaxWaiting:          500,
+		OwnerWaiting:        3,
+		OwnerMaxWaiting:     5,
 	})
 
 	var entry map[string]any
@@ -36,10 +42,18 @@ func TestAnswerAdmissionLoggerWritesSafeCapacityFields(t *testing.T) {
 	assertStringLogField(t, entry, "request_id", "answer-capacity-42")
 	assertNumericLogField(t, entry, "wait_duration_ms", 25)
 	assertNumericLogField(t, entry, "execution_duration_ms", 1500)
-	assertNumericLogField(t, entry, "in_flight", 1)
-	assertNumericLogField(t, entry, "max_concurrency", 2)
+	assertNumericLogField(t, entry, "in_flight", 8)
+	assertNumericLogField(t, entry, "max_concurrency", 10)
+	assertNumericLogField(t, entry, "owner_in_flight", 1)
+	assertNumericLogField(t, entry, "owner_max_concurrency", 2)
+	assertNumericLogField(t, entry, "waiting", 20)
+	assertNumericLogField(t, entry, "max_waiting", 500)
+	assertNumericLogField(t, entry, "owner_waiting", 3)
+	assertNumericLogField(t, entry, "owner_max_waiting", 5)
 
 	for _, forbiddenField := range []string{
+		"owner_id",
+		"owner_user_id",
 		"query",
 		"prompt",
 		"answer",

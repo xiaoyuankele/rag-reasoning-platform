@@ -31,7 +31,7 @@ func TestSummarizeAggregatesEmbeddingAndGenerationEvents(t *testing.T) {
 		t.Fatalf("Summarize() error = %v, want nil", err)
 	}
 
-	if report.SchemaVersion != 4 ||
+	if report.SchemaVersion != 5 ||
 		report.GeneratedAt != "2026-08-15T04:00:00Z" ||
 		report.ScannedLineCount != 15 ||
 		report.JSONLineCount != 14 ||
@@ -95,6 +95,28 @@ func TestSummarizeAggregatesEmbeddingAndGenerationEvents(t *testing.T) {
 	}
 	assertDurationSummary(t, admission.WaitDuration, 4, 3530, 882.5, 10, 20, 3000, 3000)
 	assertDurationSummary(t, admission.ExecutionDuration, 2, 1400, 700, 400, 400, 1000, 1000)
+}
+
+func TestSummarizeTracksOwnerFairAnswerCapacity(t *testing.T) {
+	input := strings.Join([]string{
+		`{"event":"answer_request_admitted","wait_duration_ms":5,"in_flight":10,"max_concurrency":10,"owner_in_flight":2,"owner_max_concurrency":2,"waiting":12,"max_waiting":500,"owner_waiting":4,"owner_max_waiting":5}`,
+		`{"event":"answer_request_rejected","outcome":"owner_capacity_exhausted","wait_duration_ms":0,"in_flight":10,"max_concurrency":10,"owner_in_flight":2,"owner_max_concurrency":2,"waiting":12,"max_waiting":500,"owner_waiting":5,"owner_max_waiting":5}`,
+		`{"event":"answer_request_rejected","outcome":"global_capacity_exhausted","wait_duration_ms":0,"in_flight":10,"max_concurrency":10,"owner_in_flight":0,"owner_max_concurrency":2,"waiting":500,"max_waiting":500,"owner_waiting":0,"owner_max_waiting":5}`,
+	}, "\n")
+
+	report, err := Summarize(strings.NewReader(input), time.Time{})
+	if err != nil {
+		t.Fatalf("Summarize() error = %v, want nil", err)
+	}
+	summary := report.AnswerAdmission
+	if summary.OwnerCapacityCount != 1 ||
+		summary.GlobalCapacityCount != 1 ||
+		summary.MaxObservedInFlight != 10 ||
+		summary.MaxObservedWaiting != 500 ||
+		summary.MaxOwnerInFlight != 2 ||
+		summary.MaxOwnerWaiting != 5 {
+		t.Fatalf("answer admission summary = %+v, want owner-fair capacity maxima", summary)
+	}
 }
 
 func TestSummarizeTracksEmbeddingRetryExhaustion(t *testing.T) {

@@ -195,7 +195,7 @@ func TestSemanticAndAnswerOwnerHTTPWithPostgreSQL(t *testing.T) {
 	protectedRoutes := router.Group("")
 	protectedRoutes.Use(api.NewAuthMiddleware(sessionService, logger).Require)
 	api.NewSemanticSearchHandler(semanticService).RegisterRoutes(protectedRoutes)
-	api.NewAnswerHandler(answerService).RegisterRoutes(protectedRoutes)
+	api.NewAnswerHandler(answerService, 5*time.Second).RegisterRoutes(protectedRoutes)
 
 	const semanticBody = `{"query":"shared semantic question","top_k":5}`
 	unauthenticatedSemantic := performDocumentOwnerRequest(

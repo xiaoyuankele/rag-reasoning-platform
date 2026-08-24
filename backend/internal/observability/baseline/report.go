@@ -18,7 +18,7 @@ import (
 
 const (
 	// SchemaVersion 是基线报告结构版本；字段含义变化时必须递增。
-	SchemaVersion       = 4
+	SchemaVersion       = 5
 	maximumLogLineBytes = 1 << 20
 )
 
@@ -98,8 +98,13 @@ type AnswerAdmissionSummary struct {
 	Events               map[string]int  `json:"events"`
 	Outcomes             map[string]int  `json:"outcomes"`
 	CapacityTimeoutCount int             `json:"capacity_timeout_count"`
+	OwnerCapacityCount   int             `json:"owner_capacity_count"`
+	GlobalCapacityCount  int             `json:"global_capacity_count"`
 	CanceledWaitCount    int             `json:"canceled_wait_count"`
 	MaxObservedInFlight  int             `json:"max_observed_in_flight"`
+	MaxObservedWaiting   int             `json:"max_observed_waiting"`
+	MaxOwnerInFlight     int             `json:"max_owner_in_flight"`
+	MaxOwnerWaiting      int             `json:"max_owner_waiting"`
 	WaitDuration         DurationSummary `json:"wait_duration"`
 	ExecutionDuration    DurationSummary `json:"execution_duration"`
 }
@@ -130,6 +135,12 @@ type logEntry struct {
 	ExecutionDurationMS  *int64 `json:"execution_duration_ms"`
 	InFlight             *int   `json:"in_flight"`
 	MaxConcurrency       *int   `json:"max_concurrency"`
+	OwnerInFlight        *int   `json:"owner_in_flight"`
+	OwnerMaxConcurrency  *int   `json:"owner_max_concurrency"`
+	Waiting              *int   `json:"waiting"`
+	MaxWaiting           *int   `json:"max_waiting"`
+	OwnerWaiting         *int   `json:"owner_waiting"`
+	OwnerMaxWaiting      *int   `json:"owner_max_waiting"`
 	QueueWaitMS          *int64 `json:"queue_wait_ms"`
 	ProcessorMS          *int64 `json:"processor_ms"`
 	TotalMS              *int64 `json:"total_ms"`
@@ -340,10 +351,43 @@ func aggregateAnswerAdmissionEntry(
 	if *entry.InFlight > *entry.MaxConcurrency {
 		return errors.New("answer admission in_flight must not exceed max_concurrency")
 	}
+	if err := validateOptionalAdmissionCapacity(
+		entry.OwnerInFlight,
+		entry.OwnerMaxConcurrency,
+		"owner_in_flight",
+		"owner_max_concurrency",
+	); err != nil {
+		return err
+	}
+	if err := validateOptionalAdmissionCapacity(
+		entry.Waiting,
+		entry.MaxWaiting,
+		"waiting",
+		"max_waiting",
+	); err != nil {
+		return err
+	}
+	if err := validateOptionalAdmissionCapacity(
+		entry.OwnerWaiting,
+		entry.OwnerMaxWaiting,
+		"owner_waiting",
+		"owner_max_waiting",
+	); err != nil {
+		return err
+	}
 
 	summary.Events[entry.Event]++
 	if *entry.InFlight > summary.MaxObservedInFlight {
 		summary.MaxObservedInFlight = *entry.InFlight
+	}
+	if entry.Waiting != nil && *entry.Waiting > summary.MaxObservedWaiting {
+		summary.MaxObservedWaiting = *entry.Waiting
+	}
+	if entry.OwnerInFlight != nil && *entry.OwnerInFlight > summary.MaxOwnerInFlight {
+		summary.MaxOwnerInFlight = *entry.OwnerInFlight
+	}
+	if entry.OwnerWaiting != nil && *entry.OwnerWaiting > summary.MaxOwnerWaiting {
+		summary.MaxOwnerWaiting = *entry.OwnerWaiting
 	}
 
 	switch entry.Event {
@@ -358,14 +402,21 @@ func aggregateAnswerAdmissionEntry(
 
 	case string(answerapplication.AnswerAdmissionEventRejected):
 		if entry.Outcome != string(answerapplication.AnswerAdmissionOutcomeCapacityTimeout) &&
+			entry.Outcome != string(answerapplication.AnswerAdmissionOutcomeOwnerCapacity) &&
+			entry.Outcome != string(answerapplication.AnswerAdmissionOutcomeGlobalCapacity) &&
 			entry.Outcome != string(answerapplication.AnswerAdmissionOutcomeCanceled) {
 			return errors.New("rejected answer event has invalid outcome")
 		}
 		summary.Outcomes[entry.Outcome]++
 		waitDurations.add(*entry.WaitDurationMS)
-		if entry.Outcome == string(answerapplication.AnswerAdmissionOutcomeCapacityTimeout) {
+		switch entry.Outcome {
+		case string(answerapplication.AnswerAdmissionOutcomeCapacityTimeout):
 			summary.CapacityTimeoutCount++
-		} else {
+		case string(answerapplication.AnswerAdmissionOutcomeOwnerCapacity):
+			summary.OwnerCapacityCount++
+		case string(answerapplication.AnswerAdmissionOutcomeGlobalCapacity):
+			summary.GlobalCapacityCount++
+		case string(answerapplication.AnswerAdmissionOutcomeCanceled):
 			summary.CanceledWaitCount++
 		}
 		return nil
@@ -384,6 +435,40 @@ func aggregateAnswerAdmissionEntry(
 		return nil
 	}
 
+	return nil
+}
+
+// validateOptionalAdmissionCapacity 兼容旧日志：一组新字段可以同时缺省；
+// 但只要出现当前值或上限中的任意一个，就必须成对且满足容量关系。
+func validateOptionalAdmissionCapacity(
+	value *int,
+	maximum *int,
+	valueName string,
+	maximumName string,
+) error {
+	if value == nil && maximum == nil {
+		return nil
+	}
+	if value == nil || maximum == nil {
+		return fmt.Errorf(
+			"answer admission %s and %s must be provided together",
+			valueName,
+			maximumName,
+		)
+	}
+	if *value < 0 {
+		return fmt.Errorf("answer admission %s must be non-negative", valueName)
+	}
+	if *maximum <= 0 {
+		return fmt.Errorf("answer admission %s must be positive", maximumName)
+	}
+	if *value > *maximum {
+		return fmt.Errorf(
+			"answer admission %s must not exceed %s",
+			valueName,
+			maximumName,
+		)
+	}
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -44,7 +45,7 @@ func newAnswerTestRouter(service answerService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	useTestAuthenticatedIdentity(router)
-	handler := NewAnswerHandler(service)
+	handler := NewAnswerHandler(service, 5*time.Second)
 	handler.RegisterRoutes(router)
 	return router
 }
@@ -157,7 +158,7 @@ func TestAnswerHandlerRequiresAuthenticatedIdentity(t *testing.T) {
 	service := &fakeAnswerService{}
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewAnswerHandler(service).RegisterRoutes(router)
+	NewAnswerHandler(service, 5*time.Second).RegisterRoutes(router)
 	request := httptest.NewRequest(
 		http.MethodPost,
 		"/answers",
@@ -322,8 +323,8 @@ func TestAnswerHandlerReturnsStableCapacityError(t *testing.T) {
 			recorder.Body.String(),
 		)
 	}
-	if retryAfter := recorder.Header().Get("Retry-After"); retryAfter != "2" {
-		t.Fatalf("Retry-After = %q, want 2", retryAfter)
+	if retryAfter := recorder.Header().Get("Retry-After"); retryAfter != "5" {
+		t.Fatalf("Retry-After = %q, want 5", retryAfter)
 	}
 
 	var response errorResponse
@@ -333,6 +334,41 @@ func TestAnswerHandlerReturnsStableCapacityError(t *testing.T) {
 	if response.Code != errorCodeAnswerCapacityExhausted ||
 		response.Error != "answer service is busy; try again later" {
 		t.Fatalf("capacity response = %+v", response)
+	}
+}
+
+func TestAnswerHandlerReturnsStableOwnerCapacityError(t *testing.T) {
+	service := &fakeAnswerService{
+		err: errors.Join(
+			errors.New("owner admission failed"),
+			answerapplication.ErrAnswerOwnerCapacityExhausted,
+		),
+	}
+	recorder := performAnswerRequest(
+		t,
+		service,
+		`{"query":"control","top_k":5}`,
+	)
+
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf(
+			"status = %d, want %d; body = %s",
+			recorder.Code,
+			http.StatusTooManyRequests,
+			recorder.Body.String(),
+		)
+	}
+	if retryAfter := recorder.Header().Get("Retry-After"); retryAfter != "5" {
+		t.Fatalf("Retry-After = %q, want 5", retryAfter)
+	}
+
+	var response errorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode owner capacity response: %v", err)
+	}
+	if response.Code != errorCodeAnswerOwnerCapacityExhausted ||
+		response.Error != "too many answer requests for this user; try again later" {
+		t.Fatalf("owner capacity response = %+v", response)
 	}
 }
 

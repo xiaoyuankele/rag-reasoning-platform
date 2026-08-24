@@ -352,11 +352,13 @@ P6 路由保护边界：
 - `/documents/:id/chunks` 只允许读取 `ready` 文档；文档存在但仍处于 `uploaded`、`processing`
   或 `failed` 时返回 `409`，避免把旧 chunks 当成当前正式结果；
 - `semantic-search` 和 `answers` 可能调用远程模型并产生费用，前端应提供加载态、超时提示和重试入口。
-- `POST /answers` 的完整“问题向量化 → 检索 → 生成”链路受进程内并发闸门保护。并发槽位已满时，
-  后端最多等待 `ANSWER_QUEUE_WAIT_TIMEOUT`；仍未获得槽位则返回 `503 Service Unavailable`、
-  `Retry-After: 2` 和
-  `{"error":"answer service is busy; try again later","code":"answer_capacity_exhausted"}`。
-  前端应保留用户输入并按 `Retry-After` 提供稍后重试，不应在循环中立即重放请求。
+- `POST /answers` 的完整“问题向量化 → 检索 → 生成”链路受单进程 Owner 公平闸门保护。同一用户最多
+  执行 `ANSWER_MAX_CONCURRENCY_PER_USER` 条并等待 `ANSWER_MAX_WAITERS_PER_USER` 条；用户等待预算已满时
+  返回 `429 Too Many Requests`、`Retry-After: 5` 和稳定 code `answer_owner_capacity_exhausted`。
+  全局等待区已满，或者请求等待 `ANSWER_QUEUE_WAIT_TIMEOUT` 后仍未获得槽位时，返回
+  `503 Service Unavailable`、`Retry-After: 5` 和稳定 code `answer_capacity_exhausted`。
+  前端应保留用户输入并按 `Retry-After` 提供稍后重试，不应在循环中立即重放请求。当前等待区位于单个
+  后端进程内，不是可跨实例恢复的异步任务队列；请求断开或进程重启后不会继续生成答案。
 - `semantic-search` 和 `answers` 提供 `document_id` 时，文档不存在返回 `404`；文档存在但状态、
   chunks 或当前模型向量尚未完整就绪时返回 `409` 和
   `{"error":"document embeddings are not ready"}`。这两种情况都不会调用远程模型。
