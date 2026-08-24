@@ -18,7 +18,7 @@ import (
 
 const (
 	// SchemaVersion 是基线报告结构版本；字段含义变化时必须递增。
-	SchemaVersion       = 5
+	SchemaVersion       = 6
 	maximumLogLineBytes = 1 << 20
 )
 
@@ -36,6 +36,7 @@ type Report struct {
 	Embedding               EmbeddingSummary       `json:"embedding"`
 	Generation              GenerationSummary      `json:"generation"`
 	AnswerAdmission         AnswerAdmissionSummary `json:"answer_admission"`
+	AnswerJobs              AnswerJobSummary       `json:"answer_jobs"`
 	DocumentProcessing      ProcessingSummary      `json:"document_processing"`
 }
 
@@ -110,53 +111,59 @@ type AnswerAdmissionSummary struct {
 }
 
 type logEntry struct {
-	Event                string `json:"event"`
-	ProcessingJobID      *int64 `json:"processing_job_id"`
-	DocumentID           *int64 `json:"document_id"`
-	Status               string `json:"status"`
-	ModelName            string `json:"model_name"`
-	Dimensions           *int   `json:"dimensions"`
-	ResponseLanguage     string `json:"response_language"`
-	DurationMS           *int64 `json:"duration_ms"`
-	ProviderDurationMS   *int64 `json:"provider_duration_ms"`
-	ProviderCallCount    *int   `json:"provider_call_count"`
-	PromptTokens         *int   `json:"prompt_tokens"`
-	CompletionTokens     *int   `json:"completion_tokens"`
-	TotalTokens          *int   `json:"total_tokens"`
-	GeneratedVectorCount *int   `json:"generated_vector_count"`
-	AttemptCount         *int   `json:"attempt_count"`
-	RetryCount           *int   `json:"retry_count"`
-	Recovered            *bool  `json:"recovered"`
-	FinalizationDuration *int64 `json:"finalization_duration_ms"`
-	EvidenceCount        *int   `json:"evidence_count"`
-	ErrorCategory        string `json:"error_category"`
-	Outcome              string `json:"outcome"`
-	WaitDurationMS       *int64 `json:"wait_duration_ms"`
-	ExecutionDurationMS  *int64 `json:"execution_duration_ms"`
-	InFlight             *int   `json:"in_flight"`
-	MaxConcurrency       *int   `json:"max_concurrency"`
-	OwnerInFlight        *int   `json:"owner_in_flight"`
-	OwnerMaxConcurrency  *int   `json:"owner_max_concurrency"`
-	Waiting              *int   `json:"waiting"`
-	MaxWaiting           *int   `json:"max_waiting"`
-	OwnerWaiting         *int   `json:"owner_waiting"`
-	OwnerMaxWaiting      *int   `json:"owner_max_waiting"`
-	QueueWaitMS          *int64 `json:"queue_wait_ms"`
-	ProcessorMS          *int64 `json:"processor_ms"`
-	TotalMS              *int64 `json:"total_ms"`
-	FileBytes            *int64 `json:"file_bytes"`
-	ChunkCount           *int   `json:"chunk_count"`
-	ErrorCode            string `json:"error_code"`
-	ChunkWriteMS         *int64 `json:"chunk_write_ms"`
-	FinalizeMS           *int64 `json:"finalize_ms"`
-	PythonTotalMS        *int64 `json:"python_total_ms"`
-	SourceOpenMS         *int64 `json:"source_open_ms"`
-	MetadataReadMS       *int64 `json:"metadata_read_ms"`
-	TextExtractMS        *int64 `json:"text_extract_ms"`
-	TextSplitMS          *int64 `json:"text_split_ms"`
-	PageCount            *int   `json:"page_count"`
-	SlowestPageNumber    *int   `json:"slowest_page_number"`
-	SlowestPageMS        *int64 `json:"slowest_page_ms"`
+	Event                   string `json:"event"`
+	AnswerJobID             *int64 `json:"answer_job_id"`
+	ProcessingJobID         *int64 `json:"processing_job_id"`
+	DocumentID              *int64 `json:"document_id"`
+	Status                  string `json:"status"`
+	ModelName               string `json:"model_name"`
+	Dimensions              *int   `json:"dimensions"`
+	ResponseLanguage        string `json:"response_language"`
+	DurationMS              *int64 `json:"duration_ms"`
+	ProviderDurationMS      *int64 `json:"provider_duration_ms"`
+	ProviderCallCount       *int   `json:"provider_call_count"`
+	PromptTokens            *int   `json:"prompt_tokens"`
+	CompletionTokens        *int   `json:"completion_tokens"`
+	TotalTokens             *int   `json:"total_tokens"`
+	GeneratedVectorCount    *int   `json:"generated_vector_count"`
+	AttemptCount            *int   `json:"attempt_count"`
+	RetryCount              *int   `json:"retry_count"`
+	Recovered               *bool  `json:"recovered"`
+	FinalizationDuration    *int64 `json:"finalization_duration_ms"`
+	EvidenceCount           *int   `json:"evidence_count"`
+	ErrorCategory           string `json:"error_category"`
+	Outcome                 string `json:"outcome"`
+	WaitDurationMS          *int64 `json:"wait_duration_ms"`
+	ExecutionDurationMS     *int64 `json:"execution_duration_ms"`
+	InFlight                *int   `json:"in_flight"`
+	MaxConcurrency          *int   `json:"max_concurrency"`
+	OwnerInFlight           *int   `json:"owner_in_flight"`
+	OwnerMaxConcurrency     *int   `json:"owner_max_concurrency"`
+	Waiting                 *int   `json:"waiting"`
+	MaxWaiting              *int   `json:"max_waiting"`
+	OwnerWaiting            *int   `json:"owner_waiting"`
+	OwnerMaxWaiting         *int   `json:"owner_max_waiting"`
+	QueueWaitMS             *int64 `json:"queue_wait_ms"`
+	ProcessorMS             *int64 `json:"processor_ms"`
+	TotalMS                 *int64 `json:"total_ms"`
+	FileBytes               *int64 `json:"file_bytes"`
+	ChunkCount              *int   `json:"chunk_count"`
+	ErrorCode               string `json:"error_code"`
+	ChunkWriteMS            *int64 `json:"chunk_write_ms"`
+	FinalizeMS              *int64 `json:"finalize_ms"`
+	PythonTotalMS           *int64 `json:"python_total_ms"`
+	SourceOpenMS            *int64 `json:"source_open_ms"`
+	MetadataReadMS          *int64 `json:"metadata_read_ms"`
+	TextExtractMS           *int64 `json:"text_extract_ms"`
+	TextSplitMS             *int64 `json:"text_split_ms"`
+	PageCount               *int   `json:"page_count"`
+	SlowestPageNumber       *int   `json:"slowest_page_number"`
+	SlowestPageMS           *int64 `json:"slowest_page_ms"`
+	QueuedCount             *int64 `json:"queued_count"`
+	ReadyQueuedCount        *int64 `json:"ready_queued_count"`
+	ProcessingCount         *int64 `json:"processing_count"`
+	MaxOwnerProcessingCount *int64 `json:"max_owner_processing_count"`
+	OldestReadyWaitMS       *int64 `json:"oldest_ready_wait_ms"`
 }
 
 type durationAccumulator struct {
@@ -193,6 +200,7 @@ func SummarizeWithOptions(
 	var generationProviderDurations durationAccumulator
 	var answerWaitDurations durationAccumulator
 	var answerExecutionDurations durationAccumulator
+	answerJobs := newAnswerJobAccumulator()
 
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), maximumLogLineBytes)
@@ -223,6 +231,7 @@ func SummarizeWithOptions(
 			&generationProviderDurations,
 			&answerWaitDurations,
 			&answerExecutionDurations,
+			&answerJobs,
 			&processing,
 		)
 		if err != nil {
@@ -252,6 +261,7 @@ func SummarizeWithOptions(
 	report.Generation.ProviderDuration = generationProviderDurations.summary()
 	report.AnswerAdmission.WaitDuration = answerWaitDurations.summary()
 	report.AnswerAdmission.ExecutionDuration = answerExecutionDurations.summary()
+	report.AnswerJobs = answerJobs.result()
 	report.DocumentProcessing = processing.summary()
 	if generationEventCount := mapValueTotal(report.Generation.Events); generationEventCount > 0 {
 		report.Generation.AverageEvidenceCount =
@@ -280,6 +290,7 @@ func newReport(generatedAt time.Time) Report {
 			Events:   make(map[string]int),
 			Outcomes: make(map[string]int),
 		},
+		AnswerJobs: newAnswerJobAccumulator().result(),
 	}
 }
 
@@ -292,6 +303,7 @@ func aggregateEntry(
 	generationProviderDurations *durationAccumulator,
 	answerWaitDurations *durationAccumulator,
 	answerExecutionDurations *durationAccumulator,
+	answerJobs *answerJobAccumulator,
 	processing *processingAccumulator,
 ) (bool, error) {
 	switch entry.Event {
@@ -324,6 +336,12 @@ func aggregateEntry(
 			answerWaitDurations,
 			answerExecutionDurations,
 		)
+	case string(answerapplication.JobEventSucceeded),
+		string(answerapplication.JobEventRequeued),
+		string(answerapplication.JobEventFailed),
+		string(answerapplication.JobEventInterrupted),
+		string(answerapplication.JobEventUnfinished):
+		return true, answerJobs.aggregate(entry)
 	case "processing_job_succeeded",
 		"processing_job_failed",
 		"processing_job_unfinished":
