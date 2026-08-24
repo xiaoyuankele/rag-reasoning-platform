@@ -250,6 +250,21 @@ HTTP 访问日志负责整次请求的状态与总耗时，Generation 事件只�
 当前闸门是**单后端进程级**限制：如果未来水平扩容为多个后端副本，总并发约等于“副本数 × 每副本上限”，
 届时若要形成全局配额，需要增加 Redis/数据库等分布式准入能力。
 
+持久化异步问答额外输出以下生命周期事件：
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `answer_job_started` | `INFO` | Worker 已原子领取任务并开始完整问答链路 |
+| `answer_job_succeeded` | `INFO` | 答案、来源和 Token 用量已原子落库 |
+| `answer_job_requeued` | `WARN` | 临时失败后按指数退避重新排队 |
+| `answer_job_failed` | `ERROR` | 永久错误或重试耗尽，任务进入 failed |
+| `answer_job_interrupted` | `ERROR` | shutdown 中断执行，等待下次启动恢复 |
+| `answer_job_unfinished` | `ERROR` | 收尾数据库操作失败，任务仍需恢复 |
+
+事件只记录 `answer_job_id`、状态、尝试次数、执行耗时、安全错误分类和下一次执行时间，不记录 Owner ID、
+问题、Prompt、答案或来源正文。HTTP 创建/查询/取消仍由请求日志使用 `request_id` 关联；Worker 跨越原始 HTTP
+请求，因此使用持久化 `answer_job_id` 作为主关联键。
+
 ### 7.5 远程 Embedding 分类隔离与全局准入
 
 后台向量 Worker、在线语义检索和问答内部语义检索使用两个不同等待策略的 `GatedEmbedder`，并持有同一个

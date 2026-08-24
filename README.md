@@ -446,6 +446,18 @@ Go 后端当前支持以下环境变量：
 | `ANSWER_MAX_WAITERS_GLOBAL` | `500` | 单个后端进程允许同步等待问答槽位的全局请求上限 |
 | `ANSWER_MAX_WAITERS_PER_USER` | `5` | 同一用户允许同步等待问答槽位的请求上限；超出返回 `429` |
 | `ANSWER_QUEUE_WAIT_TIMEOUT` | `5s` | 问答请求等待执行槽位的最长时间；超时返回可重试的 `503 answer_capacity_exhausted` |
+| `ANSWER_JOBS_ENABLED` | `false` | 是否注册并运行持久化异步问答；要求 `ANSWER_ENABLED=true`，默认关闭以避免远程费用 |
+| `ANSWER_JOB_WORKER_CONCURRENCY` | `10` | 异步任务 Worker 数；仍经过共享问答闸门，因此同步与异步实际执行总数不会超过 `ANSWER_MAX_CONCURRENCY` |
+| `ANSWER_JOB_POLL_INTERVAL` | `1s` | 异步问答队列为空或单轮出错后的轮询间隔 |
+| `ANSWER_JOB_PROCESSING_TIMEOUT` | `90s` | 单条异步问答完整 RAG 链路的执行上限 |
+| `ANSWER_JOB_MAX_QUEUED_PER_USER` | `5` | 单用户可持久化等待的 queued 任务上限，超出返回 `429` |
+| `ANSWER_JOB_MAX_QUEUED_GLOBAL` | `500` | 全局可持久化等待的 queued 任务上限，超出返回 `503` |
+| `ANSWER_JOB_OWNER_IN_FLIGHT_LIMIT` | `1` | 多用户竞争时每个用户的基础 processing 配额 |
+| `ANSWER_JOB_OWNER_BORROWED_LIMIT` | `2` | 无其他用户等待时单用户可借用的 processing 上限 |
+| `ANSWER_JOB_STARVATION_THRESHOLD` | `30s` | 到期任务等待超过该时间后进入防饥饿优先级 |
+| `ANSWER_JOB_MAX_ATTEMPTS` | `3` | 临时失败允许的最大执行次数 |
+| `ANSWER_JOB_RETRY_BASE_DELAY` | `2s` | 第一次重试的基础退避时间 |
+| `ANSWER_JOB_RETRY_MAX_DELAY` | `30s` | 指数退避的最长等待时间 |
 | `DASHSCOPE_GENERATION_ENDPOINT` | 百炼中国内地兼容地址 | DashScope Chat Completions HTTP API 地址 |
 | `GENERATION_MODEL` | `qwen3.6-flash` | 第一版回答生成模型；由后端配置，不接受前端任意指定 |
 | `GENERATION_HTTP_TIMEOUT` | `60s` | 单次远程回答生成请求超时 |

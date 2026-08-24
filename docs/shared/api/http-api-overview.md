@@ -36,6 +36,9 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `POST` | `/embedding-jobs/:id/cancel` | Session Cookie；路径参数 `id` | `200` | 取消 waiting/queued 向量任务 | 用户功能；processing/终态返回 `409` |
 | `POST` | `/semantic-search` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k` | `200`；远程 Embedding 容量等待超时 `503` | 在当前用户文档中进行语义检索 | 用户功能；已隔离，受功能开关和共享闸门控制 |
 | `POST` | `/answers` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200`；问答或远程 Embedding 容量等待超时 `503` | 基于当前用户来源生成回答 | 用户功能；已隔离，受功能开关和并发闸门控制 |
+| `POST` | `/answer-jobs` | Session Cookie；JSON 同 `/answers` | `202`；用户排队满额 `429`；全局排队满额 `503` | 创建可跨请求恢复的异步问答任务 | 用户功能；默认关闭/已隔离/持久化背压 |
+| `GET` | `/answer-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户异步问答状态和可选结果 | 用户功能；已隔离/轮询 |
+| `POST` | `/answer-jobs/:id/cancel` | Session Cookie；路径参数 `id` | `200` | 幂等取消 queued 问答任务 | 用户功能；processing/成功/失败返回 `409` |
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册或密码重置验证码挑战 | 认证功能；`purpose` 为 `register` 或 `password_reset` |
 | `POST` | `/auth/register` | JSON：`verification_id`、`verification_code`、`display_name`、`password` | `201` | 创建用户和 Session | 认证功能；设置 `rag_session` Cookie |
 | `POST` | `/auth/login` | JSON：`identifier`、`password` | `200` | 核对凭据并创建新 Session | 认证功能；设置 `rag_session` Cookie |
@@ -290,6 +293,64 @@ Content-Type: application/json
 
 这是可重试的本地容量错误，不等同于远程服务自己的限流、额度不足或不可用。前端应按 `Retry-After` 退避，
 不能立即循环重试。当前分类与全局闸门都只约束单个后端进程；多副本部署后的全局容量需要单独引入分布式准入机制。
+
+### 2.8 持久化异步问答任务
+
+`ANSWER_JOBS_ENABLED=true` 且 `ANSWER_ENABLED=true` 时，后端额外注册异步问答路由。创建请求与同步
+`POST /answers` 使用相同 DTO：
+
+```json
+{
+  "query": "磁悬浮系统如何抑制振动？",
+  "document_id": 20,
+  "top_k": 5,
+  "response_language": "zh"
+}
+```
+
+`document_id` 可省略，`top_k` 省略时为 5，`response_language` 支持 `auto`、`zh`、`en`。创建成功返回
+`202 Accepted` 和任务快照；客户端保存 `id`，随后轮询 `GET /answer-jobs/:id`：
+
+```json
+{
+  "id": 51,
+  "document_id": 20,
+  "query": "磁悬浮系统如何抑制振动？",
+  "top_k": 5,
+  "requested_response_language": "zh",
+  "status": "queued",
+  "cancelable": true,
+  "attempt_count": 0,
+  "error_message": null,
+  "result": null,
+  "next_attempt_at": "2026-08-24T10:00:00Z",
+  "created_at": "2026-08-24T10:00:00Z",
+  "updated_at": "2026-08-24T10:00:00Z",
+  "started_at": null,
+  "completed_at": null
+}
+```
+
+状态机是 `queued → processing → succeeded|failed`，另有 `queued → canceled`。只有 `queued` 可取消；
+对已经 `canceled` 的任务重复取消仍返回 `200`，`processing` 或成功/失败终态返回 `409`。成功后 `result`
+包含与同步问答一致的 `answer`、`response_language`、`sources` 和 `usage`。
+
+稳定错误约定：
+
+| 场景 | HTTP | `code` |
+| --- | --- | --- |
+| JSON、query、document_id、top_k 或语言无效 | `400` | `invalid_answer_job_request` |
+| 路径任务 ID 无效 | `400` | `invalid_answer_job_id` |
+| 任务不存在或属于其他用户 | `404` | `answer_job_not_found` |
+| processing 任务不可取消 | `409` | `answer_job_processing` |
+| 成功/失败终态不可取消 | `409` | `answer_job_terminal` |
+| 当前用户 queued 数量达到上限 | `429` + `Retry-After: 5` | `answer_job_owner_queue_capacity` |
+| 全局 queued 数量达到上限 | `503` + `Retry-After: 5` | `answer_job_queue_capacity` |
+
+任务使用 PostgreSQL 持久化，页面刷新和单实例进程重启后仍可查询；启动恢复会把遗留 `processing` 放回
+`queued`。Worker 按 Owner 公平领取：多用户竞争时每个用户先获得 1 个执行机会，无其他用户等待时最多借用到
+2 个。同步和异步入口最终复用同一个 Answer 并发闸门，所以不会各自占满 10 个远程调用槽位。第一版尚未提供
+任务列表和自动过期清理；多后端副本的全局生成容量仍需要 Redis/数据库分布式准入。
 
 ## 3. P6 认证接口状态
 
