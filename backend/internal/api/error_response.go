@@ -46,6 +46,13 @@ const (
 	errorCodeAuthenticationRequired         = "authentication_required"
 	errorCodeAnswerOwnerCapacityExhausted   = "answer_owner_capacity_exhausted"
 	errorCodeAnswerCapacityExhausted        = "answer_capacity_exhausted"
+	errorCodeInvalidAnswerJobRequest        = "invalid_answer_job_request"
+	errorCodeInvalidAnswerJobID             = "invalid_answer_job_id"
+	errorCodeAnswerJobNotFound              = "answer_job_not_found"
+	errorCodeAnswerJobProcessing            = "answer_job_processing"
+	errorCodeAnswerJobTerminal              = "answer_job_terminal"
+	errorCodeAnswerJobOwnerQueueCapacity    = "answer_job_owner_queue_capacity"
+	errorCodeAnswerJobGlobalQueueCapacity   = "answer_job_queue_capacity"
 	errorCodeInternal                       = "internal_error"
 )
 

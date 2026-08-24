@@ -136,6 +136,16 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("load generation configuration: %w", err)
 	}
 
+	answerJobsConfig, err := config.LoadAnswerJobs()
+	if err != nil {
+		return fmt.Errorf("load answer jobs configuration: %w", err)
+	}
+	if answerJobsConfig.Enabled && !generationConfig.Enabled {
+		return errors.New(
+			"ANSWER_JOBS_ENABLED requires ANSWER_ENABLED=true",
+		)
+	}
+
 	verificationConfig, err := config.LoadVerification()
 	if err != nil {
 		return fmt.Errorf("load verification configuration: %w", err)
@@ -225,6 +235,21 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	authPasswordResetRepository :=
 		postgres.NewAuthPasswordResetRepository(databasePool)
 	authSessionRepository := postgres.NewAuthSessionRepository(databasePool)
+	var answerJobRepository *postgres.AnswerJobRepository
+	if answerJobsConfig.Enabled {
+		answerJobRepository = postgres.NewAnswerJobRepository(
+			databasePool,
+			answerapplication.JobAdmissionLimits{
+				MaxQueuedJobsPerOwner: answerJobsConfig.MaxQueuedPerUser,
+				MaxQueuedJobsGlobal:   answerJobsConfig.MaxQueuedGlobal,
+			},
+			answerapplication.JobSchedulingPolicy{
+				MaxInFlightPerOwner:         answerJobsConfig.OwnerInFlightLimit,
+				MaxBorrowedInFlightPerOwner: answerJobsConfig.OwnerBorrowedInFlightLimit,
+				StarvationThreshold:         answerJobsConfig.StarvationThreshold,
+			},
+		)
+	}
 
 	// Worker 启动前，先恢复上一次异常退出遗留的 processing 任务。
 	// main 只负责决定调用时机；恢复规则位于 Application，SQL 位于 Repository。
@@ -569,6 +594,95 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		)
 	}
 
+	// 异步问答复用同一套 AnswerService，但把 HTTP 连接的等待转换为数据库任务。
+	// Worker 并发仍会经过 ConcurrentService 的总闸门，因此同步和异步请求不会
+	// 绕开同一组远程生成容量限制。
+	var answerJobService *answerapplication.JobService
+	var answerJobWorkerPool *documentapplication.WorkerPool
+	if answerJobsConfig.Enabled {
+		answerJobService, err = answerapplication.NewJobService(
+			answerJobRepository,
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job service: %w", err)
+		}
+
+		answerJobRecoveryService, err :=
+			answerapplication.NewInterruptedJobRecoveryService(
+				answerJobRepository,
+			)
+		if err != nil {
+			return fmt.Errorf("create answer job recovery service: %w", err)
+		}
+		answerJobRecoveredCount, err := answerJobRecoveryService.Recover(ctx)
+		if err != nil {
+			return fmt.Errorf(
+				"recover interrupted answer jobs during startup: %w",
+				err,
+			)
+		}
+		if answerJobRecoveredCount > 0 {
+			logger.Info(
+				"Requeued interrupted answer jobs",
+				"event", "answer_jobs_requeued",
+				"job_count", answerJobRecoveredCount,
+			)
+		}
+
+		answerJobRetryPolicy, err := answerapplication.NewJobRetryPolicy(
+			answerJobsConfig.MaxAttempts,
+			answerJobsConfig.RetryBaseDelay,
+			answerJobsConfig.RetryMaxDelay,
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job retry policy: %w", err)
+		}
+		answerJobWorker, err := answerapplication.NewJobWorker(
+			answerJobRepository,
+			answerService,
+			observability.NewAnswerJobLogger(logger),
+			answerJobsConfig.ProcessingTimeout,
+			answerJobRetryPolicy,
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job worker: %w", err)
+		}
+		answerJobWorkerLoop, err := documentapplication.NewWorkerLoop(
+			answerJobWorker,
+			answerJobsConfig.PollInterval,
+			func(err error) {
+				logger.Error(
+					"Answer job worker iteration failed",
+					"event", "answer_job_worker_error",
+					"error", err,
+				)
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job worker loop: %w", err)
+		}
+		answerJobWorkerPool, err = documentapplication.NewWorkerPool(
+			answerJobWorkerLoop,
+			answerJobsConfig.WorkerConcurrency,
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job worker pool: %w", err)
+		}
+
+		logger.Info(
+			"Answer job worker pool configured",
+			"event", "answer_job_worker_pool_configured",
+			"concurrency", answerJobsConfig.WorkerConcurrency,
+			"max_queued_per_user", answerJobsConfig.MaxQueuedPerUser,
+			"max_queued_global", answerJobsConfig.MaxQueuedGlobal,
+			"owner_in_flight_limit", answerJobsConfig.OwnerInFlightLimit,
+			"owner_borrowed_limit",
+			answerJobsConfig.OwnerBorrowedInFlightLimit,
+			"starvation_threshold_ms",
+			answerJobsConfig.StarvationThreshold.Milliseconds(),
+		)
+	}
+
 	// Application 只依赖验证码端口；这里是组合根，负责选择具体实现。
 	verificationCodeHasher, err :=
 		verificationinfrastructure.NewHMACCodeHasher(
@@ -755,6 +869,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if embeddingWorkerPool != nil {
 		startBackgroundWorker(embeddingWorkerPool.Run)
 	}
+	if answerJobWorkerPool != nil {
+		startBackgroundWorker(answerJobWorkerPool.Run)
+	}
 
 	// defer 在 run 返回前执行。
 	// 先通知 Worker 停止，再等待它完全退出。
@@ -825,6 +942,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			generationConfig.QueueWaitTimeout,
 		)
 	}
+	var answerJobHandler *api.AnswerJobHandler
+	if answerJobService != nil {
+		answerJobHandler = api.NewAnswerJobHandler(answerJobService, logger)
+	}
 	verificationHandler := api.NewVerificationHandler(
 		verificationService,
 		verificationRequestLimiter,
@@ -887,6 +1008,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	if answerHandler != nil {
 		answerHandler.RegisterRoutes(protectedRoutes)
+	}
+	if answerJobHandler != nil {
+		answerJobHandler.RegisterRoutes(protectedRoutes)
 	}
 
 	users := protectedRoutes.Group("/users")
