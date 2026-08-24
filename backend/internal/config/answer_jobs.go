@@ -24,6 +24,10 @@ const (
 	maximumAnswerJobsMaxAttempts       = 10
 	defaultAnswerJobsRetryBaseDelay    = 2 * time.Second
 	defaultAnswerJobsRetryMaxDelay     = 30 * time.Second
+	defaultAnswerJobsRetention         = 7 * 24 * time.Hour
+	defaultAnswerJobsCleanupInterval   = time.Hour
+	defaultAnswerJobsCleanupBatchSize  = 500
+	maximumAnswerJobsCleanupBatchSize  = 10000
 )
 
 var (
@@ -53,6 +57,9 @@ type AnswerJobsConfig struct {
 	MaxAttempts                int
 	RetryBaseDelay             time.Duration
 	RetryMaxDelay              time.Duration
+	Retention                  time.Duration
+	CleanupInterval            time.Duration
+	CleanupBatchSize           int
 }
 
 // LoadAnswerJobs 从环境变量读取异步问答配置。
@@ -145,6 +152,28 @@ func LoadAnswerJobs() (AnswerJobsConfig, error) {
 	if err != nil {
 		return AnswerJobsConfig{}, fmt.Errorf("load answer job retry max delay: %w", err)
 	}
+	retention, err := loadPositiveDuration(
+		"ANSWER_JOB_RETENTION",
+		defaultAnswerJobsRetention,
+	)
+	if err != nil {
+		return AnswerJobsConfig{}, fmt.Errorf("load answer job retention: %w", err)
+	}
+	cleanupInterval, err := loadPositiveDuration(
+		"ANSWER_JOB_CLEANUP_INTERVAL",
+		defaultAnswerJobsCleanupInterval,
+	)
+	if err != nil {
+		return AnswerJobsConfig{}, fmt.Errorf("load answer job cleanup interval: %w", err)
+	}
+	cleanupBatchSize, err := loadPositiveBoundedInt(
+		"ANSWER_JOB_CLEANUP_BATCH_SIZE",
+		defaultAnswerJobsCleanupBatchSize,
+		maximumAnswerJobsCleanupBatchSize,
+	)
+	if err != nil {
+		return AnswerJobsConfig{}, fmt.Errorf("load answer job cleanup batch size: %w", err)
+	}
 
 	if maxQueuedPerUser > maxQueuedGlobal ||
 		ownerInFlight > ownerBorrowed ||
@@ -168,5 +197,8 @@ func LoadAnswerJobs() (AnswerJobsConfig, error) {
 		MaxAttempts:                maxAttempts,
 		RetryBaseDelay:             retryBaseDelay,
 		RetryMaxDelay:              retryMaxDelay,
+		Retention:                  retention,
+		CleanupInterval:            cleanupInterval,
+		CleanupBatchSize:           cleanupBatchSize,
 	}, nil
 }

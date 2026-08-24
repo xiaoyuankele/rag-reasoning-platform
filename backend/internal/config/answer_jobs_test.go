@@ -24,7 +24,10 @@ func TestLoadAnswerJobsUsesSafeDefaults(t *testing.T) {
 		config.StarvationThreshold != 30*time.Second ||
 		config.MaxAttempts != 3 ||
 		config.RetryBaseDelay != 2*time.Second ||
-		config.RetryMaxDelay != 30*time.Second {
+		config.RetryMaxDelay != 30*time.Second ||
+		config.Retention != 7*24*time.Hour ||
+		config.CleanupInterval != time.Hour ||
+		config.CleanupBatchSize != 500 {
 		t.Fatalf("default answer jobs config = %+v", config)
 	}
 }
@@ -43,6 +46,9 @@ func TestLoadAnswerJobsUsesEnvironment(t *testing.T) {
 	t.Setenv("ANSWER_JOB_MAX_ATTEMPTS", "5")
 	t.Setenv("ANSWER_JOB_RETRY_BASE_DELAY", "3s")
 	t.Setenv("ANSWER_JOB_RETRY_MAX_DELAY", "1m")
+	t.Setenv("ANSWER_JOB_RETENTION", "336h")
+	t.Setenv("ANSWER_JOB_CLEANUP_INTERVAL", "30m")
+	t.Setenv("ANSWER_JOB_CLEANUP_BATCH_SIZE", "250")
 
 	config, err := LoadAnswerJobs()
 	if err != nil {
@@ -59,7 +65,10 @@ func TestLoadAnswerJobsUsesEnvironment(t *testing.T) {
 		config.StarvationThreshold != 45*time.Second ||
 		config.MaxAttempts != 5 ||
 		config.RetryBaseDelay != 3*time.Second ||
-		config.RetryMaxDelay != time.Minute {
+		config.RetryMaxDelay != time.Minute ||
+		config.Retention != 14*24*time.Hour ||
+		config.CleanupInterval != 30*time.Minute ||
+		config.CleanupBatchSize != 250 {
 		t.Fatalf("answer jobs config = %+v", config)
 	}
 }
@@ -134,6 +143,9 @@ func clearAnswerJobsEnvironment(t *testing.T) {
 		"ANSWER_JOB_MAX_ATTEMPTS",
 		"ANSWER_JOB_RETRY_BASE_DELAY",
 		"ANSWER_JOB_RETRY_MAX_DELAY",
+		"ANSWER_JOB_RETENTION",
+		"ANSWER_JOB_CLEANUP_INTERVAL",
+		"ANSWER_JOB_CLEANUP_BATCH_SIZE",
 	} {
 		t.Setenv(name, "")
 	}

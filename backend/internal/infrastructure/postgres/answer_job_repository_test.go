@@ -248,6 +248,79 @@ func TestAnswerJobRepository(t *testing.T) {
 			t.Fatalf("queue stats after completion = %+v, want an idle queue", queueStats)
 		}
 	})
+
+	t.Run("deletes only expired terminal jobs", func(t *testing.T) {
+		expired, err := repository.CreateAnswerJob(
+			ctx,
+			ownerAScope,
+			answerapplication.Input{
+				Query:            "expired answer",
+				TopK:             5,
+				ResponseLanguage: answerapplication.ResponseLanguageAuto,
+			},
+		)
+		if err != nil {
+			t.Fatalf("create expired fixture: %v", err)
+		}
+		expired, err = repository.CancelAnswerJob(ctx, ownerAScope, expired.ID)
+		if err != nil {
+			t.Fatalf("cancel expired fixture: %v", err)
+		}
+		fresh, err := repository.CreateAnswerJob(
+			ctx,
+			ownerAScope,
+			answerapplication.Input{
+				Query:            "fresh answer",
+				TopK:             5,
+				ResponseLanguage: answerapplication.ResponseLanguageAuto,
+			},
+		)
+		if err != nil {
+			t.Fatalf("create fresh fixture: %v", err)
+		}
+		fresh, err = repository.CancelAnswerJob(ctx, ownerAScope, fresh.ID)
+		if err != nil {
+			t.Fatalf("cancel fresh fixture: %v", err)
+		}
+		active, err := repository.CreateAnswerJob(
+			ctx,
+			ownerAScope,
+			answerapplication.Input{
+				Query:            "active answer",
+				TopK:             5,
+				ResponseLanguage: answerapplication.ResponseLanguageAuto,
+			},
+		)
+		if err != nil {
+			t.Fatalf("create active fixture: %v", err)
+		}
+
+		cutoff := time.Now().Add(-time.Hour)
+		if _, err := pool.Exec(
+			ctx,
+			`UPDATE answer_jobs SET completed_at = $2 WHERE id = $1`,
+			expired.ID,
+			cutoff.Add(-time.Hour),
+		); err != nil {
+			t.Fatalf("backdate expired fixture: %v", err)
+		}
+		deletedCount, err := repository.DeleteExpiredAnswerJobs(ctx, cutoff, 10)
+		if err != nil || deletedCount != 1 {
+			t.Fatalf("DeleteExpiredAnswerJobs() = %d, %v, want 1 nil", deletedCount, err)
+		}
+		if _, err := repository.GetAnswerJobByID(ctx, ownerAScope, expired.ID); !errors.Is(err, answerapplication.ErrAnswerJobNotFound) {
+			t.Fatalf("expired lookup error = %v, want not found", err)
+		}
+		if _, err := repository.GetAnswerJobByID(ctx, ownerAScope, fresh.ID); err != nil {
+			t.Fatalf("fresh terminal job was deleted: %v", err)
+		}
+		if _, err := repository.GetAnswerJobByID(ctx, ownerAScope, active.ID); err != nil {
+			t.Fatalf("active job was deleted: %v", err)
+		}
+		if _, err := repository.CancelAnswerJob(ctx, ownerAScope, active.ID); err != nil {
+			t.Fatalf("cancel active cleanup fixture: %v", err)
+		}
+	})
 }
 
 func answerJobTestOwnerScope(

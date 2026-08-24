@@ -70,3 +70,30 @@ func TestAnswerJobLoggerWritesSafeRetryFields(t *testing.T) {
 		}
 	}
 }
+
+func TestAnswerJobLoggerWritesSafeRetentionFields(t *testing.T) {
+	var output bytes.Buffer
+	observer := NewAnswerJobLogger(slog.New(slog.NewJSONHandler(&output, nil)))
+	completedBefore := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+
+	observer.ObserveAnswerJobRetention(t.Context(), answerapplication.JobRetentionEvent{
+		DeletedCount:    250,
+		CompletedBefore: completedBefore,
+		BatchSize:       500,
+		Duration:        75 * time.Millisecond,
+	})
+
+	var entry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &entry); err != nil {
+		t.Fatalf("decode answer job retention log: %v", err)
+	}
+	assertStringLogField(t, entry, "event", "answer_jobs_cleaned")
+	assertNumericLogField(t, entry, "deleted_count", 250)
+	assertNumericLogField(t, entry, "batch_size", 500)
+	assertNumericLogField(t, entry, "duration_ms", 75)
+	for _, forbidden := range []string{"owner_id", "query", "answer", "sources"} {
+		if _, ok := entry[forbidden]; ok {
+			t.Fatalf("answer job retention log contains forbidden field %q", forbidden)
+		}
+	}
+}

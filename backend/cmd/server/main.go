@@ -599,6 +599,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// 绕开同一组远程生成容量限制。
 	var answerJobService *answerapplication.JobService
 	var answerJobWorkerPool *documentapplication.WorkerPool
+	var answerJobCleanupLoop *documentapplication.WorkerLoop
 	if answerJobsConfig.Enabled {
 		answerJobService, err = answerapplication.NewJobService(
 			answerJobRepository,
@@ -637,10 +638,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("create answer job retry policy: %w", err)
 		}
+		answerJobLogger := observability.NewAnswerJobLogger(logger)
 		answerJobWorker, err := answerapplication.NewJobWorker(
 			answerJobRepository,
 			answerService,
-			observability.NewAnswerJobLogger(logger),
+			answerJobLogger,
 			answerJobsConfig.ProcessingTimeout,
 			answerJobRetryPolicy,
 		)
@@ -668,6 +670,30 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("create answer job worker pool: %w", err)
 		}
+		answerJobRetentionService, err :=
+			answerapplication.NewJobRetentionService(
+				answerJobRepository,
+				answerJobLogger,
+				answerJobsConfig.Retention,
+				answerJobsConfig.CleanupBatchSize,
+			)
+		if err != nil {
+			return fmt.Errorf("create answer job retention service: %w", err)
+		}
+		answerJobCleanupLoop, err = documentapplication.NewWorkerLoop(
+			answerJobRetentionService,
+			answerJobsConfig.CleanupInterval,
+			func(err error) {
+				logger.Error(
+					"Answer job retention iteration failed",
+					"event", "answer_job_retention_error",
+					"error", err,
+				)
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job retention loop: %w", err)
+		}
 
 		logger.Info(
 			"Answer job worker pool configured",
@@ -680,6 +706,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			answerJobsConfig.OwnerBorrowedInFlightLimit,
 			"starvation_threshold_ms",
 			answerJobsConfig.StarvationThreshold.Milliseconds(),
+			"retention_ms", answerJobsConfig.Retention.Milliseconds(),
+			"cleanup_interval_ms",
+			answerJobsConfig.CleanupInterval.Milliseconds(),
+			"cleanup_batch_size", answerJobsConfig.CleanupBatchSize,
 		)
 	}
 
@@ -871,6 +901,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	if answerJobWorkerPool != nil {
 		startBackgroundWorker(answerJobWorkerPool.Run)
+	}
+	if answerJobCleanupLoop != nil {
+		startBackgroundWorker(answerJobCleanupLoop.Run)
 	}
 
 	// defer 在 run 返回前执行。

@@ -13,6 +13,7 @@ type AnswerJobLogger struct {
 }
 
 var _ answerapplication.JobEventObserver = (*AnswerJobLogger)(nil)
+var _ answerapplication.JobRetentionObserver = (*AnswerJobLogger)(nil)
 
 // NewAnswerJobLogger 创建异步问答观测适配器。
 func NewAnswerJobLogger(logger *slog.Logger) *AnswerJobLogger {
@@ -103,4 +104,21 @@ func answerJobEventLevel(event answerapplication.JobEvent) slog.Level {
 		}
 		return slog.LevelInfo
 	}
+}
+
+// ObserveAnswerJobRetention 记录不含用户内容的保留期清理结果。
+func (l *AnswerJobLogger) ObserveAnswerJobRetention(
+	ctx context.Context,
+	event answerapplication.JobRetentionEvent,
+) {
+	l.logger.LogAttrs(
+		ctx,
+		slog.LevelInfo,
+		"Expired answer jobs deleted",
+		slog.String("event", "answer_jobs_cleaned"),
+		slog.Int64("deleted_count", event.DeletedCount),
+		slog.Time("completed_before", event.CompletedBefore),
+		slog.Int("batch_size", event.BatchSize),
+		slog.Int64("duration_ms", event.Duration.Milliseconds()),
+	)
 }

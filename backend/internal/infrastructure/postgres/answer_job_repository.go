@@ -30,6 +30,7 @@ type AnswerJobRepository struct {
 var _ answerapplication.ScopedJobRepository = (*AnswerJobRepository)(nil)
 var _ answerapplication.JobWorkerRepository = (*AnswerJobRepository)(nil)
 var _ answerapplication.InterruptedJobRecoverer = (*AnswerJobRepository)(nil)
+var _ answerapplication.JobRetentionRepository = (*AnswerJobRepository)(nil)
 
 // NewAnswerJobRepository 创建带容量和 Owner 公平策略的 PostgreSQL 仓储。
 func NewAnswerJobRepository(
@@ -439,6 +440,37 @@ func (r *AnswerJobRepository) GetAnswerJobQueueStats(
 		)
 	}
 	return stats, nil
+}
+
+// DeleteExpiredAnswerJobs 原子删除一批超过保留期的终态任务。
+// SKIP LOCKED 允许未来多个后端副本并行维护，且不会等待正在被其他事务处理的行。
+func (r *AnswerJobRepository) DeleteExpiredAnswerJobs(
+	ctx context.Context,
+	completedBefore time.Time,
+	limit int,
+) (int64, error) {
+	if completedBefore.IsZero() || limit <= 0 {
+		return 0, answerapplication.ErrInvalidAnswerJobRetention
+	}
+	const query = `
+		WITH expired AS (
+			SELECT id
+			FROM answer_jobs
+			WHERE status IN ('succeeded', 'failed', 'canceled')
+			  AND completed_at < $1
+			ORDER BY completed_at ASC, id ASC
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)
+		DELETE FROM answer_jobs AS job
+		USING expired
+		WHERE job.id = expired.id
+	`
+	result, err := r.pool.Exec(ctx, query, completedBefore, limit)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired answer jobs: %w", err)
+	}
+	return result.RowsAffected(), nil
 }
 
 func selectNextAnswerOwner(
