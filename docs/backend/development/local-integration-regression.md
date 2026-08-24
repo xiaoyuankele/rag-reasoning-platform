@@ -8,6 +8,7 @@
 - 嵌入式 SQL migrations 能否在 PostgreSQL 从零执行；
 - Repository 的 SQL、事务、锁、分页和 pgvector 是否真实可用；
 - Application Worker 能否使用真实 Repository 完成状态收尾；
+- 100 个 Owner 的 200 条异步问答能否在真实 PostgreSQL 和 10 个 Worker 下恰好执行一次并遵守并发边界；
 - Go 能否真正启动 Python 进程并通过标准输入输出交换 JSON；
 - HTTP、PDF、文本块和 PostgreSQL 能否组成纵向链路。
 
@@ -67,7 +68,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 | `postgres_repositories` | Infrastructure → PostgreSQL | 文档、任务、chunks、搜索、向量及事务 |
 | `document_worker_database` | Application → Repository | Worker 领取、成功/失败收尾和文档状态 |
 | `go_python_process` | Go Infrastructure → Python CLI | 子进程、stdin/stdout JSON、PDF 页码和错误契约 |
-| `cross_stack_document_flow` | HTTP/Application/Infrastructure | 文本块 HTTP、PDF 解析、文件存储与数据库落库 |
+| `cross_stack_document_flow` | HTTP/Application/Infrastructure | 文本块 HTTP、PDF 解析、文件存储、异步问答并发和数据库落库 |
 
 Go 使用 `-p 1` 顺序运行相关包，避免个人开发环境 `max_connections=20` 时并行测试争用连接，也避免共享
 PostgreSQL 扩展的创建/清理互相干扰。
@@ -105,6 +106,12 @@ chatgpt/运行产物/回归/backend-local-integration-<UTC 时间>.json
 
 本地集成通过仍不等于真实复杂文献质量或远程供应商可用：测试 PDF 是程序生成的两页数字文本 PDF；复杂双栏、
 扫描件、公式和乱码继续由真实 PDF 质量验收负责。远程模型验收必须单独获得授权。
+
+异步问答并发回归只用 Fake 替代会产生费用的检索/生成执行器；用户、`answer_jobs`、Owner 调度游标、
+`FOR UPDATE SKIP LOCKED` 领取、WorkerLoop、WorkerPool、成功事务和启动恢复全部使用生产实现。固定场景为
+100 个用户、每人 2 条任务、10 个 Worker，要求 200 个唯一问题都恰好执行一次，全局并发不超过 10、单用户
+不超过 2。另一个场景会在执行中取消 Worker context，并验证任务保持 `processing`、随后由启动恢复转回
+`queued`。这证明的是本地调度正确性，不代表远程模型在 100 用户下具有相同吞吐或延迟。
 
 ## 7. 2026-08-15 首次验收
 
