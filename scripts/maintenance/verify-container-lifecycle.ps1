@@ -210,6 +210,7 @@ SELECT json_build_object(
     $env:EMBEDDING_WORKER_ENABLED = "false"
     $env:SEMANTIC_SEARCH_ENABLED = "false"
     $env:ANSWER_ENABLED = "false"
+    $env:ANSWER_JOBS_ENABLED = "false"
 
     # 验收的正是当前工作区代码和 Dockerfile，不能复用可能过期的本地镜像。
     Write-Host "Starting isolated backend container..."

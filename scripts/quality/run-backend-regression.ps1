@@ -147,6 +147,7 @@ $isolatedEnvironment = @(
     "EMBEDDING_WORKER_ENABLED",
     "SEMANTIC_SEARCH_ENABLED",
     "ANSWER_ENABLED",
+    "ANSWER_JOBS_ENABLED",
     "OPENAI_API_KEY",
     "DASHSCOPE_API_KEY",
     "DB_PASSWORD"
@@ -174,6 +175,7 @@ try {
     $env:EMBEDDING_WORKER_ENABLED = "false"
     $env:SEMANTIC_SEARCH_ENABLED = "false"
     $env:ANSWER_ENABLED = "false"
+    $env:ANSWER_JOBS_ENABLED = "false"
 
     # 使用不可用的占位值覆盖 .env，证明默认回归不依赖真实密钥或数据库密码。
     $env:OPENAI_API_KEY = "regression-disabled"
@@ -194,13 +196,28 @@ try {
                 throw "no Go source files were found"
             }
 
-            $unformattedOutput = & gofmt -l @($goFiles.FullName)
-            Assert-LastExitCode -Description "gofmt check"
-            $unformattedFiles = @(
-                $unformattedOutput |
-                    ForEach-Object { [string]$_ } |
-                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-            )
+            # Windows 对单条命令行长度有限制。项目文件增多后，如果把全部绝对
+            # 路径一次性交给 gofmt，会在真正执行格式检查前就启动失败。
+            # 分批只改变进程调用方式，不改变“所有 Go 文件必须已格式化”的门禁。
+            $batchSize = 50
+            $unformattedFiles = New-Object 'System.Collections.Generic.List[string]'
+            for ($offset = 0; $offset -lt $goFiles.Count; $offset += $batchSize) {
+                $lastIndex = [Math]::Min(
+                    $offset + $batchSize - 1,
+                    $goFiles.Count - 1
+                )
+                $batch = @(
+                    $goFiles[$offset..$lastIndex] |
+                        ForEach-Object { $_.FullName }
+                )
+                $batchOutput = & gofmt -l @batch
+                Assert-LastExitCode -Description "gofmt check"
+                foreach ($file in $batchOutput) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$file)) {
+                        [void]$unformattedFiles.Add([string]$file)
+                    }
+                }
+            }
             if ($unformattedFiles.Count -gt 0) {
                 throw "Go formatting check failed: $($unformattedFiles -join ', ')"
             }

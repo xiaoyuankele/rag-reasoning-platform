@@ -220,6 +220,7 @@ $isolatedEnvironment = @(
     "EMBEDDING_WORKER_ENABLED",
     "SEMANTIC_SEARCH_ENABLED",
     "ANSWER_ENABLED",
+    "ANSWER_JOBS_ENABLED",
     "OPENAI_API_KEY",
     "DASHSCOPE_API_KEY"
 )
@@ -304,6 +305,7 @@ try {
     $env:EMBEDDING_WORKER_ENABLED = "false"
     $env:SEMANTIC_SEARCH_ENABLED = "false"
     $env:ANSWER_ENABLED = "false"
+    $env:ANSWER_JOBS_ENABLED = "false"
     $env:OPENAI_API_KEY = "integration-regression-disabled"
     $env:DASHSCOPE_API_KEY = "integration-regression-disabled"
 
