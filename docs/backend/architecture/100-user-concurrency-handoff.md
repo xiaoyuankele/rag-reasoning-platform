@@ -1,6 +1,6 @@
 # 100 人在线并发演进：后端开发交接
 
-> 状态：2026-08-23。单实例文档任务准入、上传并发闸门和数据库连接池配置已经完成；多实例改造尚未开始。
+> 状态：2026-08-24。单实例文档任务准入、上传并发闸门、Owner 公平领取和数据库连接池配置已经完成；多实例改造尚未开始。
 >
 > 本文只描述 Go、Python、PostgreSQL、对象存储、Redis 和部署角色的后端工作；跨端 HTTP 语义以 shared/architecture/100-user-concurrency-plan.md 为准。
 
@@ -26,6 +26,9 @@
 
     PROCESSING_MAX_ACTIVE_JOBS_PER_USER=5
     PROCESSING_MAX_ACTIVE_JOBS_GLOBAL=40
+    PROCESSING_MAX_IN_FLIGHT_PER_OWNER=1
+    PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER=2
+    PROCESSING_STARVATION_THRESHOLD=2m
     UPLOAD_MAX_CONCURRENCY_PER_USER=2
     UPLOAD_MAX_CONCURRENCY_GLOBAL=16
     UPLOAD_QUEUE_WAIT_TIMEOUT=2s
@@ -60,6 +63,21 @@ advisory lock 只覆盖“计数 + 插入”的短临界区，绝不能覆盖 PD
 | global upload concurrency full | 503 | upload_capacity_exhausted | Retry-After、X-Request-ID |
 
 批量上传中的每一项必须独立处理，不能因一份文档限流回滚其他已接受项。
+
+### 2.4 已落地 Owner 公平领取
+
+准入上限回答“一个用户最多能排多少任务”，公平领取回答“Worker 下一次先服务谁”，二者不能混为同一个限制。当前单实例调度规则是：
+
+1. Worker 第一遍只选择 `processing` 数量低于 `PROCESSING_MAX_IN_FLIGHT_PER_OWNER` 的 Owner；
+2. 防饥饿 Owner 优先，其余按 `last_dispatched_at`、最老 queued 时间和 Owner ID 稳定排序；
+3. 锁定 Owner 调度行后，再锁定该 Owner 最早的 queued 任务；
+4. 只有第一遍没有可服务 Owner 时，第二遍才允许同一 Owner 借用到 `PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER`；
+5. 领取任务、更新文档状态和更新 Owner 调度游标在同一个 PostgreSQL 事务中提交；
+6. 活动数仍实时来自 `document_jobs`，`document_processing_owner_schedules` 只保存调度游标，不复制任务计数。
+
+默认 `1/2/2m` 的含义是：竞争时先做到“一人一个”，无人竞争时允许繁忙用户使用第二个 Worker；等待超过两分钟的队列进入防饥饿优先级。该规则是单实例第一版，不等于已经解决多实例租约问题。
+
+真实 PostgreSQL 集成测试已经覆盖：不同 Owner 先获得基础槽位、同一 Owner 借用空闲容量、达到借用上限后继续排队、任务结束后释放槽位、防饥饿优先，以及两个并发 Worker 不重复领取且优先选择不同 Owner。
 
 下一项工作不是继续猜测调高限额，而是使用固定账号、固定文件和分阶段并发压测，记录吞吐、P95/P99、容量拒绝、队列等待、资源和数据库连接池指标，寻找当前单机拐点。
 

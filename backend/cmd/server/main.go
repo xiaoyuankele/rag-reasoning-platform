@@ -184,7 +184,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// Repository 负责 PostgreSQL 数据访问。
 	documentRepository := postgres.NewDocumentRepository(databasePool)
 	scopedDocumentRepository := postgres.NewScopedDocumentRepository(databasePool)
-	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
+	processingJobRepository :=
+		postgres.NewProcessingJobRepositoryWithSchedulingPolicy(
+			databasePool,
+			documentdomain.ProcessingJobSchedulingPolicy{
+				MaxInFlightPerOwner:         workerConfig.OwnerInFlightLimit,
+				MaxBorrowedInFlightPerOwner: workerConfig.OwnerBorrowedLimit,
+				StarvationThreshold:         workerConfig.StarvationThreshold,
+			},
+		)
 	scopedProcessingJobRepository := postgres.NewScopedProcessingJobRepository(
 		databasePool,
 		documentdomain.ProcessingJobAdmissionLimits{
@@ -415,6 +423,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		"Document worker pool configured",
 		"event", "document_worker_pool_configured",
 		"concurrency", workerConfig.DocumentConcurrency,
+		"owner_in_flight_limit", workerConfig.OwnerInFlightLimit,
+		"owner_borrowed_limit", workerConfig.OwnerBorrowedLimit,
+		"starvation_threshold_ms",
+		workerConfig.StarvationThreshold.Milliseconds(),
 	)
 
 	// Worker、公开语义检索和问答内部检索最终都调用同一个远程 Embedding

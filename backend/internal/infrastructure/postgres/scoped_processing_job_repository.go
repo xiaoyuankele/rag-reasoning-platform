@@ -163,6 +163,13 @@ func (r *ScopedProcessingJobRepository) CreateProcessingJob(
 		return documentdomain.ProcessingJob{},
 			documentdomain.ErrGlobalProcessingJobLimitExceeded
 	}
+	if err := ensureProcessingOwnerSchedule(
+		ctx,
+		transaction,
+		scope.OwnerUserID(),
+	); err != nil {
+		return documentdomain.ProcessingJob{}, err
+	}
 
 	const insertJobQuery = `
 		INSERT INTO document_jobs (document_id)

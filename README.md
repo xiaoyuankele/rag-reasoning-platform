@@ -217,7 +217,7 @@ PostgreSQL 文档仓储已实现 `Create`、`GetByID`、分页 `List` 和 `Delet
 
 `GET /processing-jobs/:id` 已实现单个解析任务状态查询，返回任务状态、尝试次数、错误信息和各阶段时间。自动化测试已覆盖非法 ID、任务不存在、内部错误和成功响应；真实 HTTP 测试已验证 `200`、`400`、`404`，并确认查询结果与刚创建的 `queued` 任务一致。
 
-Worker 已实现安全领取下一条任务的基础能力：PostgreSQL 事务使用 `FOR UPDATE SKIP LOCKED` 防止并发重复领取，并在同一事务中把任务与文档更新为 `processing`。Application 层把空队列转换为正常空闲结果。真实 PostgreSQL 集成测试已验证最早任务优先、尝试次数递增、状态同步以及两个并发领取者不会得到同一任务。
+Worker 已实现按 Owner 公平领取下一条任务：PostgreSQL 事务使用 `FOR UPDATE SKIP LOCKED` 同时锁定 Owner 调度游标和具体任务，防止并发重复领取。存在多个等待用户时，每个用户默认先获得 1 个解析槽位；没有其他用户可获得基础槽位时，同一用户最多可借用到 2 个槽位，既避免单个大批量用户长期占满 Worker，也避免低负载时闲置算力。等待超过 2 分钟的 Owner 进入防饥饿优先级；任务领取、文档进入 `processing` 和调度游标更新在同一事务内完成。真实 PostgreSQL 集成测试已验证不同 Owner 优先、空闲容量借用、借用上限、槽位释放、防饥饿及两个并发 Worker 领取不同 Owner 任务。
 
 Worker Application 已定义可替换的文档处理器端口，并实现单次“领取、查询文档、调用处理器、保存统一文本块、成功或失败收尾”编排。PostgreSQL 会在事务中同步更新任务与文档：成功时分别进入 `succeeded` 和 `ready`，处理或文本块保存失败时都进入 `failed` 并保存安全错误说明。单元测试和真实 PostgreSQL + Fake Processor 集成测试已经覆盖成功、处理失败、文本块保存失败、状态回写失败和双重错误保留。
 
@@ -404,6 +404,9 @@ Go 后端当前支持以下环境变量：
 | `DOCUMENT_WORKER_CONCURRENCY` | `1` | 同一实例的文档 Worker 数，允许 1～4；默认 1 可安全降级 |
 | `PROCESSING_MAX_ACTIVE_JOBS_PER_USER` | `5` | 单个用户允许的 queued/processing 文档解析任务总数 |
 | `PROCESSING_MAX_ACTIVE_JOBS_GLOBAL` | `40` | 全系统允许的活动文档解析任务总数，不能小于单用户上限 |
+| `PROCESSING_MAX_IN_FLIGHT_PER_OWNER` | `1` | 多用户竞争时，每个 Owner 默认可以占用的 processing 槽位数 |
+| `PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER` | `2` | 没有其他 Owner 可获得基础槽位时，单个 Owner 可借用到的 processing 绝对上限 |
+| `PROCESSING_STARVATION_THRESHOLD` | `2m` | queued 任务等待多久后进入 Owner 防饥饿优先级 |
 | `PYTHON_EXECUTABLE` | `python` | Go 启动复杂文档处理子进程时使用的 Python 可执行程序 |
 | `PYTHON_SOURCE_ROOT` | `ai/src` | 包含 `rag_ai` 包的 Python 源码目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `PYTHON_PDF_MAX_FILE_SIZE_BYTES` | `52428800` | PDF 解析文件上限，即 50 MiB；独立于上传上限 |

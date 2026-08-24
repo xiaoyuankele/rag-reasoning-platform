@@ -15,7 +15,14 @@ import (
 
 // ProcessingJobRepository 使用 PostgreSQL 保存解析任务。
 type ProcessingJobRepository struct {
-	pool *pgxpool.Pool
+	pool             *pgxpool.Pool
+	schedulingPolicy document.ProcessingJobSchedulingPolicy
+}
+
+var defaultProcessingJobSchedulingPolicy = document.ProcessingJobSchedulingPolicy{
+	MaxInFlightPerOwner:         1,
+	MaxBorrowedInFlightPerOwner: 2,
+	StarvationThreshold:         2 * time.Minute,
 }
 
 var _ document.ProcessingJobCreator = (*ProcessingJobRepository)(nil)
@@ -27,8 +34,20 @@ var _ document.ProcessingJobFinalizer = (*ProcessingJobRepository)(nil)
 func NewProcessingJobRepository(
 	pool *pgxpool.Pool,
 ) *ProcessingJobRepository {
+	return NewProcessingJobRepositoryWithSchedulingPolicy(
+		pool,
+		defaultProcessingJobSchedulingPolicy,
+	)
+}
+
+// NewProcessingJobRepositoryWithSchedulingPolicy 创建使用指定 Owner 公平策略的仓储。
+func NewProcessingJobRepositoryWithSchedulingPolicy(
+	pool *pgxpool.Pool,
+	policy document.ProcessingJobSchedulingPolicy,
+) *ProcessingJobRepository {
 	return &ProcessingJobRepository{
-		pool: pool,
+		pool:             pool,
+		schedulingPolicy: policy,
 	}
 }
 
@@ -37,7 +56,49 @@ func (r *ProcessingJobRepository) CreateProcessingJob(
 	ctx context.Context,
 	documentID int64,
 ) (document.ProcessingJob, error) {
-	const query = `
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"begin processing job transaction: %w",
+			err,
+		)
+	}
+	defer func() {
+		_ = transaction.Rollback(context.Background())
+	}()
+
+	// 系统级创建入口仍要补齐 Owner 调度行，保证测试、维护命令和未来内部
+	// 调用不会绕过公平调度。owner_user_id 已由第 12 号迁移设为 NOT NULL。
+	const lockDocumentQuery = `
+		SELECT owner_user_id
+		FROM documents
+		WHERE id = $1
+		FOR SHARE
+	`
+	var ownerUserID int64
+	err = transaction.QueryRow(
+		ctx,
+		lockDocumentQuery,
+		documentID,
+	).Scan(&ownerUserID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return document.ProcessingJob{}, document.ErrNotFound
+	}
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"lock document before creating processing job: %w",
+			err,
+		)
+	}
+	if err := ensureProcessingOwnerSchedule(
+		ctx,
+		transaction,
+		ownerUserID,
+	); err != nil {
+		return document.ProcessingJob{}, err
+	}
+
+	const insertJobQuery = `
 		INSERT INTO document_jobs (document_id)
 		VALUES ($1)
 		RETURNING
@@ -52,7 +113,7 @@ func (r *ProcessingJobRepository) CreateProcessingJob(
 			completed_at
 	`
 
-	row := r.pool.QueryRow(ctx, query, documentID)
+	row := transaction.QueryRow(ctx, insertJobQuery, documentID)
 	createdJob, err := scanProcessingJob(row)
 	if isConstraintViolation(err, "uq_document_jobs_active") {
 		return document.ProcessingJob{},
@@ -65,6 +126,12 @@ func (r *ProcessingJobRepository) CreateProcessingJob(
 	if err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
 			"create document processing job: %w",
+			err,
+		)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"commit processing job: %w",
 			err,
 		)
 	}
@@ -108,14 +175,19 @@ func (r *ProcessingJobRepository) GetProcessingJobByID(
 	return foundJob, nil
 }
 
-// ClaimNextProcessingJob 原子领取创建时间最早的 queued 任务。
+// ClaimNextProcessingJob 按 Owner 公平策略原子领取下一条 queued 任务。
 //
-// FOR UPDATE SKIP LOCKED 会跳过已经被其他 Worker 锁定的任务，
-// 防止多个 Worker 同时领取同一条记录。任务和文档的状态更新位于
-// 同一事务中，外部只能同时看到更新前或更新后的状态。
+// 第一遍优先选择尚未达到基础并发上限的 Owner；只有没有此类 Owner 时，
+// 第二遍才允许借用空闲容量。Owner 调度行与任务都使用 FOR UPDATE
+// SKIP LOCKED，防止多个 Worker 同时选择同一个 Owner 或同一条任务。
 func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 	ctx context.Context,
 ) (document.ProcessingJob, error) {
+	if !r.schedulingPolicy.IsValid() {
+		return document.ProcessingJob{},
+			document.ErrInvalidProcessingJobSchedulingPolicy
+	}
+
 	transaction, err := r.pool.Begin(ctx)
 	if err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
@@ -127,7 +199,33 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 		_ = transaction.Rollback(context.Background())
 	}()
 
-	const selectQuery = `
+	ownerUserID, err := selectNextProcessingOwner(
+		ctx,
+		transaction,
+		r.schedulingPolicy.MaxInFlightPerOwner,
+		r.schedulingPolicy.StarvationThreshold,
+	)
+	if errors.Is(err, pgx.ErrNoRows) &&
+		r.schedulingPolicy.MaxBorrowedInFlightPerOwner >
+			r.schedulingPolicy.MaxInFlightPerOwner {
+		ownerUserID, err = selectNextProcessingOwner(
+			ctx,
+			transaction,
+			r.schedulingPolicy.MaxBorrowedInFlightPerOwner,
+			r.schedulingPolicy.StarvationThreshold,
+		)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return document.ProcessingJob{}, document.ErrNoQueuedProcessingJob
+	}
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"select next processing job owner: %w",
+			err,
+		)
+	}
+
+	const selectJobQuery = `
 		SELECT
 			j.id,
 			j.document_id,
@@ -142,17 +240,19 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 		INNER JOIN documents AS d ON d.id = j.document_id
 		WHERE j.status = 'queued'
 			AND d.status IN ('uploaded', 'failed')
+			AND d.owner_user_id = $1
 		ORDER BY j.created_at ASC, j.id ASC
 		FOR UPDATE OF j, d SKIP LOCKED
 		LIMIT 1
 	`
 
 	queuedJob, err := scanProcessingJob(
-		transaction.QueryRow(ctx, selectQuery),
+		transaction.QueryRow(ctx, selectJobQuery, ownerUserID),
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return document.ProcessingJob{},
-			document.ErrNoQueuedProcessingJob
+		// Owner 调度行已锁定，正常 Worker 不会并发领取该 Owner；若任务在
+		// 两条语句之间被删除，本轮视为空队列并由下一次轮询重新选择。
+		return document.ProcessingJob{}, document.ErrNoQueuedProcessingJob
 	}
 	if err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
@@ -228,6 +328,31 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 		)
 	}
 
+	const updateScheduleQuery = `
+		UPDATE document_processing_owner_schedules
+		SET
+			last_dispatched_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE owner_user_id = $1
+	`
+	scheduleCommandTag, err := transaction.Exec(
+		ctx,
+		updateScheduleQuery,
+		ownerUserID,
+	)
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"update processing owner schedule: %w",
+			err,
+		)
+	}
+	if scheduleCommandTag.RowsAffected() != 1 {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"update processing owner schedule: expected 1 updated row, got %d",
+			scheduleCommandTag.RowsAffected(),
+		)
+	}
+
 	if err := transaction.Commit(ctx); err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
 			"commit claimed processing job: %w",
@@ -236,6 +361,79 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 	}
 
 	return claimedJob, nil
+}
+
+// selectNextProcessingOwner 锁定一个符合并发上限的 Owner 调度行。
+// 防饥饿 Owner 优先；其余 Owner 按最近派发时间和最老 queued 时间排序。
+func selectNextProcessingOwner(
+	ctx context.Context,
+	transaction pgx.Tx,
+	maxInFlight int,
+	starvationThreshold time.Duration,
+) (int64, error) {
+	const query = `
+		SELECT schedule.owner_user_id
+		FROM document_processing_owner_schedules AS schedule
+		JOIN LATERAL (
+			SELECT MIN(job.created_at) AS oldest_queued_at
+			FROM document_jobs AS job
+			JOIN documents AS source_document
+			  ON source_document.id = job.document_id
+			WHERE source_document.owner_user_id = schedule.owner_user_id
+			  AND source_document.status IN ('uploaded', 'failed')
+			  AND job.status = 'queued'
+		) AS queued_work
+		  ON queued_work.oldest_queued_at IS NOT NULL
+		JOIN LATERAL (
+			SELECT COUNT(*) AS in_flight_count
+			FROM document_jobs AS job
+			JOIN documents AS source_document
+			  ON source_document.id = job.document_id
+			WHERE source_document.owner_user_id = schedule.owner_user_id
+			  AND job.status = 'processing'
+		) AS active_work ON TRUE
+		WHERE active_work.in_flight_count < $1
+		ORDER BY
+			CASE
+				WHEN queued_work.oldest_queued_at <=
+					CURRENT_TIMESTAMP - ($2::BIGINT * INTERVAL '1 millisecond')
+				THEN 0
+				ELSE 1
+			END,
+			schedule.last_dispatched_at ASC NULLS FIRST,
+			queued_work.oldest_queued_at ASC,
+			schedule.owner_user_id ASC
+		FOR UPDATE OF schedule SKIP LOCKED
+		LIMIT 1
+	`
+
+	var ownerUserID int64
+	err := transaction.QueryRow(
+		ctx,
+		query,
+		maxInFlight,
+		starvationThreshold.Milliseconds(),
+	).Scan(&ownerUserID)
+	return ownerUserID, err
+}
+
+func ensureProcessingOwnerSchedule(
+	ctx context.Context,
+	transaction pgx.Tx,
+	ownerUserID int64,
+) error {
+	const query = `
+		INSERT INTO document_processing_owner_schedules (owner_user_id)
+		VALUES ($1)
+		ON CONFLICT (owner_user_id) DO NOTHING
+	`
+	if _, err := transaction.Exec(ctx, query, ownerUserID); err != nil {
+		return fmt.Errorf(
+			"ensure document processing owner schedule: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 // MarkProcessingJobSucceeded 原子地把任务标记为 succeeded，

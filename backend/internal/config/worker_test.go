@@ -13,6 +13,9 @@ func TestLoadWorkerUsesDefaults(t *testing.T) {
 	t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "")
 	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_PER_USER", "")
 	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_GLOBAL", "")
+	t.Setenv("PROCESSING_MAX_IN_FLIGHT_PER_OWNER", "")
+	t.Setenv("PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", "")
+	t.Setenv("PROCESSING_STARVATION_THRESHOLD", "")
 
 	workerConfig, err := LoadWorker()
 	if err != nil {
@@ -53,6 +56,27 @@ func TestLoadWorkerUsesDefaults(t *testing.T) {
 			defaultProcessingActiveGlobalLimit,
 		)
 	}
+	if workerConfig.OwnerInFlightLimit != defaultProcessingOwnerInFlightLimit {
+		t.Fatalf(
+			"OwnerInFlightLimit = %d, want %d",
+			workerConfig.OwnerInFlightLimit,
+			defaultProcessingOwnerInFlightLimit,
+		)
+	}
+	if workerConfig.OwnerBorrowedLimit != defaultProcessingOwnerBorrowedLimit {
+		t.Fatalf(
+			"OwnerBorrowedLimit = %d, want %d",
+			workerConfig.OwnerBorrowedLimit,
+			defaultProcessingOwnerBorrowedLimit,
+		)
+	}
+	if workerConfig.StarvationThreshold != defaultProcessingStarvationThreshold {
+		t.Fatalf(
+			"StarvationThreshold = %v, want %v",
+			workerConfig.StarvationThreshold,
+			defaultProcessingStarvationThreshold,
+		)
+	}
 }
 
 func TestLoadWorkerUsesEnvironmentValues(t *testing.T) {
@@ -61,6 +85,9 @@ func TestLoadWorkerUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "2")
 	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_PER_USER", "7")
 	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_GLOBAL", "80")
+	t.Setenv("PROCESSING_MAX_IN_FLIGHT_PER_OWNER", "2")
+	t.Setenv("PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", "3")
+	t.Setenv("PROCESSING_STARVATION_THRESHOLD", "90s")
 
 	workerConfig, err := LoadWorker()
 	if err != nil {
@@ -97,6 +124,25 @@ func TestLoadWorkerUsesEnvironmentValues(t *testing.T) {
 		t.Fatalf(
 			"ActiveJobsGlobalLimit = %d, want 80",
 			workerConfig.ActiveJobsGlobalLimit,
+		)
+	}
+	if workerConfig.OwnerInFlightLimit != 2 {
+		t.Fatalf(
+			"OwnerInFlightLimit = %d, want 2",
+			workerConfig.OwnerInFlightLimit,
+		)
+	}
+	if workerConfig.OwnerBorrowedLimit != 3 {
+		t.Fatalf(
+			"OwnerBorrowedLimit = %d, want 3",
+			workerConfig.OwnerBorrowedLimit,
+		)
+	}
+	if workerConfig.StarvationThreshold != 90*time.Second {
+		t.Fatalf(
+			"StarvationThreshold = %v, want %v",
+			workerConfig.StarvationThreshold,
+			90*time.Second,
 		)
 	}
 }
@@ -182,6 +228,46 @@ func TestLoadWorkerRejectsInvalidValues(t *testing.T) {
 			environmentName: "PROCESSING_MAX_ACTIVE_JOBS_GLOBAL",
 			value:           "10001",
 		},
+		{
+			name:            "non-numeric owner in-flight limit",
+			environmentName: "PROCESSING_MAX_IN_FLIGHT_PER_OWNER",
+			value:           "one",
+		},
+		{
+			name:            "zero owner in-flight limit",
+			environmentName: "PROCESSING_MAX_IN_FLIGHT_PER_OWNER",
+			value:           "0",
+		},
+		{
+			name:            "owner in-flight limit above maximum",
+			environmentName: "PROCESSING_MAX_IN_FLIGHT_PER_OWNER",
+			value:           "65",
+		},
+		{
+			name:            "non-numeric borrowed owner limit",
+			environmentName: "PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER",
+			value:           "two",
+		},
+		{
+			name:            "zero borrowed owner limit",
+			environmentName: "PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER",
+			value:           "0",
+		},
+		{
+			name:            "borrowed owner limit above maximum",
+			environmentName: "PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER",
+			value:           "65",
+		},
+		{
+			name:            "invalid starvation threshold",
+			environmentName: "PROCESSING_STARVATION_THRESHOLD",
+			value:           "later",
+		},
+		{
+			name:            "zero starvation threshold",
+			environmentName: "PROCESSING_STARVATION_THRESHOLD",
+			value:           "0s",
+		},
 	}
 
 	for _, test := range tests {
@@ -192,6 +278,9 @@ func TestLoadWorkerRejectsInvalidValues(t *testing.T) {
 			t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "1")
 			t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_PER_USER", "5")
 			t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_GLOBAL", "40")
+			t.Setenv("PROCESSING_MAX_IN_FLIGHT_PER_OWNER", "1")
+			t.Setenv("PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", "2")
+			t.Setenv("PROCESSING_STARVATION_THRESHOLD", "2m")
 
 			// 然后只破坏本测试关注的环境变量。
 			t.Setenv(test.environmentName, test.value)
@@ -229,11 +318,36 @@ func TestLoadWorkerRejectsGlobalLimitBelowPerUserLimit(t *testing.T) {
 	t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "1")
 	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_PER_USER", "6")
 	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_GLOBAL", "5")
+	t.Setenv("PROCESSING_MAX_IN_FLIGHT_PER_OWNER", "1")
+	t.Setenv("PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", "2")
+	t.Setenv("PROCESSING_STARVATION_THRESHOLD", "2m")
 
 	workerConfig, err := LoadWorker()
 	if !errors.Is(err, ErrInvalidProcessingActiveJobLimits) {
 		t.Fatalf(
 			"LoadWorker() error = %v, want ErrInvalidProcessingActiveJobLimits",
+			err,
+		)
+	}
+	if workerConfig != (WorkerConfig{}) {
+		t.Fatalf("LoadWorker() config = %+v, want zero value", workerConfig)
+	}
+}
+
+func TestLoadWorkerRejectsBorrowedOwnerLimitBelowBaseLimit(t *testing.T) {
+	t.Setenv("WORKER_POLL_INTERVAL", "2s")
+	t.Setenv("WORKER_PROCESSING_TIMEOUT", "5m")
+	t.Setenv("DOCUMENT_WORKER_CONCURRENCY", "1")
+	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_PER_USER", "5")
+	t.Setenv("PROCESSING_MAX_ACTIVE_JOBS_GLOBAL", "40")
+	t.Setenv("PROCESSING_MAX_IN_FLIGHT_PER_OWNER", "3")
+	t.Setenv("PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", "2")
+	t.Setenv("PROCESSING_STARVATION_THRESHOLD", "2m")
+
+	workerConfig, err := LoadWorker()
+	if !errors.Is(err, ErrInvalidProcessingOwnerSchedulingLimits) {
+		t.Fatalf(
+			"LoadWorker() error = %v, want ErrInvalidProcessingOwnerSchedulingLimits",
 			err,
 		)
 	}

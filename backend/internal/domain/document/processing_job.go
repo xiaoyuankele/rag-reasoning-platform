@@ -28,6 +28,11 @@ var ErrInvalidProcessingJobAdmissionLimits = errors.New(
 	"document processing job admission limits are invalid",
 )
 
+// ErrInvalidProcessingJobSchedulingPolicy 表示 Worker 收到了无效的 Owner 调度策略。
+var ErrInvalidProcessingJobSchedulingPolicy = errors.New(
+	"document processing job scheduling policy is invalid",
+)
+
 // ErrProcessingJobNotFound 表示指定解析任务不存在。
 var ErrProcessingJobNotFound = errors.New(
 	"document processing job not found",
@@ -128,6 +133,24 @@ type ProcessingJobAdmissionLimits struct {
 func (l ProcessingJobAdmissionLimits) IsValid() bool {
 	return l.MaxActiveJobsPerOwner > 0 &&
 		l.MaxActiveJobsGlobal >= l.MaxActiveJobsPerOwner
+}
+
+// ProcessingJobSchedulingPolicy 定义 Worker 领取解析任务时的 Owner 公平规则。
+//
+// MaxInFlightPerOwner 是存在多个等待 Owner 时的基础并发上限；
+// MaxBorrowedInFlightPerOwner 是没有其他 Owner 可以获得基础槽位时的绝对上限；
+// StarvationThreshold 控制 queued 任务等待多久后进入防饥饿优先级。
+type ProcessingJobSchedulingPolicy struct {
+	MaxInFlightPerOwner         int
+	MaxBorrowedInFlightPerOwner int
+	StarvationThreshold         time.Duration
+}
+
+// IsValid 判断公平、借用和防饥饿规则能否组成有效策略。
+func (p ProcessingJobSchedulingPolicy) IsValid() bool {
+	return p.MaxInFlightPerOwner > 0 &&
+		p.MaxBorrowedInFlightPerOwner >= p.MaxInFlightPerOwner &&
+		p.StarvationThreshold > 0
 }
 
 // ProcessingJobCreator 定义创建解析任务所需的持久化能力。

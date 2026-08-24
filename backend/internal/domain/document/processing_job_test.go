@@ -1,6 +1,9 @@
 package document
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestProcessingJobAdmissionLimitsIsValid(t *testing.T) {
 	testCases := []struct {
@@ -44,6 +47,66 @@ func TestProcessingJobAdmissionLimitsIsValid(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			if got := testCase.limits.IsValid(); got != testCase.want {
+				t.Fatalf("IsValid() = %t, want %t", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestProcessingJobSchedulingPolicyIsValid(t *testing.T) {
+	testCases := []struct {
+		name   string
+		policy ProcessingJobSchedulingPolicy
+		want   bool
+	}{
+		{
+			name: "fair base with borrowed capacity",
+			policy: ProcessingJobSchedulingPolicy{
+				MaxInFlightPerOwner:         1,
+				MaxBorrowedInFlightPerOwner: 2,
+				StarvationThreshold:         2 * time.Minute,
+			},
+			want: true,
+		},
+		{
+			name: "borrowing disabled",
+			policy: ProcessingJobSchedulingPolicy{
+				MaxInFlightPerOwner:         1,
+				MaxBorrowedInFlightPerOwner: 1,
+				StarvationThreshold:         time.Minute,
+			},
+			want: true,
+		},
+		{
+			name: "missing base limit",
+			policy: ProcessingJobSchedulingPolicy{
+				MaxBorrowedInFlightPerOwner: 2,
+				StarvationThreshold:         time.Minute,
+			},
+			want: false,
+		},
+		{
+			name: "borrowed below base",
+			policy: ProcessingJobSchedulingPolicy{
+				MaxInFlightPerOwner:         2,
+				MaxBorrowedInFlightPerOwner: 1,
+				StarvationThreshold:         time.Minute,
+			},
+			want: false,
+		},
+		{
+			name: "missing starvation threshold",
+			policy: ProcessingJobSchedulingPolicy{
+				MaxInFlightPerOwner:         1,
+				MaxBorrowedInFlightPerOwner: 2,
+			},
+			want: false,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := testCase.policy.IsValid(); got != testCase.want {
 				t.Fatalf("IsValid() = %t, want %t", got, testCase.want)
 			}
 		})
