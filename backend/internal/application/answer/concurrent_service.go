@@ -93,9 +93,9 @@ type AnswerAdmissionEventObserver interface {
 	ObserveAnswerAdmissionEvent(context.Context, AnswerAdmissionEvent)
 }
 
-// answerer 是并发包装器对下游问答用例需要的最小接口。
+// Answerer 是问答装饰器和 Handler 共同依赖的最小应用接口。
 // 生产环境注入 *Service；测试可以注入不会调用数据库和远程模型的 Fake。
-type answerer interface {
+type Answerer interface {
 	Answer(
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
@@ -103,23 +103,26 @@ type answerer interface {
 	) (Output, error)
 }
 
-var _ answerer = (*Service)(nil)
+// answerer 保留为包内兼容别名，已有 Worker 和测试仍可使用原名称。
+type answerer = Answerer
+
+var _ Answerer = (*Service)(nil)
 
 // ConcurrentService 为完整问答链路提供 Owner 公平、有界并发和限时排队。
 //
 // 一个执行槽位覆盖“问题向量化 → 数据库检索 → 答案生成”的完整过程。
 // 调度器只负责谁可以开始执行，不改变原有问答业务和错误结果。
 type ConcurrentService struct {
-	next      answerer
+	next      Answerer
 	events    AnswerAdmissionEventObserver
 	scheduler *answerAdmissionScheduler
 }
 
-var _ answerer = (*ConcurrentService)(nil)
+var _ Answerer = (*ConcurrentService)(nil)
 
 // NewConcurrentService 创建 Owner 公平的问答并发包装器。
 func NewConcurrentService(
-	next answerer,
+	next Answerer,
 	events AnswerAdmissionEventObserver,
 	limits AnswerAdmissionLimits,
 ) (*ConcurrentService, error) {

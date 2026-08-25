@@ -456,7 +456,10 @@ P6 路由保护边界：
 - 前端必须依据 HTTP 状态码处理分支，不能依赖后端日志文本；
 - `/documents/:id/chunks` 只允许读取 `ready` 文档；文档存在但仍处于 `uploaded`、`processing`
   或 `failed` 时返回 `409`，避免把旧 chunks 当成当前正式结果；
-- `semantic-search` 和 `answers` 可能调用远程模型并产生费用，前端应提供加载态、超时提示和重试入口。
+- `semantic-search` 和 `answers` 在缓存未命中时可能调用远程模型并产生费用，前端应提供加载态、超时提示和重试入口。
+- 启用 Redis RAG 缓存后，缓存命中不会改变任何请求或响应 DTO。问答命中缓存时，本次请求没有调用远程模型，
+  因此 `usage.prompt_tokens`、`usage.completion_tokens` 和 `usage.total_tokens` 均返回 `0`；来源仍来自创建该缓存值时
+  已通过 OwnerScope 验证的证据。每次请求仍执行 Session 鉴权和 PostgreSQL `corpus_revision` 核对。
 - `POST /answers` 的完整“问题向量化 → 检索 → 生成”链路受单进程 Owner 公平闸门保护。同一用户最多
   执行 `ANSWER_MAX_CONCURRENCY_PER_USER` 条并等待 `ANSWER_MAX_WAITERS_PER_USER` 条；用户等待预算已满时
   返回 `429 Too Many Requests`、`Retry-After: 5` 和稳定 code `answer_owner_capacity_exhausted`。

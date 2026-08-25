@@ -337,6 +337,15 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 		)
 	}
 
+	// 文档进入 processing 后，旧 chunks/embeddings 不再是当前正式语料。
+	// 在同一事务递增版本，确保已经缓存的问答不能继续返回旧证据。
+	if err := bumpOwnerCorpusRevision(ctx, transaction, ownerUserID); err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"invalidate answer cache after processing starts: %w",
+			err,
+		)
+	}
+
 	const updateScheduleQuery = `
 		UPDATE document_processing_owner_schedules
 		SET

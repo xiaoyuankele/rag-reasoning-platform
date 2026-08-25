@@ -27,6 +27,7 @@ func TestScopedDocumentRepositoryEnforcesOwnerBoundary(t *testing.T) {
 	defer cancel()
 	pool := openIsolatedDocumentTestPool(t, ctx)
 	repository := postgresrepository.NewScopedDocumentRepository(pool)
+	revisionRepository := postgresrepository.NewCorpusRevisionRepository(pool)
 
 	ownerAID := insertScopedRepositoryUser(t, ctx, pool, "owner-a@example.com")
 	ownerBID := insertScopedRepositoryUser(t, ctx, pool, "owner-b@example.com")
@@ -109,6 +110,20 @@ func TestScopedDocumentRepositoryEnforcesOwnerBoundary(t *testing.T) {
 	}
 	if err := repository.Delete(ctx, ownerA, createdA.ID); err != nil {
 		t.Fatalf("Delete(owner A) error = %v", err)
+	}
+	ownerARevision, err := revisionRepository.GetCorpusRevision(ctx, ownerA)
+	if err != nil {
+		t.Fatalf("GetCorpusRevision(owner A) error = %v", err)
+	}
+	if ownerARevision != 2 {
+		t.Fatalf("owner A corpus revision after delete = %d, want 2", ownerARevision)
+	}
+	ownerBRevision, err := revisionRepository.GetCorpusRevision(ctx, ownerB)
+	if err != nil {
+		t.Fatalf("GetCorpusRevision(owner B) error = %v", err)
+	}
+	if ownerBRevision != 1 {
+		t.Fatalf("owner B corpus revision = %d, want unchanged 1", ownerBRevision)
 	}
 	if _, err := repository.GetByID(ctx, ownerA, createdA.ID); !errors.Is(err, documentdomain.ErrNotFound) {
 		t.Fatalf("GetByID() after owner delete error = %v, want ErrNotFound", err)

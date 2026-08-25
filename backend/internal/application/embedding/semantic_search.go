@@ -86,10 +86,10 @@ type SemanticSearchOutput struct {
 // 它只依赖 Domain 接口：不知道向量来自 DashScope 还是 OpenAI，也不知道仓储使用
 // PostgreSQL pgvector 还是其他向量数据库。
 type SemanticSearchService struct {
-	embedder   embeddingdomain.Embedder
-	repository semanticSearchRepository
-	modelName  string
-	dimensions int
+	queryVectors semanticQueryVectorProvider
+	repository   semanticSearchRepository
+	modelName    string
+	dimensions   int
 }
 
 // NewSemanticSearchService 创建语义检索应用服务。
@@ -108,12 +108,12 @@ func NewSemanticSearchService(
 		return nil, ErrSemanticSearchConfiguration
 	}
 
-	return &SemanticSearchService{
-		embedder:   embedder,
-		repository: repository,
-		modelName:  modelName,
-		dimensions: dimensions,
-	}, nil
+	return newSemanticSearchService(
+		newDirectSemanticQueryVectorProvider(embedder, modelName, dimensions),
+		repository,
+		modelName,
+		dimensions,
+	)
 }
 
 // Search 校验自然语言问题，生成一条查询向量，再读取最相近的文本块。
@@ -151,14 +151,7 @@ func (s *SemanticSearchService) Search(
 		}
 	}
 
-	embeddedQuery, err := s.embedder.Embed(
-		ctx,
-		embeddingdomain.EmbedRequest{
-			Inputs:     []string{query},
-			Model:      s.modelName,
-			Dimensions: s.dimensions,
-		},
-	)
+	queryVector, err := s.queryVectors.EmbedQuery(ctx, scope, query)
 	if err != nil {
 		return SemanticSearchOutput{}, fmt.Errorf(
 			"embed semantic search query: %w",
@@ -166,23 +159,11 @@ func (s *SemanticSearchService) Search(
 		)
 	}
 
-	// 一次用户问题必须严格对应一条查询向量。即使当前 HTTP 适配器已经校验，
-	// Application 仍要保护自己免受未来实现或错误 Fake 返回值的影响。
-	if len(embeddedQuery.Vectors) != 1 ||
-		len(embeddedQuery.Vectors[0]) != s.dimensions {
-		return SemanticSearchOutput{}, fmt.Errorf(
-			"%w: semantic query returned %d vectors with expected dimensions %d",
-			embeddingdomain.ErrInvalidEmbeddingResponse,
-			len(embeddedQuery.Vectors),
-			s.dimensions,
-		)
-	}
-
 	hits, err := s.repository.SearchSimilar(
 		ctx,
 		scope,
 		documentdomain.SemanticSearchOptions{
-			QueryVector: embeddedQuery.Vectors[0],
+			QueryVector: queryVector,
 			ModelName:   s.modelName,
 			Dimensions:  s.dimensions,
 			DocumentID:  input.DocumentID,
@@ -202,6 +183,27 @@ func (s *SemanticSearchService) Search(
 	return SemanticSearchOutput{
 		Query: query,
 		Hits:  hits,
+	}, nil
+}
+
+func newSemanticSearchService(
+	queryVectors semanticQueryVectorProvider,
+	repository semanticSearchRepository,
+	modelName string,
+	dimensions int,
+) (*SemanticSearchService, error) {
+	if queryVectors == nil || repository == nil {
+		return nil, ErrSemanticSearchDependencies
+	}
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" || dimensions <= 0 {
+		return nil, ErrSemanticSearchConfiguration
+	}
+	return &SemanticSearchService{
+		queryVectors: queryVectors,
+		repository:   repository,
+		modelName:    modelName,
+		dimensions:   dimensions,
 	}, nil
 }
 

@@ -371,7 +371,15 @@ func (r *ScopedDocumentRepository) Delete(
 		return accessdomain.ErrInvalidOwnerScope
 	}
 
-	commandTag, err := r.pool.Exec(
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin scoped document deletion: %w", err)
+	}
+	defer func() {
+		_ = transaction.Rollback(context.Background())
+	}()
+
+	commandTag, err := transaction.Exec(
 		ctx,
 		`DELETE FROM documents WHERE id = $1 AND owner_user_id = $2`,
 		id,
@@ -382,6 +390,16 @@ func (r *ScopedDocumentRepository) Delete(
 	}
 	if commandTag.RowsAffected() == 0 {
 		return documentdomain.ErrNotFound
+	}
+	if err := bumpOwnerCorpusRevision(
+		ctx,
+		transaction,
+		scope.OwnerUserID(),
+	); err != nil {
+		return fmt.Errorf("invalidate answer cache after document deletion: %w", err)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return fmt.Errorf("commit scoped document deletion: %w", err)
 	}
 	return nil
 }

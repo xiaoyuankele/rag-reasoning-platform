@@ -19,6 +19,7 @@
 - [概念词典与多语言检索设想](architecture/concept-retrieval-roadmap.md)
 - [P6 个人用户域后端交接](architecture/personal-user-backend-handoff.md)
 - [向量任务并发、版本与 Redis 演进交接](architecture/document-vectorization-concurrency-handoff.md)
+- [Redis 查询向量与问答结果缓存](architecture/redis-rag-cache.md)
 - [100 人在线并发演进后端交接](architecture/100-user-concurrency-handoff.md)
 - [文档处理并发与 Python 进程复用交接](../shared/architecture/document-processing-concurrency-review.md)
 - [文档文本块浏览接口](architecture/document-chunk-browsing.md)

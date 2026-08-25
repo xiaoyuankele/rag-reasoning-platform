@@ -239,6 +239,11 @@ Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义�
 
 `POST /documents/:id/embeddings` 已实现独立向量任务的手动入队，并在 P6/B5.1 接入 Session 与 OwnerScope。当前用户自己的文档可以保存向量化意图：文本已经 ready 时进入 `queued`，尚未完成解析时进入 `waiting_document`；同一文档已有活动任务时幂等返回原任务。非法 ID 返回 `400`，文档不存在或属于其他用户统一返回 `404`。任务会冻结 `model_name` 和 `dimensions`，第一版数据库固定使用 1536 维向量；DashScope 默认模型为 `text-embedding-v4`，OpenAI 默认模型为 `text-embedding-3-small`。入队端默认限制每用户 100、全局 500 条活动任务，并通过 PostgreSQL 事务级 advisory lock 原子执行容量检查与创建；用户满额返回 `429`，系统满额返回 `503`。当 `EMBEDDING_WORKER_ENABLED=true` 时，后台固定大小 Worker Pool 会按文件并行、按文件内部批次顺序调用当前配置的远程 API，并通过 PostgreSQL 事务原子保存一份文档的全部 chunk 向量与任务成功状态。并发数由 `EMBEDDING_WORKER_CONCURRENCY` 控制，默认 1 可安全降级，允许 1～4；PostgreSQL `FOR UPDATE SKIP LOCKED` 保证并发 Worker 不会领取同一任务。向量任务也采用独立的 Owner 公平调度：多用户竞争时默认每个 Owner 先获得 1 个 processing 槽位，无其他用户等待时最多借用到 2 个；到期 queued 任务真正等待超过 2 分钟后进入防饥饿优先级，重试任务从 `next_attempt_at` 开始计算等待。远程调用容量采用“分类隔离 + 全局保险”：后台 Worker 默认最多占 2 个槽位，语义检索与问答内部检索共用另外 2 个在线槽位，所有入口合计不超过 4。在线请求等待 2 秒仍无槽位时返回稳定 `503 embedding_provider_capacity_exhausted`，后台任务则继续等待至任务取消或服务关闭，因此后台任务堆积不会把在线语义检索完全饿死。临时错误按指数退避重新排队，鉴权、参数、余额或额度耗尽等永久错误进入 `failed`，正常 shutdown 遗留的 `processing` 任务会在下次单实例启动时恢复为 `queued`。Worker 默认关闭，不会产生远程调用或模型费用。
 
+`RAG_CACHE_ENABLED=true` 时，语义检索会先复用 Owner 隔离的 Redis 查询向量，问答会按 PostgreSQL
+`corpus_revision` 复用同一语料版本下的成功答案。缓存命中仍执行鉴权；Redis 故障会自动回源，不影响正确性。
+文档删除、重新解析开始和新向量原子落库会在同一数据库事务内推进语料版本，使旧答案自然失效。完整设计见
+[Redis 查询向量与问答结果缓存](docs/backend/architecture/redis-rag-cache.md)。
+
 `GET /embedding-jobs/:id` 已提供受 Session 保护的向量任务状态查询。接口通过任务 JOIN 所属文档并按 OwnerScope 过滤，任务不存在或属于其他用户统一返回 `404`；成功时返回任务所属文档、冻结的模型与维度、当前状态、尝试次数、下次重试时间、错误信息、Token 用量和各阶段时间戳。前端可以在创建任务获得 ID 后轮询该接口，而不需要读取数据库或依赖后端日志。
 
 `POST /embedding-jobs/latest` 已提供按最多 100 个文档 ID 批量发现最新向量任务的能力，用于页面刷新、换浏览器或换设备后恢复服务端状态，避免逐文档产生 N+1 查询。Application 对 ID 去重并保持首次出现顺序，PostgreSQL 通过 OwnerScope JOIN 和 `(document_id, id DESC)` 索引一次选出各文档最新任务；没有任务、不存在和属于其他用户统一返回 `job: null`。该接口只表达最新任务快照，不能在尚无 document revision 契约时把历史成功任务冒充为当前版本向量就绪。
@@ -374,6 +379,20 @@ Go 后端当前支持以下环境变量：
 | `DB_PASSWORD` | 无 | 本机私有密码，必须在 `.env` 中设置 |
 | `DB_SSLMODE` | `disable` | 本地开发时的 PostgreSQL SSL 模式 |
 | `DB_MAX_CONNECTIONS` | `10` | 单个 Go 后端实例的 PostgreSQL 连接池上限；多实例时应按实例数合计 |
+| `RAG_CACHE_ENABLED` | `false` | 是否启用 Redis 查询向量和问答结果 Cache-Aside；默认关闭 |
+| `CACHE_NAMESPACE` | `rag` | Redis Key 的应用命名空间 |
+| `REDIS_ADDRESS` | `127.0.0.1:6380` | Go 后端直接运行时连接的 Redis 地址；Compose 内自动使用 `redis:6379` |
+| `REDIS_HOST_PORT` | `6380` | Compose Redis 映射到宿主机的端口 |
+| `REDIS_PASSWORD` | 无 | 可选 Redis 密码；生产部署应由密钥管理注入 |
+| `REDIS_DATABASE` | `0` | Redis 逻辑数据库编号，允许 0～15 |
+| `CACHE_HMAC_SECRET` | 无 | 缓存 Key 的问题摘要密钥；启用缓存时必填且至少 32 字节 |
+| `CACHE_OPERATION_TIMEOUT` | `250ms` | 单次 Redis 读写、Ping 或租约操作的最长时间 |
+| `QUERY_VECTOR_CACHE_TTL` | `12h` | 查询向量缓存有效期 |
+| `QUERY_VECTOR_CACHE_LOCK_TTL` | `30s` | 查询向量填充租约有效期 |
+| `QUERY_VECTOR_CACHE_WAIT_TIMEOUT` | `2s` | 其他实例正在填充相同向量时的最长等待时间 |
+| `ANSWER_RESULT_CACHE_TTL` | `15m` | 带来源成功答案缓存有效期 |
+| `ANSWER_RESULT_CACHE_LOCK_TTL` | `90s` | 问答结果填充租约有效期 |
+| `ANSWER_RESULT_CACHE_WAIT_TIMEOUT` | `10s` | 其他实例正在生成相同答案时的最长等待时间 |
 | `VERIFICATION_HMAC_SECRET` | 无 | 验证码 HMAC 服务端密钥，至少 32 字节，必须保存在本机 `.env` |
 | `VERIFICATION_SENDER` | `fake` | 验证码发送实现；`fake` 仅供自动化测试，`mailpit` 用于本地人工邮件联调 |
 | `VERIFICATION_SMTP_HOST` | `127.0.0.1` | 直接运行 Go 后端时连接 Mailpit 的 SMTP 主机 |

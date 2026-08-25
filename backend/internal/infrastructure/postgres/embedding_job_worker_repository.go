@@ -313,7 +313,7 @@ func (r *EmbeddingJobRepository) MarkEmbeddingJobSucceeded(
 	}()
 
 	const lockQuery = `
-		SELECT j.document_id, j.dimensions
+		SELECT j.document_id, j.dimensions, d.owner_user_id
 		FROM embedding_jobs AS j
 		INNER JOIN documents AS d ON d.id = j.document_id
 		WHERE j.id = $1
@@ -324,9 +324,11 @@ func (r *EmbeddingJobRepository) MarkEmbeddingJobSucceeded(
 
 	var documentID int64
 	var dimensions int
+	var ownerUserID int64
 	err = transaction.QueryRow(ctx, lockQuery, jobID).Scan(
 		&documentID,
 		&dimensions,
+		&ownerUserID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return embeddingdomain.ErrJobNotProcessing
@@ -444,6 +446,15 @@ func (r *EmbeddingJobRepository) MarkEmbeddingJobSucceeded(
 	}
 	if commandTag.RowsAffected() != 1 {
 		return embeddingdomain.ErrJobNotProcessing
+	}
+
+	// 新向量和任务 succeeded 一起成为正式可检索语料；版本递增也必须
+	// 位于同一事务，否则缓存可能看见新旧状态不一致。
+	if err := bumpOwnerCorpusRevision(ctx, transaction, ownerUserID); err != nil {
+		return fmt.Errorf(
+			"invalidate answer cache after embedding success: %w",
+			err,
+		)
 	}
 
 	if err := transaction.Commit(ctx); err != nil {

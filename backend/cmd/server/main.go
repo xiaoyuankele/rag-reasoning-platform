@@ -22,6 +22,7 @@ import (
 	"rag-reasoning-platform/backend/internal/config"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
+	infrastructure "rag-reasoning-platform/backend/internal/infrastructure"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
 	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
 	passwordinfrastructure "rag-reasoning-platform/backend/internal/infrastructure/password"
@@ -156,6 +157,60 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("load auth configuration: %w", err)
 	}
 
+	cacheConfig, err := config.LoadCache()
+	if err != nil {
+		return fmt.Errorf("load RAG cache configuration: %w", err)
+	}
+
+	// Redis 只保存可丢弃的加速副本。即使启动时 Ping 失败，服务仍会启动，
+	// 后续每次缓存读写失败都由 Application 自动回源远程模型。
+	var ragCache *infrastructure.RedisCache
+	var cacheDigester *infrastructure.HMACSHA256Digester
+	if cacheConfig.Enabled {
+		ragCache, err = infrastructure.NewRedisCache(
+			infrastructure.RedisCacheOptions{
+				Address:          cacheConfig.RedisAddress,
+				Password:         cacheConfig.RedisPassword,
+				Database:         cacheConfig.RedisDatabase,
+				OperationTimeout: cacheConfig.OperationTimeout,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create Redis RAG cache: %w", err)
+		}
+		defer func() {
+			if closeErr := ragCache.Close(); closeErr != nil {
+				logger.Warn(
+					"Close Redis cache",
+					"event", "redis_cache_close_failed",
+					"error", closeErr,
+				)
+			}
+		}()
+
+		cacheDigester, err = infrastructure.NewHMACSHA256Digester(
+			[]byte(cacheConfig.HMACSecret),
+		)
+		if err != nil {
+			return fmt.Errorf("create cache question digester: %w", err)
+		}
+		if pingErr := ragCache.Ping(ctx); pingErr != nil {
+			logger.Warn(
+				"Redis cache unavailable during startup; requests will use provider fallback",
+				"event", "redis_cache_startup_unavailable",
+				"error", pingErr,
+			)
+		} else {
+			logger.Info(
+				"Redis RAG cache configured",
+				"event", "redis_cache_configured",
+				"namespace", cacheConfig.Namespace,
+				"query_vector_ttl_ms", cacheConfig.QueryVectorTTL.Milliseconds(),
+				"answer_result_ttl_ms", cacheConfig.AnswerResultTTL.Milliseconds(),
+			)
+		}
+	}
+
 	// ConnectionString 包含密码，只传给数据库层，不写入日志。
 	databasePool, err := database.Open(
 		ctx,
@@ -228,6 +283,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	)
 	chunkRepository := postgres.NewChunkRepository(databasePool)
 	scopedChunkRepository := postgres.NewScopedChunkRepository(databasePool)
+	corpusRevisionRepository := postgres.NewCorpusRevisionRepository(databasePool)
 	verificationChallengeRepository :=
 		postgres.NewVerificationChallengeRepository(databasePool)
 	authRegistrationRepository :=
@@ -534,13 +590,32 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// 因此“创建应用能力”和“是否暴露独立 HTTP 路由”必须分开判断。
 	var semanticSearchService *embeddingapplication.SemanticSearchService
 	if embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled {
-		semanticSearchService, err =
-			embeddingapplication.NewSemanticSearchService(
+		if cacheConfig.Enabled {
+			semanticSearchService, err =
+				embeddingapplication.NewSemanticSearchServiceWithQueryCache(
+					onlineEmbedder,
+					scopedChunkRepository,
+					embeddingConfig.ModelName,
+					embeddingConfig.Dimensions,
+					ragCache,
+					cacheDigester,
+					observability.NewQueryVectorCacheLogger(logger),
+					embeddingapplication.QueryVectorCacheConfig{
+						Namespace:   cacheConfig.Namespace,
+						Provider:    string(embeddingConfig.Provider),
+						TTL:         cacheConfig.QueryVectorTTL,
+						LockTTL:     cacheConfig.QueryVectorLockTTL,
+						WaitTimeout: cacheConfig.QueryVectorWaitTimeout,
+					},
+				)
+		} else {
+			semanticSearchService, err = embeddingapplication.NewSemanticSearchService(
 				onlineEmbedder,
 				scopedChunkRepository,
 				embeddingConfig.ModelName,
 				embeddingConfig.Dimensions,
 			)
+		}
 		if err != nil {
 			return fmt.Errorf("create semantic search service: %w", err)
 		}
@@ -548,7 +623,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// 第一版问答使用 DashScope 的 OpenAI 兼容生成接口。Generator 只在显式
 	// 启用 ANSWER_ENABLED 时创建，避免基础服务启动后意外产生生成费用。
-	var answerService *answerapplication.ConcurrentService
+	var answerService answerapplication.Answerer
 	if generationConfig.Enabled {
 		generator, err := newGenerationClient(generationConfig)
 		if err != nil {
@@ -567,7 +642,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			return fmt.Errorf("create answer service: %w", err)
 		}
 
-		answerService, err = answerapplication.NewConcurrentService(
+		concurrentAnswerService, err := answerapplication.NewConcurrentService(
 			baseAnswerService,
 			observability.NewAnswerAdmissionLogger(logger),
 			answerapplication.AnswerAdmissionLimits{
@@ -580,6 +655,35 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		)
 		if err != nil {
 			return fmt.Errorf("create answer concurrency service: %w", err)
+		}
+		answerService = concurrentAnswerService
+
+		// 缓存放在并发闸门外层：命中直接返回，未命中才占用生成槽位。
+		if cacheConfig.Enabled {
+			answerService, err = answerapplication.NewCachedService(
+				concurrentAnswerService,
+				corpusRevisionRepository,
+				ragCache,
+				cacheDigester,
+				observability.NewAnswerCacheLogger(logger),
+				answerapplication.AnswerCacheConfig{
+					Namespace:           cacheConfig.Namespace,
+					GenerationProvider:  "dashscope",
+					GenerationModel:     generationConfig.ModelName,
+					PromptVersion:       answerapplication.AnswerPromptVersion,
+					RetrievalVersion:    answerapplication.AnswerRetrievalVersion,
+					EmbeddingModel:      embeddingConfig.ModelName,
+					EmbeddingDimensions: embeddingConfig.Dimensions,
+					MaxOutputTokens:     generationConfig.MaxOutputTokens,
+					Temperature:         generationConfig.Temperature,
+					TTL:                 cacheConfig.AnswerResultTTL,
+					LockTTL:             cacheConfig.AnswerResultLockTTL,
+					WaitTimeout:         cacheConfig.AnswerResultWaitTimeout,
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("create answer result cache service: %w", err)
+			}
 		}
 
 		logger.Info(

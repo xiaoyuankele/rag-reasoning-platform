@@ -52,6 +52,7 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 	documentRepository := newOwnedDocumentFixture(t, ctx, pool)
 	chunkRepository := postgresrepository.NewChunkRepository(pool)
 	jobRepository := postgresrepository.NewEmbeddingJobRepository(pool)
+	revisionRepository := postgresrepository.NewCorpusRevisionRepository(pool)
 
 	t.Run("claims the earliest due job", func(t *testing.T) {
 		fixture := createEmbeddingWorkerFixture(
@@ -206,6 +207,13 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 			[]string{"first semantic chunk", "second semantic chunk"},
 		)
 		markEmbeddingJobProcessing(t, ctx, pool, fixture.job.ID)
+		revisionBefore, err := revisionRepository.GetCorpusRevision(
+			ctx,
+			documentRepository.scope,
+		)
+		if err != nil {
+			t.Fatalf("get corpus revision before embedding success: %v", err)
+		}
 
 		completion := embeddingdomain.JobCompletion{
 			Vectors: []embeddingdomain.ChunkVector{
@@ -231,6 +239,20 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 			embeddingdomain.JobStatusSucceeded,
 			2,
 		)
+		revisionAfter, err := revisionRepository.GetCorpusRevision(
+			ctx,
+			documentRepository.scope,
+		)
+		if err != nil {
+			t.Fatalf("get corpus revision after embedding success: %v", err)
+		}
+		if revisionAfter != revisionBefore+1 {
+			t.Fatalf(
+				"corpus revision after embedding success = %d, want %d",
+				revisionAfter,
+				revisionBefore+1,
+			)
+		}
 
 		// 再创建一次任务，故意让第二个向量维度错误。
 		// 新写入和旧向量删除必须全部回滚，上一批有效向量仍应保留。
@@ -277,6 +299,20 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 			embeddingdomain.JobStatusSucceeded,
 			2,
 		)
+		revisionAfterRollback, err := revisionRepository.GetCorpusRevision(
+			ctx,
+			documentRepository.scope,
+		)
+		if err != nil {
+			t.Fatalf("get corpus revision after failed replacement: %v", err)
+		}
+		if revisionAfterRollback != revisionAfter {
+			t.Fatalf(
+				"corpus revision after rolled-back replacement = %d, want %d",
+				revisionAfterRollback,
+				revisionAfter,
+			)
+		}
 	})
 
 	t.Run("permanent failure finalizes only a processing job", func(t *testing.T) {

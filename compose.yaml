@@ -34,6 +34,22 @@ services:
       DB_SSLMODE: ${DB_SSLMODE:-disable}
       DB_MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-10}
 
+      # Redis 只保存查询向量和问答结果的可丢弃副本。关闭缓存时业务链路
+      # 完全绕过 Redis；开启后 Redis 故障也会自动回源远程模型。
+      RAG_CACHE_ENABLED: ${RAG_CACHE_ENABLED:-false}
+      CACHE_NAMESPACE: ${CACHE_NAMESPACE:-rag}
+      REDIS_ADDRESS: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DATABASE: ${REDIS_DATABASE:-0}
+      CACHE_HMAC_SECRET: ${CACHE_HMAC_SECRET:-}
+      CACHE_OPERATION_TIMEOUT: ${CACHE_OPERATION_TIMEOUT:-250ms}
+      QUERY_VECTOR_CACHE_TTL: ${QUERY_VECTOR_CACHE_TTL:-12h}
+      QUERY_VECTOR_CACHE_LOCK_TTL: ${QUERY_VECTOR_CACHE_LOCK_TTL:-30s}
+      QUERY_VECTOR_CACHE_WAIT_TIMEOUT: ${QUERY_VECTOR_CACHE_WAIT_TIMEOUT:-2s}
+      ANSWER_RESULT_CACHE_TTL: ${ANSWER_RESULT_CACHE_TTL:-15m}
+      ANSWER_RESULT_CACHE_LOCK_TTL: ${ANSWER_RESULT_CACHE_LOCK_TTL:-90s}
+      ANSWER_RESULT_CACHE_WAIT_TIMEOUT: ${ANSWER_RESULT_CACHE_WAIT_TIMEOUT:-10s}
+
       # P6 验证码接口默认使用零费用 Fake Sender，但 HMAC 密钥仍必须显式配置。
       VERIFICATION_HMAC_SECRET: ${VERIFICATION_HMAC_SECRET:-}
       VERIFICATION_SENDER: ${VERIFICATION_SENDER:-fake}
@@ -181,6 +197,38 @@ services:
       - shared_buffers=64MB
       - -c
       - max_connections=20
+
+  redis:
+    # Redis 仅承担 Cache-Aside，不保存权限、任务或正式业务事实。
+    image: redis:7-alpine
+    container_name: rag_reasoning_redis
+
+    # 缓存可以随时重建，因此关闭 RDB/AOF；allkeys-lfu 在达到内存上限时
+    # 优先保留访问频率更高的查询，不影响 PostgreSQL 正式数据。
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - allkeys-lfu
+
+    ports:
+      # 避免与电脑上已有的 6379 Redis 冲突。
+      - "127.0.0.1:${REDIS_HOST_PORT:-6380}:6379"
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+    mem_limit: 160m
+    cpus: 0.5
 
   mailpit:
     # Mailpit 只在本地人工注册联调时启动；普通数据库和默认回归不依赖它。
