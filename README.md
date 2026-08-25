@@ -385,6 +385,8 @@ Go 后端当前支持以下环境变量：
 | `REDIS_HOST_PORT` | `6380` | Compose Redis 映射到宿主机的端口 |
 | `REDIS_PASSWORD` | 无 | 可选 Redis 密码；生产部署应由密钥管理注入 |
 | `REDIS_DATABASE` | `0` | Redis 逻辑数据库编号，允许 0～15 |
+| `REDIS_MAXMEMORY` | `128mb` | Compose Redis 数据内存上限；100 用户生产候选建议从 `256mb` 开始验证 |
+| `REDIS_CONTAINER_MEMORY_LIMIT` | `160m` | Compose Redis 容器总内存限制；使用 256 MiB 缓存时建议至少 `320m` |
 | `CACHE_HMAC_SECRET` | 无 | 缓存 Key 的问题摘要密钥；启用缓存时必填且至少 32 字节 |
 | `CACHE_OPERATION_TIMEOUT` | `250ms` | 单次 Redis 读写、Ping 或租约操作的最长时间 |
 | `QUERY_VECTOR_CACHE_TTL` | `12h` | 查询向量缓存有效期 |

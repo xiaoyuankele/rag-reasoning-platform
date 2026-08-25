@@ -32,6 +32,7 @@
 - [数据配套备份与恢复指南](deployment/data-backup-and-restore.md)
 - [容器优雅关闭与异常恢复](deployment/container-lifecycle-and-recovery.md)
 - [Embedding 与 Generation 调用成本基线](performance/model-call-cost-baseline.md)
+- [Redis RAG 缓存零费用性能画像](performance/redis-rag-cache-profile-2026-08-25.md)
 
 ## 质量评估入口
 

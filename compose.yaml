@@ -212,7 +212,7 @@ services:
       - --appendonly
       - "no"
       - --maxmemory
-      - 128mb
+      - ${REDIS_MAXMEMORY:-128mb}
       - --maxmemory-policy
       - allkeys-lfu
 
@@ -227,7 +227,7 @@ services:
       retries: 5
       start_period: 5s
 
-    mem_limit: 160m
+    mem_limit: ${REDIS_CONTAINER_MEMORY_LIMIT:-160m}
     cpus: 0.5
 
   mailpit:
