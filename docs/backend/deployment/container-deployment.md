@@ -2,28 +2,24 @@
 
 ## 1. 这一阶段解决什么问题
 
-P5.3.1 把已经能在开发机运行的后端封装成可重复构建的运行单元。当前 Go Worker 会按需启动
-Python 子进程处理 PDF，因此第一版不是“纯 Go 镜像”，而是在同一个后端镜像中放入：
+后端被封装成一个可重复构建的镜像，再通过 `APP_ROLE` 启动为不同进程。Document Worker 会按需启动
+Python 子进程处理 PDF，因此运行镜像不是“纯 Go 镜像”，而是同时包含：
 
 - 编译后的 Go HTTP 服务与后台 Worker；
 - Python 3.11.16；
 - 项目的 `rag_ai` 包、`pypdf` 和加密 PDF 所需依赖。
 
-PostgreSQL 继续作为独立 Compose 服务。该组合符合当前个人版的低复杂度边界；只有并发、扩缩容或
-故障隔离形成真实需求后，才考虑把 Python 拆成常驻 HTTP 服务。
+PostgreSQL 继续作为独立 Compose 服务。角色拆分不是微服务：所有进程仍共享同一个数据库契约、任务表和
+镜像版本，不增加内部 HTTP 调用。
 
 ```text
-宿主机 127.0.0.1:BACKEND_HOST_PORT
-                 │
-                 ▼
-backend 容器：Go API/Worker ──按需子进程──> Python rag_ai
-                 │
-                 │ Compose 内网 postgres:5432
-                 ▼
-PostgreSQL 容器：表、任务、chunks、vectors
-
-宿主机 ./storage <────绑定挂载────> backend:/app/storage
-Docker 数据卷   <────命名卷──────> postgres:/var/lib/postgresql/data
+浏览器 ──> backend(api) ───────────────┐
+                     │ 上传文件         │ PostgreSQL 任务/业务表
+                     ▼                  │
+宿主机 ./storage <──共享挂载──> document-worker ──> Python rag_ai
+                                        │
+embedding-worker(Profile) ──────────────┤
+answer-worker(Profile) ─────────────────┘
 ```
 
 ## 2. 构建和启动前准备
@@ -54,12 +50,20 @@ ANSWER_ENABLED=false
 ```powershell
 docker compose config --quiet
 docker compose build backend
-docker compose up -d backend
+docker compose up -d backend document-worker
 docker compose ps
 ```
 
-`docker compose up -d backend` 会自动启动它依赖的 PostgreSQL，并等待数据库健康后再启动后端。
-启动时后端会执行嵌入二进制的数据库迁移；迁移本身有版本、校验和、事务与 advisory lock 保护。
+基础启动不会创建远程 Worker，因此不会仅因为 Compose 启动而调用模型。确认密钥、费用和功能开关后，分别
+启用远程 Profile：
+
+```powershell
+docker compose --profile embedding up -d embedding-worker
+docker compose --profile answer up -d answer-worker
+```
+
+所有角色都会等待 PostgreSQL 健康后启动，并执行嵌入二进制的迁移；迁移通过 advisory lock 串行化，避免
+四个进程同时修改 schema。
 
 ## 4. 健康检查与排障
 
@@ -68,14 +72,19 @@ docker compose ps
 ```powershell
 curl.exe -i http://127.0.0.1:8080/health
 docker compose logs --tail 100 backend
+docker compose logs --tail 100 document-worker
 docker compose ps
 ```
 
 成功标准：
 
-- `rag_reasoning_postgres` 与 `rag_reasoning_backend` 都显示 `healthy`；
+- `rag_reasoning_postgres`、`rag_reasoning_backend` 和 `rag_reasoning_document_worker` 都显示 `healthy`；
 - HTTP 返回 `200 OK` 和 `{"status":"ok"}`；
+- Document Worker 日志包含 `role=document-worker`、`ready_file_enabled=true`；
 - 后端日志没有启动失败或数据库连接错误。
+
+API 使用 HTTP 健康检查。三个 Worker 不监听端口，在完成数据库迁移、任务恢复和 Worker Pool 初始化后写入
+`/tmp/rag-role-ready`；Compose 通过该文件判断就绪。不要给 Worker 配置假的 `/health`。
 
 如果本机 `8080` 已被占用，只改宿主机映射端口，不改容器端口：
 
@@ -104,7 +113,7 @@ Remove-Item Env:BACKEND_HOST_PORT
 日常只停止后端：
 
 ```powershell
-docker compose stop backend
+docker compose stop backend document-worker embedding-worker answer-worker
 ```
 
 需要停止数据库时：
@@ -117,13 +126,15 @@ docker compose stop postgres
 `docker compose down -v` 会连同 PostgreSQL 命名卷一起删除，除非已经确认不需要数据或完成可靠备份，
 否则不要执行。
 
-后端镜像显式使用 `SIGTERM`，Compose 使用 init 进程转发信号，并提供 30 秒停止宽限期。Go 会先停止 HTTP、
-再等待 Worker、最后关闭数据库连接池；异常退出遗留任务的恢复规则和可重复验收命令见
+后端镜像显式使用 `SIGTERM`，Compose 使用 init 进程转发信号，并提供 30 秒停止宽限期。API 会先停止 HTTP；
+Worker 会先删除就绪文件，再等待 goroutine，最后关闭数据库连接池。异常退出遗留任务的恢复规则见
 [容器优雅关闭与异常恢复](container-lifecycle-and-recovery.md)。
 
 ## 7. 资源与权限约束
 
-- 后端容器限制为 768 MiB 内存和 1.5 CPU；PostgreSQL 限制为 256 MiB 和 1 CPU；
+- API、Document、Embedding、Answer 默认分别限制为 768/1024/512/512 MiB，CPU 分别为 2/2/1/1；
+- 四类角色默认数据库连接池分别为 5/3/3/5，合计 16，不能只看单进程配置；
+- PostgreSQL 本地默认限制为 256 MiB、1 CPU 和 20 个连接；云端配置需要单独测量；
 - 后端以固定 UID `10001` 的 `appuser` 运行，不使用 root；
 - Windows Docker Desktop 的目录绑定通常可以直接写入；Linux 部署时必须让 UID `10001` 对宿主机
   `storage/` 目录拥有读写权限；
@@ -143,3 +154,12 @@ docker compose stop postgres
 - 验收结束只移除后端测试容器，PostgreSQL 容器与数据卷未删除。
 - `SIGTERM` 正常停止耗时 443 ms、退出码为 `0`；`SIGKILL` 异常停止退出码为 `137`；
 - 异常重启后，文档任务由 `processing` 恢复为 `failed`，Embedding 任务由 `processing` 恢复为 `queued`。
+
+## 9. 部署角色验收（2026-08-29）
+
+- 同一临时镜像依次以 `all/api/document-worker/embedding-worker/answer-worker` 启动；
+- API 没有创建 Python Pool 或后台 Worker；三个专用 Worker 均未监听 HTTP；
+- 三个 Worker 在启动完成后写入就绪文件，SIGTERM 后删除；
+- 五种角色均以退出码 0 完成清理；
+- 空测试数据库保证验收没有调用真实 Provider；
+- 默认 Compose 与全 Profile Compose 均通过 `docker compose config --quiet`。

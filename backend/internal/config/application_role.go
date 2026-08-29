@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -27,6 +28,11 @@ const (
 var (
 	// ErrUnsupportedApplicationRole 表示 APP_ROLE 不是当前契约允许的角色。
 	ErrUnsupportedApplicationRole = errors.New("unsupported application role")
+
+	// ErrApplicationReadyFileMustBeAbsolute 表示 Worker 就绪文件使用了相对路径。
+	ErrApplicationReadyFileMustBeAbsolute = errors.New(
+		"application ready file path must be absolute",
+	)
 )
 
 // ApplicationRole 是同一后端二进制在本次启动中承担的部署角色。
@@ -60,4 +66,23 @@ func LoadApplicationRole() (ApplicationRole, error) {
 			rawValue,
 		)
 	}
+}
+
+// LoadApplicationReadyFile 读取可选的 Worker 就绪文件绝对路径。
+//
+// 空值表示不创建文件，适合本机直接运行。容器内的专用 Worker 会设置该值，
+// 让健康检查在组合根完成数据库、恢复和 Worker 初始化后才变为 healthy。
+func LoadApplicationReadyFile() (string, error) {
+	readyFile := strings.TrimSpace(os.Getenv("APP_READY_FILE"))
+	if readyFile == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(readyFile) {
+		return "", fmt.Errorf(
+			"%w: APP_READY_FILE=%q",
+			ErrApplicationReadyFileMustBeAbsolute,
+			readyFile,
+		)
+	}
+	return filepath.Clean(readyFile), nil
 }

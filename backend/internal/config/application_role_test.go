@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 )
 
@@ -14,6 +15,46 @@ func TestLoadApplicationRoleUsesAllByDefault(t *testing.T) {
 	}
 	if role != ApplicationRoleAll {
 		t.Fatalf("LoadApplicationRole() = %q, want %q", role, ApplicationRoleAll)
+	}
+}
+
+func TestLoadApplicationReadyFileUsesEmptyValueByDefault(t *testing.T) {
+	t.Setenv("APP_READY_FILE", "")
+
+	readyFile, err := LoadApplicationReadyFile()
+	if err != nil {
+		t.Fatalf("LoadApplicationReadyFile() error = %v, want nil", err)
+	}
+	if readyFile != "" {
+		t.Fatalf("LoadApplicationReadyFile() = %q, want empty value", readyFile)
+	}
+}
+
+func TestLoadApplicationReadyFileAcceptsAbsolutePath(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "worker.ready")
+	t.Setenv("APP_READY_FILE", want)
+
+	readyFile, err := LoadApplicationReadyFile()
+	if err != nil {
+		t.Fatalf("LoadApplicationReadyFile() error = %v, want nil", err)
+	}
+	if readyFile != filepath.Clean(want) {
+		t.Fatalf("LoadApplicationReadyFile() = %q, want %q", readyFile, want)
+	}
+}
+
+func TestLoadApplicationReadyFileRejectsRelativePath(t *testing.T) {
+	t.Setenv("APP_READY_FILE", "tmp/worker.ready")
+
+	readyFile, err := LoadApplicationReadyFile()
+	if !errors.Is(err, ErrApplicationReadyFileMustBeAbsolute) {
+		t.Fatalf(
+			"LoadApplicationReadyFile() error = %v, want ErrApplicationReadyFileMustBeAbsolute",
+			err,
+		)
+	}
+	if readyFile != "" {
+		t.Fatalf("LoadApplicationReadyFile() = %q, want empty value", readyFile)
 	}
 }
 

@@ -377,6 +377,7 @@ Go 后端当前支持以下环境变量：
 | --- | --- | --- |
 | `APP_PORT` | `8080` | Go HTTP 服务监听端口，有效范围为 1 到 65535 |
 | `APP_ROLE` | `all` | 后端部署角色，可选 `all`、`api`、`document-worker`、`embedding-worker`、`answer-worker` |
+| `APP_READY_FILE` | 空 | 专用 Worker 的可选就绪文件绝对路径；Compose 自动设置，本机直接运行通常留空 |
 | `LOG_LEVEL` | `info` | 最低日志级别，可选 `debug`、`info`、`warn`、`error` |
 | `LOG_FORMAT` | `json` | 日志输出格式，可选机器友好的 `json` 或终端友好的 `text`；成本汇总必须使用 `json` |
 | `DB_HOST` | `localhost` | Go 连接 PostgreSQL 时使用的主机 |
@@ -386,6 +387,10 @@ Go 后端当前支持以下环境变量：
 | `DB_PASSWORD` | 无 | 本机私有密码，必须在 `.env` 中设置 |
 | `DB_SSLMODE` | `disable` | 本地开发时的 PostgreSQL SSL 模式 |
 | `DB_MAX_CONNECTIONS` | `10` | 单个 Go 后端实例的 PostgreSQL 连接池上限；多实例时应按实例数合计 |
+| `API_DB_MAX_CONNECTIONS` | `5` | Compose API 角色连接池上限 |
+| `DOCUMENT_WORKER_DB_MAX_CONNECTIONS` | `3` | Compose 文档 Worker 连接池上限 |
+| `EMBEDDING_WORKER_DB_MAX_CONNECTIONS` | `3` | Compose 向量 Worker 连接池上限 |
+| `ANSWER_WORKER_DB_MAX_CONNECTIONS` | `5` | Compose 异步问答 Worker 连接池上限 |
 | `RAG_CACHE_ENABLED` | `false` | 是否启用 Redis 查询向量和问答结果 Cache-Aside；默认关闭 |
 | `CACHE_NAMESPACE` | `rag` | Redis Key 的应用命名空间 |
 | `REDIS_ADDRESS` | `127.0.0.1:6380` | Go 后端直接运行时连接的 Redis 地址；Compose 内自动使用 `redis:6379` |
@@ -565,18 +570,28 @@ docker compose stop postgres
 
 `docker compose stop postgres` 只停止容器，不会删除数据卷中的数据。
 
-从项目根目录启动完整后端容器：
+从项目根目录启动零远程费用的基础后端：
 
 ```powershell
 docker compose build backend
-docker compose up -d backend
+docker compose up -d backend document-worker
 docker compose ps
 curl.exe -i http://127.0.0.1:8080/health
-docker compose stop backend
+docker compose stop backend document-worker
 ```
 
-`docker compose up -d backend` 会按依赖关系同时启动 PostgreSQL。容器内后端始终监听 `8080`，
-本机映射端口由 `BACKEND_HOST_PORT` 控制。不要在日常停止时执行 `docker compose down -v`，因为
+`backend` 只运行 HTTP API，`document-worker` 独立运行 Python 文档处理；二者挂载相同的
+`STORAGE_HOST_PATH`。命令会按依赖关系同时启动 PostgreSQL。容器内 API 始终监听 `8080`，本机映射端口由
+`BACKEND_HOST_PORT` 控制。
+
+启用远程能力并确认 API Key、费用和配置后，再显式启动对应 Profile：
+
+```powershell
+docker compose --profile embedding up -d embedding-worker
+docker compose --profile answer up -d answer-worker
+```
+
+不要在日常停止时执行 `docker compose down -v`，因为
 `-v` 会删除 PostgreSQL 数据卷；完整配置、Linux 文件权限和恢复边界见
 [后端容器部署指南](docs/backend/deployment/container-deployment.md)。
 

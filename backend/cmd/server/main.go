@@ -1077,11 +1077,30 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// Worker-only 角色没有 HTTP 监听端口。完成组装后只等待进程退出信号，
 	// 实际任务由上面的后台循环从 PostgreSQL 队列领取。
 	if !rolePlan.serveHTTP {
+		cleanupReadyFile, err := writeApplicationReadyFile(
+			appConfig.ReadyFile,
+			appConfig.Role,
+		)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := cleanupReadyFile(); err != nil {
+				logger.Warn(
+					"Remove application ready file",
+					"event", "application_ready_file_remove_failed",
+					"role", appConfig.Role,
+					"error", err,
+				)
+			}
+		}()
+
 		logger.Info(
 			"Application started",
 			"event", "application_started",
 			"role", appConfig.Role,
 			"http_enabled", false,
+			"ready_file_enabled", appConfig.ReadyFile != "",
 		)
 		<-ctx.Done()
 		logger.Info(

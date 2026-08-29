@@ -75,11 +75,26 @@ Answer Job Worker    按开关 -        -          -         必须启用
 本阶段只证明单机角色隔离，尚未证明可以任意扩容。Embedding Provider Gate、Answer 并发闸门和上传闸门
 目前仍是进程内状态；同时启动多个同类角色会把真实总并发按进程数放大。
 
-## 4. 第三阶段：同机部署清单与角色探针
+## 4. 第三阶段：同机部署清单与角色探针（已完成）
 
-下一阶段将在 Compose 中显式声明一个 API 和每类一个 Worker，为 Worker 增加不依赖 HTTP 的内部就绪依据，
-并分别设置资源限制。所有角色继续使用同一镜像、同一 PostgreSQL 和同一宿主机存储挂载。Document Worker
-与 API 必须看到完全相同的 `storage/`，否则 API 保存的文件无法被解析进程打开。
+Compose 已经显式声明一个 API 和三类 Worker，四个进程继续复用同一镜像：
+
+| Compose 服务 | 角色 | 默认启动 | 健康依据 |
+| --- | --- | --- | --- |
+| `backend` | `api` | 是 | `GET /health` |
+| `document-worker` | `document-worker` | 是 | `/tmp/rag-role-ready` |
+| `embedding-worker` | `embedding-worker` | `embedding` Profile | `/tmp/rag-role-ready` |
+| `answer-worker` | `answer-worker` | `answer` Profile | `/tmp/rag-role-ready` |
+
+Worker 在数据库迁移、异常任务恢复和 Worker Pool 初始化完成后才写入 `APP_READY_FILE`；退出时先删除该文件，
+再等待 goroutine 清理。这个文件是部署就绪信号，不是任务状态或业务事实。
+
+API 与 Document Worker 挂载完全相同的 `STORAGE_HOST_PATH`。Embedding/Answer Worker 不挂载原始文件，也不
+接收 Python、SMTP 等无关配置或密钥。远程 Worker 使用 Profile，避免普通 `docker compose up` 意外产生
+模型费用。
+
+本地 PostgreSQL `max_connections=20` 时，四类角色默认连接池分别为 5、3、3、5，总计 16；资源上限也按
+角色单独配置，不再把 Python 内存和 HTTP 内存混成一个容器预算。
 
 ## 5. 多实例前置条件
 
@@ -104,7 +119,9 @@ Answer Job Worker    按开关 -        -          -         必须启用
 - 每个专用角色只启用能力矩阵内的组件；
 - 专用远程 Worker 缺少功能开关时 fail-fast，不启动空壳进程；
 - Worker-only 角色不创建 HTTP Server，收到退出信号后等待后台循环结束；
-- Compose 与 `.env.example` 默认继续使用 `all`；
+- 本机直接运行默认继续使用 `all`，Compose 默认拆为 `api` 与 `document-worker`；
+- Worker 就绪文件必须使用绝对路径，并在退出时清理；
+- 远程 Worker 由显式 Profile 控制，默认不会启动；
 - HTTP、数据库和前端契约均未改变。
 
 本地隔离验收使用同一个临时镜像和空 pgvector/PostgreSQL，依次启动五种角色并发送 SIGTERM；五个进程均以

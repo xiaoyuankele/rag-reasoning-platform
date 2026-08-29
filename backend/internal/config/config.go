@@ -16,10 +16,11 @@ const (
 	maxPort = 65535
 )
 
-// Config 保存应用程序监听端口和本次启动的部署角色。
+// Config 保存监听端口、部署角色和可选的 Worker 就绪文件。
 type Config struct {
-	Port int
-	Role ApplicationRole
+	Port      int
+	Role      ApplicationRole
+	ReadyFile string
 }
 
 // Load 从操作系统环境变量中读取并校验配置。
@@ -29,14 +30,19 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	readyFile, err := LoadApplicationReadyFile()
+	if err != nil {
+		return Config{}, err
+	}
 
 	// os.Getenv 读取 APP_PORT；变量不存在时返回空字符串。
 	portValue := os.Getenv("APP_PORT")
 
 	if portValue == "" {
 		return Config{
-			Port: defaultPort,
-			Role: role,
+			Port:      defaultPort,
+			Role:      role,
+			ReadyFile: readyFile,
 		}, nil
 	}
 
@@ -60,8 +66,9 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		Port: port,
-		Role: role,
+		Port:      port,
+		Role:      role,
+		ReadyFile: readyFile,
 	}, nil
 }
 

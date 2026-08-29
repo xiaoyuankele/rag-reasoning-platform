@@ -143,6 +143,7 @@ $reportPath = Join-Path $ReportDirectory "backend-default-$timestamp.json"
 # 同时保存调用者原来的进程环境，脚本结束后原样恢复。
 $isolatedEnvironment = @(
     "APP_ROLE",
+    "APP_READY_FILE",
     "RUN_DATABASE_TESTS",
     "RUN_PYTHON_TESTS",
     "EMBEDDING_WORKER_ENABLED",
@@ -171,9 +172,10 @@ try {
         throw "ai/pyproject.toml was not found under project root '$projectRoot'"
     }
 
-    # 默认回归固定使用兼容角色，避免调用者残留的 APP_ROLE 让测试或
-    # Compose 校验意外进入尚未放开的独立角色。
+    # 默认回归固定使用兼容角色，避免调用者残留的 APP_ROLE/就绪文件
+    # 把零费用测试意外变成专用 Worker 生命周期测试。
     $env:APP_ROLE = "all"
+    $env:APP_READY_FILE = ""
     $env:RUN_DATABASE_TESTS = "0"
     $env:RUN_PYTHON_TESTS = "0"
     $env:EMBEDDING_WORKER_ENABLED = "false"
@@ -274,13 +276,19 @@ try {
 
     Invoke-RegressionStep `
         -Name "compose_config" `
-        -Description "validate Docker Compose configuration without starting containers" `
+        -Description "validate default and remote-worker Docker Compose profiles without starting containers" `
         -Results $stepResults `
         -Action {
             Push-Location $projectRoot
             try {
                 & docker compose config --quiet
-                Assert-LastExitCode -Description "docker compose config"
+                Assert-LastExitCode -Description "default docker compose config"
+                & docker compose `
+                    --profile embedding `
+                    --profile answer `
+                    config `
+                    --quiet
+                Assert-LastExitCode -Description "full-profile docker compose config"
             }
             finally {
                 Pop-Location
