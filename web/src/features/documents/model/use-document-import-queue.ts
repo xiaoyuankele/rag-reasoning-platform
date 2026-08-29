@@ -2,9 +2,19 @@ import { computed, onScopeDispose, ref, shallowRef } from 'vue'
 import type { ResearchDocument } from '../../../entities/document/model/document'
 import type { ProcessingJob } from '../../../entities/processing-job/model/processing-job'
 import { ApiError, toApiError } from '../../../shared/api/api-error'
+import {
+  capacityFailureFromApiError,
+  type CapacityFailure,
+} from '../../../shared/api/capacity-error'
+import { useRetryCooldown } from '../../../shared/api/use-retry-cooldown'
 import { getDocument, uploadDocument } from '../api/document-api'
 import { preflightDocument } from '../api/document-preflight-api'
-import { getProcessingJob, queueDocumentProcessing } from '../api/processing-api'
+import {
+  cancelProcessingJob,
+  getLatestProcessingJobs,
+  getProcessingJob,
+  queueDocumentProcessing,
+} from '../api/processing-api'
 import {
   createFileHashWorkerClient,
   type FileHashClient,
@@ -21,6 +31,7 @@ export type DocumentImportState =
   | 'queued'
   | 'processing'
   | 'ready'
+  | 'canceled'
   | 'hash-failed'
   | 'check-failed'
   | 'upload-failed'
@@ -50,6 +61,7 @@ export interface DocumentImportSummary {
   ready: number
   failed: number
   duplicate: number
+  canceled: number
   stopped: number
 }
 
@@ -157,6 +169,9 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
   const items = shallowRef<DocumentImportItem[]>([])
   const selectionMessage = ref('')
   const isDispatching = ref(false)
+  const capacityFailure = shallowRef<CapacityFailure | null>(null)
+  const cancellingItemIds = shallowRef<ReadonlySet<string>>(new Set())
+  const retryCooldown = useRetryCooldown()
   const trackedImports = new Map<string, TrackedImport>()
   const activeRequestControllers = new Map<string, AbortController>()
   const trackingControllers = new Map<string, AbortController>()
@@ -173,6 +188,7 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
       .length,
     failed: items.value.filter((item) => failedStates.has(item.state)).length,
     duplicate: items.value.filter((item) => item.duplicate).length,
+    canceled: items.value.filter((item) => item.state === 'canceled').length,
     stopped: items.value.filter((item) => item.state === 'stopped').length,
   }))
 
@@ -198,6 +214,18 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
     items.value = items.value.map((item) =>
       item.localId === localId ? { ...item, ...changes } : item,
     )
+  }
+
+  function setCancelling(localId: string, value: boolean): void {
+    const nextIds = new Set(cancellingItemIds.value)
+    if (value) nextIds.add(localId)
+    else nextIds.delete(localId)
+    cancellingItemIds.value = nextIds
+  }
+
+  function activateCapacityFailure(failure: CapacityFailure): void {
+    capacityFailure.value = failure
+    retryCooldown.start(Math.max(retryCooldown.remainingSeconds.value, failure.retryAfterSeconds))
   }
 
   function addFiles(files: File[]): void {
@@ -249,6 +277,7 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
     const removableStates = new Set<DocumentImportState>([
       'ready',
       'duplicate',
+      'canceled',
       'hash-failed',
       'check-failed',
       'upload-failed',
@@ -308,14 +337,12 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
     return false
   }
 
-  async function pollKnownJob(
+  async function applyObservedJob(
     localId: string,
     trackedImport: TrackedImport,
-    controller: AbortController,
+    job: ProcessingJob,
+    signal: AbortSignal,
   ): Promise<void> {
-    const job = await getProcessingJob(trackedImport.jobId!, controller.signal)
-    if (controller.signal.aborted) return
-
     if (job.status === 'failed') {
       updateItem(localId, {
         job,
@@ -327,9 +354,20 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
       return
     }
 
+    if (job.status === 'canceled') {
+      updateItem(localId, {
+        job,
+        state: 'canceled',
+        errorMessage: '',
+        requestId: undefined,
+      })
+      trackedImports.delete(localId)
+      return
+    }
+
     if (job.status === 'succeeded') {
       updateItem(localId, { job, errorMessage: '', requestId: undefined })
-      await refreshTerminalDocument(localId, trackedImport, controller.signal)
+      await refreshTerminalDocument(localId, trackedImport, signal)
       return
     }
 
@@ -339,6 +377,28 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
       errorMessage: '',
       requestId: undefined,
     })
+  }
+
+  async function pollKnownJob(
+    localId: string,
+    trackedImport: TrackedImport,
+    controller: AbortController,
+  ): Promise<void> {
+    const job = await getProcessingJob(trackedImport.jobId!, controller.signal)
+    if (controller.signal.aborted) return
+    await applyObservedJob(localId, trackedImport, job, controller.signal)
+  }
+
+  async function recoverLatestJob(
+    localId: string,
+    trackedImport: TrackedImport,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const [item] = await getLatestProcessingJobs([trackedImport.documentId], signal)
+    if (signal.aborted || !item?.job) return false
+    trackedImport.jobId = item.job.id
+    await applyObservedJob(localId, trackedImport, item.job, signal)
+    return true
   }
 
   async function pollDocumentStatus(
@@ -488,17 +548,31 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
       }
 
       const apiError = toApiError(error)
-      if (apiError.status === 409) {
+      const capacity = capacityFailureFromApiError(apiError, 5)
+      if (capacity) {
+        activateCapacityFailure(capacity)
+        updateItem(localId, {
+          state: 'queue-failed',
+          errorMessage: `${capacity.title}。${capacity.message}`,
+          requestId: capacity.requestId,
+        })
+      } else if (apiError.status === 409) {
         updateItem(localId, {
           state: 'queued',
-          errorMessage: '已有解析任务，正在等待文档状态更新。',
+          errorMessage: '已有解析任务，正在恢复服务端最新状态。',
           requestId: apiError.requestId,
         })
-        trackImport(localId, {
+        const trackedImport: TrackedImport = {
           documentId: document.id,
           baselineUpdatedAt: document.updatedAt.getTime(),
           observedProcessing: document.status === 'processing',
-        })
+        }
+        trackImport(localId, trackedImport)
+        try {
+          await recoverLatestJob(localId, trackedImport, controller.signal)
+        } catch {
+          // 状态发现失败时保留原有文档轮询降级路径，不能把 409 伪装成任务失败。
+        }
       } else {
         updateItem(localId, {
           state: 'queue-failed',
@@ -574,7 +648,15 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
         updateItem(localId, { state: 'stopped', errorMessage: '上传已停止。' })
         return
       }
-      const presentation = presentUploadError(error)
+      const apiError = toApiError(error)
+      const capacity = capacityFailureFromApiError(apiError, 2)
+      if (capacity) activateCapacityFailure(capacity)
+      const presentation = capacity
+        ? {
+            message: `${capacity.title}。${capacity.message}`,
+            requestId: capacity.requestId,
+          }
+        : presentUploadError(error)
       updateItem(localId, {
         state: 'upload-failed',
         errorMessage: presentation.message,
@@ -695,6 +777,57 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
     }
   }
 
+  /** 取消批次中仍在排队的服务端解析任务，不影响其他文件。 */
+  async function cancelItem(localId: string): Promise<void> {
+    const currentItem = findItem(localId)
+    const currentJob = currentItem?.job
+    if (!currentItem || !currentJob?.cancelable || cancellingItemIds.value.has(localId)) return
+
+    trackingControllers.get(localId)?.abort()
+    const controller = new AbortController()
+    activeRequestControllers.set(localId, controller)
+    setCancelling(localId, true)
+    updateItem(localId, { errorMessage: '', requestId: undefined })
+    const trackedImport = trackedImports.get(localId) ?? {
+      documentId: currentJob.documentId,
+      jobId: currentJob.id,
+      baselineUpdatedAt: currentItem.document?.updatedAt.getTime() ?? Date.now(),
+      observedProcessing: false,
+    }
+    trackedImports.set(localId, trackedImport)
+
+    try {
+      const canceledJob = await cancelProcessingJob(currentJob.id, controller.signal)
+      if (controller.signal.aborted) return
+      await applyObservedJob(localId, trackedImport, canceledJob, controller.signal)
+    } catch (error) {
+      if (controller.signal.aborted) return
+      const apiError = toApiError(error)
+      if (apiError.status === 409) {
+        try {
+          const refreshedJob = await getProcessingJob(currentJob.id, controller.signal)
+          if (controller.signal.aborted) return
+          await applyObservedJob(localId, trackedImport, refreshedJob, controller.signal)
+        } catch (refreshError) {
+          if (controller.signal.aborted) return
+          const refreshApiError = toApiError(refreshError)
+          updateItem(localId, {
+            errorMessage: '任务状态已经变化，暂时无法确认最新状态。',
+            requestId: refreshApiError.requestId ?? apiError.requestId,
+          })
+        }
+      } else {
+        updateItem(localId, { errorMessage: apiError.message, requestId: apiError.requestId })
+      }
+    } finally {
+      if (activeRequestControllers.get(localId) === controller) {
+        activeRequestControllers.delete(localId)
+      }
+      setCancelling(localId, false)
+      ensureTrackingPoll()
+    }
+  }
+
   async function uploadWorker(): Promise<void> {
     while (!stopRequested && !disposed) {
       const nextItem = items.value.find((item) => item.state === 'waiting')
@@ -728,7 +861,9 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
   }
 
   async function retryFailed(): Promise<void> {
-    if (isDispatching.value) return
+    if (isDispatching.value || retryCooldown.isCoolingDown.value) return
+    capacityFailure.value = null
+    retryCooldown.reset()
     items.value = items.value.map((item) =>
       failedStates.has(item.state)
         ? {
@@ -779,16 +914,21 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
 
   return {
     addFiles,
+    cancelItem,
+    cancellingItemIds,
+    capacityFailure,
     canStart,
     canStop,
     clearFinished,
     hasRetryableItems,
     hasStoppedItems,
     isDispatching,
+    isCoolingDown: retryCooldown.isCoolingDown,
     items,
     removeItem,
     resumeStopped,
     retryFailed,
+    retryAfterSeconds: retryCooldown.remainingSeconds,
     selectionMessage,
     start,
     stopRemaining,

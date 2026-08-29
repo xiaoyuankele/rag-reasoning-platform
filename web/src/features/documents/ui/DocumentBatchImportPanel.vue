@@ -11,16 +11,21 @@ const emit = defineEmits<{
 const hasStarted = ref(false)
 const {
   addFiles,
+  cancelItem,
+  cancellingItemIds,
   canStart,
   canStop,
+  capacityFailure,
   clearFinished,
   hasRetryableItems,
   hasStoppedItems,
   isDispatching,
+  isCoolingDown,
   items,
   removeItem,
   resumeStopped,
   retryFailed,
+  retryAfterSeconds,
   selectionMessage,
   start,
   stopRemaining,
@@ -29,7 +34,7 @@ const {
 let changedTimer: ReturnType<typeof setTimeout> | undefined
 
 const settledCount = computed(
-  () => summary.value.ready + summary.value.failed + summary.value.stopped,
+  () => summary.value.ready + summary.value.failed + summary.value.canceled + summary.value.stopped,
 )
 const progressPercent = computed(() =>
   summary.value.total === 0 ? 0 : Math.round((settledCount.value / summary.value.total) * 100),
@@ -45,6 +50,7 @@ const stateLabels: Record<DocumentImportState, string> = {
   queued: '等待解析',
   processing: '正在解析',
   ready: '解析完成',
+  canceled: '解析任务已取消',
   'hash-failed': '本地检查失败',
   'check-failed': '重复预检失败',
   'upload-failed': '上传失败',
@@ -151,6 +157,13 @@ function hashProgressPercent(item: DocumentImportItem): number {
       {{ selectionMessage }}
     </p>
 
+    <div v-if="capacityFailure" class="capacity-notice" role="alert">
+      <strong>{{ capacityFailure.title }}</strong>
+      <span>{{ capacityFailure.message }}</span>
+      <span v-if="isCoolingDown">{{ retryAfterSeconds }} 秒后可手动重试失败项。</span>
+      <small v-if="capacityFailure.requestId">请求编号：{{ capacityFailure.requestId }}</small>
+    </div>
+
     <div v-if="items.length === 0" class="import-empty">
       选择 PDF、Markdown 或纯文本文件。单文件仍可使用同一入口导入。
     </div>
@@ -163,6 +176,7 @@ function hashProgressPercent(item: DocumentImportItem): number {
           <span>完成 {{ summary.ready }}</span>
           <span v-if="summary.duplicate">已有 {{ summary.duplicate }}</span>
           <span v-if="summary.failed">失败 {{ summary.failed }}</span>
+          <span v-if="summary.canceled">已取消 {{ summary.canceled }}</span>
           <span v-if="summary.active">进行中 {{ summary.active }}</span>
         </div>
         <div class="progress-track" aria-hidden="true">
@@ -181,9 +195,10 @@ function hashProgressPercent(item: DocumentImportItem): number {
             v-if="hasRetryableItems"
             class="text-button"
             type="button"
+            :disabled="isCoolingDown"
             @click="retryImportFailures"
           >
-            重试失败项
+            {{ isCoolingDown ? `${retryAfterSeconds} 秒后可重试` : '重试失败项' }}
           </button>
           <button
             v-if="hasStoppedItems"
@@ -242,6 +257,15 @@ function hashProgressPercent(item: DocumentImportItem): number {
               查看文档
             </button>
             <button
+              v-if="item.job?.cancelable"
+              class="text-button text-button--danger"
+              type="button"
+              :disabled="cancellingItemIds.has(item.localId)"
+              @click="cancelItem(item.localId)"
+            >
+              {{ cancellingItemIds.has(item.localId) ? '取消中…' : '取消排队' }}
+            </button>
+            <button
               v-if="!isActive(item)"
               class="icon-button"
               type="button"
@@ -255,7 +279,7 @@ function hashProgressPercent(item: DocumentImportItem): number {
       </ol>
 
       <p class="stop-help">
-        “停止剩余”会取消本地哈希和尚未完成的浏览器请求；后端已经创建的解析任务仍会继续运行。
+        “停止剩余”只停止本地哈希和尚未完成的浏览器请求；已排队的后端任务请使用对应的“取消排队”。
       </p>
     </template>
   </section>
@@ -379,6 +403,25 @@ function hashProgressPercent(item: DocumentImportItem): number {
   margin: 0;
 }
 
+.capacity-notice {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 10px;
+  background: var(--color-accent-soft);
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.capacity-notice strong {
+  color: var(--color-text-strong);
+}
+
+.capacity-notice small {
+  color: var(--color-text-subtle);
+}
+
 .import-empty {
   padding: 16px;
   border: 1px dashed var(--color-border-strong);
@@ -439,6 +482,11 @@ function hashProgressPercent(item: DocumentImportItem): number {
 
 .text-button--danger {
   color: var(--color-danger);
+}
+
+.text-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .import-list {
@@ -503,6 +551,11 @@ function hashProgressPercent(item: DocumentImportItem): number {
 .import-status--duplicate {
   background: var(--color-accent-soft);
   color: var(--color-accent);
+}
+
+.import-status--canceled {
+  background: var(--color-surface-hover);
+  color: var(--color-text-muted);
 }
 
 .import-status--upload-failed,

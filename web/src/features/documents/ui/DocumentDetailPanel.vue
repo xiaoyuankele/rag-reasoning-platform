@@ -47,6 +47,7 @@ const jobStatusLabels: Record<ProcessingJobStatus, string> = {
   processing: '正在解析',
   succeeded: '解析任务完成',
   failed: '解析任务失败',
+  canceled: '解析任务已取消',
 }
 
 const canGoPrevious = computed(() => (chunkPage.value?.pagination.page ?? 1) > 1)
@@ -54,6 +55,9 @@ const canGoNext = computed(
   () =>
     chunkPage.value !== null &&
     chunkPage.value.pagination.page < chunkPage.value.pagination.totalPages,
+)
+const processingIsEligible = computed(
+  () => document.value?.status === 'uploaded' || document.value?.status === 'failed',
 )
 
 watch(
@@ -164,35 +168,49 @@ async function handleDelete(): Promise<void> {
             <h3 id="processing-title">解析任务</h3>
           </div>
           <button
-            v-if="canStartProcessing"
+            v-if="processingIsEligible"
             class="primary-button"
             type="button"
+            :disabled="!canStartProcessing"
             @click="startProcessing"
           >
-            {{ document.status === 'failed' ? '重新解析' : '开始解析' }}
+            {{
+              processing.isCoolingDown.value
+                ? `${processing.retryAfterSeconds.value} 秒后可重试`
+                : document.status === 'failed'
+                  ? '重新解析'
+                  : '开始解析'
+            }}
           </button>
         </div>
 
-        <div v-if="processing.state.value === 'queueing'" class="inline-notice" role="status">
+        <div v-if="processing.state.value === 'discovering'" class="inline-notice" role="status">
+          正在恢复最近解析任务…
+        </div>
+        <div v-else-if="processing.state.value === 'queueing'" class="inline-notice" role="status">
           正在创建解析任务…
         </div>
-        <div v-else-if="processing.job.value" class="job-card" role="status">
-          <div>
-            <strong>{{ jobStatusLabels[processing.job.value.status] }}</strong>
-            <span>任务 #{{ processing.job.value.id }}</span>
-          </div>
-          <p v-if="processing.job.value.errorMessage">
-            {{ processing.job.value.errorMessage }}
+        <div
+          v-else-if="processing.state.value === 'capacity' && processing.capacityFailure.value"
+          class="inline-notice inline-notice--capacity"
+          role="alert"
+        >
+          <strong>{{ processing.capacityFailure.value.title }}</strong>
+          <p>{{ processing.capacityFailure.value.message }}</p>
+          <p v-if="processing.isCoolingDown.value">
+            {{ processing.retryAfterSeconds.value }} 秒后可手动重试。
           </p>
-          <small>尝试次数：{{ processing.job.value.attemptCount }}</small>
+          <small v-if="processing.requestId.value"
+            >请求编号：{{ processing.requestId.value }}</small
+          >
         </div>
         <div
           v-else-if="processing.state.value === 'conflict' || isRecoveringUnknownJob"
           class="inline-notice"
           role="status"
         >
-          <strong>已有任务或状态刚刚变化</strong>
-          <p>{{ processing.errorMessage.value }} 正在刷新文档状态。</p>
+          <strong>任务状态刚刚变化</strong>
+          <p>{{ processing.errorMessage.value }} 正在从后端恢复最新状态。</p>
         </div>
         <div
           v-else-if="processing.state.value === 'error'"
@@ -204,13 +222,34 @@ async function handleDelete(): Promise<void> {
             >请求编号：{{ processing.requestId.value }}</small
           >
           <button
-            v-if="processing.job.value"
+            v-if="processing.hasActiveJob.value"
             class="text-button"
             type="button"
             @click="processing.resumePolling"
           >
             继续轮询
           </button>
+        </div>
+        <div v-else-if="processing.job.value" class="job-card" role="status">
+          <div>
+            <div class="job-card__identity">
+              <strong>{{ jobStatusLabels[processing.job.value.status] }}</strong>
+              <span>任务 #{{ processing.job.value.id }}</span>
+            </div>
+            <button
+              v-if="processing.job.value.cancelable"
+              class="text-button text-button--danger"
+              type="button"
+              :disabled="processing.isCancelling.value"
+              @click="processing.cancel"
+            >
+              {{ processing.isCancelling.value ? '正在取消…' : '取消排队' }}
+            </button>
+          </div>
+          <p v-if="processing.job.value.errorMessage">
+            {{ processing.job.value.errorMessage }}
+          </p>
+          <small>尝试次数：{{ processing.job.value.attemptCount }}</small>
         </div>
         <p v-else-if="document.status === 'ready'" class="section-help">
           文档文本已经解析并切分，可在下方查看；这不代表已经完成向量化。
@@ -408,6 +447,11 @@ async function handleDelete(): Promise<void> {
   background: var(--color-danger-soft);
 }
 
+.inline-notice--capacity {
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-accent-soft);
+}
+
 .detail-state p,
 .inline-notice p {
   margin: 5px 0 0;
@@ -559,6 +603,11 @@ dd {
 
 .job-card strong {
   color: var(--color-text-strong);
+}
+
+.job-card__identity {
+  display: grid;
+  gap: 2px;
 }
 
 .job-card span,

@@ -5,7 +5,12 @@ import type { ProcessingJob } from '../../../entities/processing-job/model/proce
 import { ApiError } from '../../../shared/api/api-error'
 import { getDocument, uploadDocument } from '../api/document-api'
 import { preflightDocument } from '../api/document-preflight-api'
-import { getProcessingJob, queueDocumentProcessing } from '../api/processing-api'
+import {
+  cancelProcessingJob,
+  getLatestProcessingJobs,
+  getProcessingJob,
+  queueDocumentProcessing,
+} from '../api/processing-api'
 import { createFileHashWorkerClient } from './file-hash-worker-client'
 import { useDocumentImportQueue } from './use-document-import-queue'
 
@@ -19,6 +24,8 @@ vi.mock('../api/document-preflight-api', () => ({
 }))
 
 vi.mock('../api/processing-api', () => ({
+  cancelProcessingJob: vi.fn(),
+  getLatestProcessingJobs: vi.fn(),
   getProcessingJob: vi.fn(),
   queueDocumentProcessing: vi.fn(),
 }))
@@ -32,6 +39,8 @@ const uploadDocumentMock = vi.mocked(uploadDocument)
 const preflightDocumentMock = vi.mocked(preflightDocument)
 const getProcessingJobMock = vi.mocked(getProcessingJob)
 const queueDocumentProcessingMock = vi.mocked(queueDocumentProcessing)
+const getLatestProcessingJobsMock = vi.mocked(getLatestProcessingJobs)
+const cancelProcessingJobMock = vi.mocked(cancelProcessingJob)
 const createFileHashWorkerClientMock = vi.mocked(createFileHashWorkerClient)
 const hashFileMock = vi.fn()
 const disposeHashClientMock = vi.fn()
@@ -62,6 +71,7 @@ function createJob(id: number, documentId: number, status: ProcessingJob['status
     id,
     documentId,
     status,
+    cancelable: status === 'queued',
     attemptCount: status === 'queued' ? 0 : 1,
     errorMessage: null,
     createdAt: new Date('2026-08-18T02:00:01Z'),
@@ -81,6 +91,8 @@ beforeEach(() => {
   preflightDocumentMock.mockReset()
   getProcessingJobMock.mockReset()
   queueDocumentProcessingMock.mockReset()
+  getLatestProcessingJobsMock.mockReset()
+  cancelProcessingJobMock.mockReset()
   createFileHashWorkerClientMock.mockReset()
   hashFileMock.mockReset()
   disposeHashClientMock.mockReset()
@@ -91,6 +103,9 @@ beforeEach(() => {
     dispose: disposeHashClientMock,
   })
   preflightDocumentMock.mockResolvedValue({ exists: false, document: null })
+  getLatestProcessingJobsMock.mockImplementation(async (documentIds) =>
+    documentIds.map((documentId) => ({ documentId, job: null })),
+  )
 })
 
 afterEach(() => {
@@ -321,6 +336,70 @@ describe('useDocumentImportQueue', () => {
       errorMessage: '文件摘要或大小未被后端接受，已停止上传。',
       requestId: 'preflight-400-1',
     })
+    scope.stop()
+  })
+
+  it('允许逐项取消仍在 queued 的后端解析任务', async () => {
+    const uploadedDocument = createDocument(91, 'uploaded')
+    const queuedJob = createJob(191, 91, 'queued')
+    uploadDocumentMock.mockResolvedValue({ document: uploadedDocument, duplicate: false })
+    queueDocumentProcessingMock.mockResolvedValue(queuedJob)
+    cancelProcessingJobMock.mockResolvedValue({
+      ...queuedJob,
+      status: 'canceled',
+      cancelable: false,
+      completedAt: new Date('2026-08-18T02:00:04Z'),
+    })
+
+    const scope = effectScope()
+    const queue = scope.run(() => useDocumentImportQueue())
+    if (!queue) throw new Error('queue composable was not created')
+
+    queue.addFiles([pdf('cancel-me.pdf')])
+    await queue.start()
+    const localId = queue.items.value[0]!.localId
+    await queue.cancelItem(localId)
+
+    expect(cancelProcessingJobMock).toHaveBeenCalledWith(191, expect.any(AbortSignal))
+    expect(queue.items.value[0]).toMatchObject({ state: 'canceled', job: { cancelable: false } })
+    expect(queue.summary.value.canceled).toBe(1)
+    scope.stop()
+  })
+
+  it('上传容量拒绝保留文件并在 Retry-After 到期前阻止手动重试', async () => {
+    vi.useFakeTimers()
+    uploadDocumentMock.mockRejectedValueOnce(
+      new ApiError('server', 'busy', {
+        status: 503,
+        code: 'upload_capacity_exhausted',
+        retryAfterSeconds: 2,
+        requestId: 'upload-capacity-1',
+      }),
+    )
+
+    const scope = effectScope()
+    const queue = scope.run(() => useDocumentImportQueue())
+    if (!queue) throw new Error('queue composable was not created')
+
+    queue.addFiles([pdf('later.pdf')])
+    await queue.start()
+    expect(queue.items.value[0]).toMatchObject({
+      state: 'upload-failed',
+      requestId: 'upload-capacity-1',
+    })
+    expect(queue.retryAfterSeconds.value).toBe(2)
+
+    await queue.retryFailed()
+    expect(uploadDocumentMock).toHaveBeenCalledTimes(1)
+    uploadDocumentMock.mockResolvedValue({
+      document: createDocument(92, 'ready'),
+      duplicate: false,
+    })
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect(uploadDocumentMock).toHaveBeenCalledTimes(1)
+    await queue.retryFailed()
+    expect(uploadDocumentMock).toHaveBeenCalledTimes(2)
+    expect(queue.items.value[0]?.state).toBe('ready')
     scope.stop()
   })
 })

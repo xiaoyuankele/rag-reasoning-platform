@@ -1,7 +1,7 @@
 # F2-B 文档操作闭环
 
-> 状态：2026-08-18 已完成前端实现与自动化验证；用户已在真实前后端环境验证上传、解析和删除正常，
-> chunks 分页与刷新恢复的专项验收仍待执行。
+> 状态：2026-08-29 已接入解析任务最近状态恢复、queued 取消、canceled/cancelable 和容量冷却；
+> 自动化验证已完成，真实刷新/取消竞态与容量专项仍待执行。
 
 ## 1. 范围
 
@@ -22,13 +22,15 @@ F2-B 把 F2-A 的“列表与上传”扩展为一条可观察、可重试、可
 
 ## 2. 接口与前端输出
 
-| 接口 | 成功结果 | 前端职责 |
-| --- | --- | --- |
-| `GET /documents/:id` | `200` 文档详情 | 校验 DTO，显示元数据和文档状态 |
-| `POST /documents/:id/process` | `202` processing job | 保留 job ID，进入任务状态机 |
-| `GET /processing-jobs/:id` | `200` processing job | 轮询 queued / processing，终态停止 |
-| `GET /documents/:id/chunks` | `200` chunks 分页 | 只在 ready 时请求，保留原文顺序和页码 |
-| `DELETE /documents/:id` | `204` 无正文 | 二次确认后删除，关闭详情并刷新列表 |
+| 接口                               | 成功结果                 | 前端职责                                              |
+| ---------------------------------- | ------------------------ | ----------------------------------------------------- |
+| `GET /documents/:id`               | `200` 文档详情           | 校验 DTO，显示元数据和文档状态                        |
+| `POST /documents/:id/process`      | `202` processing job     | 保留 job ID，进入任务状态机                           |
+| `GET /processing-jobs/:id`         | `200` processing job     | 轮询 queued / processing，终态停止                    |
+| `POST /processing-jobs/latest`     | `200` 文档到最近任务快照 | 页面进入、刷新或 409 后恢复真实 job ID 与状态         |
+| `POST /processing-jobs/:id/cancel` | `200` canceled job       | 只对 cancelable queued 任务提供取消；冲突后重新取状态 |
+| `GET /documents/:id/chunks`        | `200` chunks 分页        | 只在 ready 时请求，保留原文顺序和页码                 |
+| `DELETE /documents/:id`            | `204` 无正文             | 二次确认后删除，关闭详情并刷新列表                    |
 
 所有响应先以 `unknown` 进入 API 层，经过字段、状态、时间和分页约束校验后才成为前端实体。
 API 层同时校验 job/document ID 和 chunk/document ID 的关联，防止界面消费错配响应。
@@ -67,20 +69,21 @@ failed   → processing（显式重试）
 
 ```text
 queued → processing → succeeded
-                    ↘ failed
+   │                ↘ failed
+   └→ canceled
 ```
 
 任务 `succeeded` 后重新读取文档详情；只有详情实际为 `ready` 才请求 chunks。界面不根据任务结果自行伪造文档状态。
 
-## 5. 刷新恢复与当前契约缺口
+## 5. 刷新恢复与取消
 
-当前后端只能按 job ID 查询任务，没有“按文档查询当前活动任务”的接口。新建任务的当前页面保存 job ID，
-可以显示完整任务状态；刷新发生在文档已经 `processing` 时，前端改为轮询文档详情直至 `ready/failed`。
+页面读取文档详情后调用 `POST /processing-jobs/latest`，按当前文档 ID 恢复最近任务。返回 queued/processing 时保存
+真实 job ID 并只轮询活动状态；succeeded/failed/canceled 均作为终态停止。`job:null` 表示当前用户不可见或没有任务，
+不允许前端推断资源是否存在。若发现接口暂时失败而文档已经 processing，仍保留轮询文档详情的降级路径。
 
-若刷新发生在 job 仍为 `queued` 时，文档仍可能显示 `uploaded/failed`。用户再次点击开始解析会收到 `409`，
-前端会把它解释为可能已有活动任务并开始刷新文档状态，但无法恢复 job ID、排队时间和尝试次数。
-该缺口已登记为 `CONTRACT-F2B-003`，不阻塞单实例 Worker 下的最终状态收口，但后续应由按文档查询活动/最近任务的
-OwnerScope 接口消除信息缺失。
+只有后端返回 `cancelable:true` 的 queued 任务显示“取消排队”。取消与 Worker 领取存在原子竞态：收到 409 时前端不会
+伪装取消成功，而是立即 `GET /processing-jobs/:id` 读取真实 processing/终态。canceled 任务不改变文档状态，用户可在
+uploaded/failed 文档上重新创建新的解析任务。
 
 ## 6. 删除边界
 
@@ -92,8 +95,8 @@ OwnerScope 接口消除信息缺失。
 
 ## 7. 验证边界
 
-- 已通过 API 映射、组件操作和轮询终止自动化测试；
+- 已通过 API 映射、最近任务恢复、取消竞态、容量冷却、组件操作和轮询终止自动化测试；
 - 已通过类型检查、Lint、格式检查和生产构建；
 - 已在真实登录会话下确认 `/documents`、Vite `/api` 代理、空态和控制台无错误；
-- 已由用户在真实数据上确认上传、解析和删除正常；chunks 分页、失败/重试和刷新恢复仍需专项验收；
+- 已由用户在真实数据上确认上传、解析和删除正常；chunks 分页、取消竞态、容量和跨设备恢复仍需专项验收；
 - F2-C 的共享文档选择器和双用户产品隔离验收仍未进入本阶段。

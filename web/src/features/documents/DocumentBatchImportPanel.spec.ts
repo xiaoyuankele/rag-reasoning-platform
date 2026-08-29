@@ -4,7 +4,12 @@ import type { ResearchDocument } from '../../entities/document/model/document'
 import { ApiError } from '../../shared/api/api-error'
 import { getDocument, uploadDocument } from './api/document-api'
 import { preflightDocument } from './api/document-preflight-api'
-import { getProcessingJob, queueDocumentProcessing } from './api/processing-api'
+import {
+  cancelProcessingJob,
+  getLatestProcessingJobs,
+  getProcessingJob,
+  queueDocumentProcessing,
+} from './api/processing-api'
 import { createFileHashWorkerClient } from './model/file-hash-worker-client'
 import DocumentBatchImportPanel from './ui/DocumentBatchImportPanel.vue'
 
@@ -18,6 +23,8 @@ vi.mock('./api/document-preflight-api', () => ({
 }))
 
 vi.mock('./api/processing-api', () => ({
+  cancelProcessingJob: vi.fn(),
+  getLatestProcessingJobs: vi.fn(),
   getProcessingJob: vi.fn(),
   queueDocumentProcessing: vi.fn(),
 }))
@@ -31,6 +38,8 @@ const uploadDocumentMock = vi.mocked(uploadDocument)
 const preflightDocumentMock = vi.mocked(preflightDocument)
 const getProcessingJobMock = vi.mocked(getProcessingJob)
 const queueDocumentProcessingMock = vi.mocked(queueDocumentProcessing)
+const getLatestProcessingJobsMock = vi.mocked(getLatestProcessingJobs)
+const cancelProcessingJobMock = vi.mocked(cancelProcessingJob)
 const createFileHashWorkerClientMock = vi.mocked(createFileHashWorkerClient)
 const hashFileMock = vi.fn()
 const disposeHashClientMock = vi.fn()
@@ -66,6 +75,8 @@ beforeEach(() => {
   preflightDocumentMock.mockReset()
   getProcessingJobMock.mockReset()
   queueDocumentProcessingMock.mockReset()
+  getLatestProcessingJobsMock.mockReset()
+  cancelProcessingJobMock.mockReset()
   createFileHashWorkerClientMock.mockReset()
   hashFileMock.mockReset()
   disposeHashClientMock.mockReset()
@@ -79,6 +90,9 @@ beforeEach(() => {
     dispose: disposeHashClientMock,
   })
   preflightDocumentMock.mockResolvedValue({ exists: false, document: null })
+  getLatestProcessingJobsMock.mockImplementation(async (documentIds) =>
+    documentIds.map((documentId) => ({ documentId, job: null })),
+  )
 })
 
 describe('DocumentBatchImportPanel', () => {
@@ -158,6 +172,28 @@ describe('DocumentBatchImportPanel', () => {
     expect(wrapper.text()).toContain('已有文件：original.pdf')
     expect(wrapper.text()).toContain('文档 #90')
     expect(wrapper.text()).toContain('查看文档')
+    wrapper.unmount()
+  })
+
+  it('上传容量暂满时展示 Retry-After，并保留手动重试入口', async () => {
+    uploadDocumentMock.mockRejectedValue(
+      new ApiError('server', 'busy', {
+        status: 503,
+        code: 'upload_capacity_exhausted',
+        retryAfterSeconds: 2,
+        requestId: 'upload-capacity-ui-1',
+      }),
+    )
+    const wrapper = mount(DocumentBatchImportPanel)
+
+    await selectFiles(wrapper, [new File(['pdf'], 'later.pdf', { type: 'application/pdf' })])
+    await wrapper.get('.primary-button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('系统上传容量暂满')
+    expect(wrapper.text()).toContain('2 秒后可手动重试失败项')
+    expect(wrapper.text()).toContain('请求编号：upload-capacity-ui-1')
+    expect(wrapper.get('.batch-actions .text-button').attributes('disabled')).toBeDefined()
     wrapper.unmount()
   })
 })

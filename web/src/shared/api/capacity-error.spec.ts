@@ -4,6 +4,10 @@ import { capacityFailureFromApiError, createCapacityFailure } from './capacity-e
 
 describe('capacity error presentation', () => {
   it.each([
+    'upload_owner_concurrency_exhausted',
+    'upload_capacity_exhausted',
+    'processing_owner_active_job_limit',
+    'processing_queue_capacity_exhausted',
     'embedding_owner_active_job_limit',
     'embedding_queue_capacity_exhausted',
     'embedding_provider_capacity_exhausted',

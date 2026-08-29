@@ -1,6 +1,10 @@
 import type { ApiError } from './api-error'
 
 export type CapacityErrorCode =
+  | 'upload_owner_concurrency_exhausted'
+  | 'upload_capacity_exhausted'
+  | 'processing_owner_active_job_limit'
+  | 'processing_queue_capacity_exhausted'
   | 'embedding_owner_active_job_limit'
   | 'embedding_queue_capacity_exhausted'
   | 'embedding_provider_capacity_exhausted'
@@ -20,6 +24,22 @@ interface CapacityPresentation {
 }
 
 const presentations: Record<CapacityErrorCode, CapacityPresentation> = {
+  upload_owner_concurrency_exhausted: {
+    title: '当前账户的上传任务较多',
+    message: '请等待正在上传的文件完成，再重试本次文件。',
+  },
+  upload_capacity_exhausted: {
+    title: '系统上传容量暂满',
+    message: '文件仍保留在当前批次中，请稍后手动重试。',
+  },
+  processing_owner_active_job_limit: {
+    title: '当前账户的解析任务已满',
+    message: '请等待已有解析任务完成或取消排队任务后，再重新提交。',
+  },
+  processing_queue_capacity_exhausted: {
+    title: '系统解析队列暂满',
+    message: '文档已经保留，请稍后手动重试创建解析任务。',
+  },
   embedding_owner_active_job_limit: {
     title: '当前账户的活动向量任务已满',
     message: '请等待已有任务推进后，再提交尚未进入队列的文档。',

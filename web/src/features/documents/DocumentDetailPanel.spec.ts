@@ -5,7 +5,12 @@ import type { ResearchDocument } from '../../entities/document/model/document'
 import type { ProcessingJob } from '../../entities/processing-job/model/processing-job'
 import { listDocumentChunks } from './api/document-chunk-api'
 import { deleteDocument, getDocument } from './api/document-api'
-import { getProcessingJob, queueDocumentProcessing } from './api/processing-api'
+import {
+  cancelProcessingJob,
+  getLatestProcessingJobs,
+  getProcessingJob,
+  queueDocumentProcessing,
+} from './api/processing-api'
 import DocumentDetailPanel from './ui/DocumentDetailPanel.vue'
 
 vi.mock('./api/document-api', () => ({
@@ -18,6 +23,8 @@ vi.mock('./api/document-chunk-api', () => ({
 }))
 
 vi.mock('./api/processing-api', () => ({
+  cancelProcessingJob: vi.fn(),
+  getLatestProcessingJobs: vi.fn(),
   getProcessingJob: vi.fn(),
   queueDocumentProcessing: vi.fn(),
 }))
@@ -27,6 +34,8 @@ const deleteDocumentMock = vi.mocked(deleteDocument)
 const listDocumentChunksMock = vi.mocked(listDocumentChunks)
 const queueDocumentProcessingMock = vi.mocked(queueDocumentProcessing)
 const getProcessingJobMock = vi.mocked(getProcessingJob)
+const getLatestProcessingJobsMock = vi.mocked(getLatestProcessingJobs)
+const cancelProcessingJobMock = vi.mocked(cancelProcessingJob)
 
 const uploadedDocument: ResearchDocument = {
   id: 42,
@@ -45,6 +54,7 @@ const queuedJob: ProcessingJob = {
   id: 7,
   documentId: 42,
   status: 'queued',
+  cancelable: true,
   attemptCount: 0,
   errorMessage: null,
   createdAt: new Date('2026-08-18T02:00:01Z'),
@@ -74,11 +84,20 @@ beforeEach(() => {
   listDocumentChunksMock.mockReset()
   queueDocumentProcessingMock.mockReset()
   getProcessingJobMock.mockReset()
+  getLatestProcessingJobsMock.mockReset()
+  cancelProcessingJobMock.mockReset()
   getDocumentMock.mockResolvedValue(uploadedDocument)
   deleteDocumentMock.mockResolvedValue()
   listDocumentChunksMock.mockResolvedValue(chunkPage)
   queueDocumentProcessingMock.mockResolvedValue(queuedJob)
   getProcessingJobMock.mockResolvedValue(queuedJob)
+  getLatestProcessingJobsMock.mockResolvedValue([{ documentId: 42, job: null }])
+  cancelProcessingJobMock.mockResolvedValue({
+    ...queuedJob,
+    status: 'canceled',
+    cancelable: false,
+    completedAt: new Date('2026-08-18T02:00:02Z'),
+  })
 })
 
 describe('DocumentDetailPanel', () => {
@@ -106,6 +125,21 @@ describe('DocumentDetailPanel', () => {
     expect(queueDocumentProcessingMock).toHaveBeenCalledWith(42, expect.any(AbortSignal))
     expect(wrapper.text()).toContain('任务已排队')
     expect(wrapper.text()).toContain('任务 #7')
+    wrapper.unmount()
+  })
+
+  it('刷新后恢复 queued 任务，并把取消结果显示为后端终态', async () => {
+    getLatestProcessingJobsMock.mockResolvedValue([{ documentId: 42, job: queuedJob }])
+    const wrapper = mount(DocumentDetailPanel, { props: { documentId: 42 } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('任务已排队')
+    expect(queueDocumentProcessingMock).not.toHaveBeenCalled()
+    await wrapper.get('.processing-section .text-button--danger').trigger('click')
+    await flushPromises()
+
+    expect(cancelProcessingJobMock).toHaveBeenCalledWith(7, expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('解析任务已取消')
     wrapper.unmount()
   })
 

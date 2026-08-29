@@ -47,6 +47,15 @@ export function useDocumentDetail(
       if (refreshedDocument) await synchronizeChunks(refreshedDocument)
     },
     onQueueConflict: async () => {
+      const activeDocumentId = document.value?.id
+      if (activeDocumentId) {
+        const recoveredJob = await processing.discover(activeDocumentId)
+        if (recoveredJob) {
+          isRecoveringUnknownJob.value = false
+          stopDocumentPolling()
+          return
+        }
+      }
       recoveryBaselineUpdatedAt = document.value?.updatedAt.getTime() ?? Date.now()
       recoveryObservedProcessing = document.value?.status === 'processing'
       isRecoveringUnknownJob.value = true
@@ -57,8 +66,10 @@ export function useDocumentDetail(
   const canStartProcessing = computed(
     () =>
       (document.value?.status === 'uploaded' || document.value?.status === 'failed') &&
+      processing.state.value !== 'discovering' &&
       processing.state.value !== 'queueing' &&
       !processing.hasActiveJob.value &&
+      !processing.isCoolingDown.value &&
       !isRecoveringUnknownJob.value,
   )
 
@@ -66,8 +77,10 @@ export function useDocumentDetail(
     () =>
       document.value !== null &&
       document.value.status !== 'processing' &&
+      processing.state.value !== 'discovering' &&
       processing.state.value !== 'queueing' &&
       !processing.hasActiveJob.value &&
+      !processing.isCancelling.value &&
       !isRecoveringUnknownJob.value &&
       !isDeleting.value,
   )
@@ -206,7 +219,8 @@ export function useDocumentDetail(
     const result = await fetchDocument(true)
     if (!result) return
     await synchronizeChunks(result)
-    if (result.status === 'processing') scheduleDocumentPoll()
+    const recoveredJob = await processing.discover(result.id)
+    if (!recoveredJob && result.status === 'processing') scheduleDocumentPoll()
   }
 
   async function startProcessing(): Promise<boolean> {
