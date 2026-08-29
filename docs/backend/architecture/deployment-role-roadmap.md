@@ -25,32 +25,35 @@ Redis 缓存以及后续共享文件存储协作，不通过新的内部 HTTP �
 | 值 | 最终职责 | 第一阶段行为 |
 | --- | --- | --- |
 | `all` | API 与全部 Worker | 可以运行，保持重构前行为 |
-| `api` | HTTP API、同步检索与同步问答 | 已识别，但启动时安全退出 |
-| `document-worker` | 文档领取、Python 解析、chunks 收尾 | 已识别，但启动时安全退出 |
-| `embedding-worker` | Embedding 任务领取与向量落库 | 已识别，但启动时安全退出 |
-| `answer-worker` | 持久化异步问答 Worker | 已识别，但启动时安全退出 |
+| `api` | HTTP API、同步检索与同步问答 | 第二阶段已放开 |
+| `document-worker` | 文档领取、Python 解析、chunks 收尾 | 第二阶段已放开 |
+| `embedding-worker` | Embedding 任务领取与向量落库 | 第二阶段已放开，要求启用向量 Worker |
+| `answer-worker` | 持久化异步问答 Worker | 第二阶段已放开，要求启用问答与异步任务 |
 
 空值默认 `all`。配置值会去除首尾空白并转换为小写；其他值返回可通过
 `errors.Is(err, config.ErrUnsupportedApplicationRole)` 识别的启动错误。
 
-第一阶段故意不让预留角色继续启动。否则设置 `APP_ROLE=api` 后仍运行 Document/Embedding Worker，
-会形成比“暂不支持”更危险的假隔离。`application_started` 日志已经增加 `role` 字段，便于后续验证实际角色。
+第一阶段曾故意让预留角色安全退出，防止形成假隔离；第二阶段完成条件组装后已经移除这道临时限制。
+`application_started` 日志包含 `role` 和 HTTP 状态，便于验证实际角色。
 
-## 3. 第二阶段：组合根拆分
+## 3. 第二阶段：条件组装（已完成）
 
-在现有 `backend/cmd/server/` 内拆分组装文件，不创建新业务层，也不移动 Domain/Application：
+角色能力矩阵放在现有 `backend/cmd/server/` 组合根中，不创建新业务层，也不移动
+Domain/Application。当前实现按角色控制配置、Repository、远程客户端、Handler 和 Worker 生命周期：
 
 ```text
-cmd/server/
-├─ main.go
-├─ application.go
-├─ api_role.go
-├─ document_worker_role.go
-├─ embedding_worker_role.go
-└─ answer_worker_role.go
+                    all   api   document   embedding   answer
+HTTP                 ✓     ✓        -          -          -
+LocalStorage         ✓     ✓        ✓          -          -
+Python Pool          ✓     -        ✓          -          -
+Document Worker      ✓     -        ✓          -          -
+Embedding Worker     按开关 -        -         必须启用       -
+同步检索/问答         按开关 按开关    -          -          -
+Answer Job Worker    按开关 -        -          -         必须启用
+认证与验证码          ✓     ✓        -          -          -
 ```
 
-目标是让每个角色只加载和创建自己需要的基础设施：
+已经建立以下边界：
 
 - API 不创建 Python Pool，也不启动后台领取循环；
 - Document Worker 不创建 Gin 业务路由和远程 Generation Client；
@@ -58,11 +61,25 @@ cmd/server/
 - Answer Worker 不启动文档或向量 Worker；
 - `all` 复用相同组装函数，行为与当前版本一致。
 
-## 4. 第三阶段：生命周期与同机部署
+专用 Worker 角色不监听 HTTP，而是在完成组装后等待退出信号，任务循环通过 PostgreSQL 队列表领取工作。
+通用镜像不再固化 `/health` 检查；当前 Compose 的 HTTP `backend` 服务单独拥有健康检查，避免 Worker 被误判
+为不健康。
 
-Worker 角色需要内部健康/就绪探针、结构化 role 日志和统一 SIGTERM 行为。第一版只在同一台机器或同一个
-Compose 项目中运行一个 API 和每类一个 Worker，并给 API/Document/Embedding/Answer 分别设置资源限制。
-所有角色继续使用同一镜像、同一 PostgreSQL 和同一宿主机存储挂载。
+### 启动约束
+
+- `APP_ROLE=embedding-worker` 要求 `EMBEDDING_WORKER_ENABLED=true`；
+- `APP_ROLE=answer-worker` 要求 `ANSWER_ENABLED=true` 且 `ANSWER_JOBS_ENABLED=true`；
+- `APP_ROLE=api` 可以按原有开关选择是否暴露语义检索、同步问答和异步任务提交接口；
+- `APP_ROLE=all` 保持向后兼容，所有可选远程能力仍默认关闭。
+
+本阶段只证明单机角色隔离，尚未证明可以任意扩容。Embedding Provider Gate、Answer 并发闸门和上传闸门
+目前仍是进程内状态；同时启动多个同类角色会把真实总并发按进程数放大。
+
+## 4. 第三阶段：同机部署清单与角色探针
+
+下一阶段将在 Compose 中显式声明一个 API 和每类一个 Worker，为 Worker 增加不依赖 HTTP 的内部就绪依据，
+并分别设置资源限制。所有角色继续使用同一镜像、同一 PostgreSQL 和同一宿主机存储挂载。Document Worker
+与 API 必须看到完全相同的 `storage/`，否则 API 保存的文件无法被解析进程打开。
 
 ## 5. 多实例前置条件
 
@@ -77,13 +94,19 @@ Compose 项目中运行一个 API 和每类一个 Worker，并给 API/Document/E
 `FOR UPDATE SKIP LOCKED` 可以避免两个 Worker 同时领取同一数据库任务，但不能自动解决本地文件不可见、
 远程 Provider 总并发被实例数放大或异常实例长期占用任务的问题。
 
-## 6. 第一阶段验收标准
+## 6. 已完成验收标准
 
 - 未设置 `APP_ROLE` 时返回 `all`；
 - 五个稳定角色值均能被配置层解析；
 - 大小写与首尾空白被规范化；
 - 未知角色返回稳定错误并保持零值配置；
 - `all` 完整运行路径和默认回归不退化；
-- 预留拆分角色在任何外部连接前 fail-fast；
+- 每个专用角色只启用能力矩阵内的组件；
+- 专用远程 Worker 缺少功能开关时 fail-fast，不启动空壳进程；
+- Worker-only 角色不创建 HTTP Server，收到退出信号后等待后台循环结束；
 - Compose 与 `.env.example` 默认继续使用 `all`；
-- 本阶段不修改 HTTP、数据库或前端契约。
+- HTTP、数据库和前端契约均未改变。
+
+本地隔离验收使用同一个临时镜像和空 pgvector/PostgreSQL，依次启动五种角色并发送 SIGTERM；五个进程均以
+退出码 0 完成清理。API 日志未出现 Python/Worker 组装事件，三个 Worker 日志均显示
+`http_enabled=false`；空任务库保证验收过程没有远程 Provider 调用。

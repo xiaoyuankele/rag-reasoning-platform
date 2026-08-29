@@ -21,7 +21,8 @@ services:
 
     environment:
       APP_PORT: 8080
-      # 第一阶段保留 all；独立角色将在条件组装完成后由分角色服务覆盖。
+      # 当前单个 backend 服务默认保持 all；改成 api 可只运行 HTTP。
+      # 专用 Worker 服务及其健康检查将在下一部署阶段单独声明。
       APP_ROLE: ${APP_ROLE:-all}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: ${LOG_FORMAT:-json}
@@ -151,6 +152,15 @@ services:
     ports:
       # 默认只暴露给当前电脑；如需局域网访问必须单独设计鉴权和网络边界。
       - "127.0.0.1:${BACKEND_HOST_PORT:-8080}:8080"
+
+    # 健康检查属于 HTTP 角色，不能固化到会被 Worker 角色复用的镜像中。
+    # Python 已经是运行依赖，因此使用标准库探测，不额外安装 curl/wget。
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
 
     volumes:
       # 继续使用仓库中被 Git 忽略的 storage，容器重建不会删除上传文件。

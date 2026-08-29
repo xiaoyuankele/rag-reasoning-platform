@@ -34,10 +34,10 @@ Markdown/TXT 首先由 Go 直接处理，不需要启动 Python。对于 PDF、D
 
 当功能和负载证明有独立部署的需要时，再考虑把 Python 改造成 HTTP AI 服务。普通文档管理和关键词检索不依赖 AI 服务，Python 或模型不可用时，Go 后端仍应提供基础能力。
 
-部署角色拆分第一阶段已经冻结 `APP_ROLE` 契约：`all`、`api`、`document-worker`、
-`embedding-worker` 和 `answer-worker`。当前只有默认 `all` 可以运行，行为与原单进程完全一致；其他角色会
-在连接数据库前安全退出，防止产生“配置为独立角色、实际仍启动全部组件”的假隔离。下一阶段才会拆分
-组合根并逐个放开角色。路线见
+部署角色拆分第二阶段已经完成条件组装。`APP_ROLE` 支持 `all`、`api`、`document-worker`、
+`embedding-worker` 和 `answer-worker`：默认 `all` 保持原单进程行为；`api` 不创建 Python Pool 或后台
+领取循环；三个 Worker 角色不创建 Gin 路由或 HTTP 监听。显式选择 `embedding-worker` 或
+`answer-worker` 时必须同时打开对应功能开关，避免启动一个不工作的空壳进程。部署边界与后续前置条件见
 [同一二进制部署角色拆分路线](docs/backend/architecture/deployment-role-roadmap.md)。
 
 ```text
@@ -376,7 +376,7 @@ Go 后端当前支持以下环境变量：
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `APP_PORT` | `8080` | Go HTTP 服务监听端口，有效范围为 1 到 65535 |
-| `APP_ROLE` | `all` | 后端部署角色；第一阶段仅 `all` 可运行，其他稳定值将在条件组装完成后放开 |
+| `APP_ROLE` | `all` | 后端部署角色，可选 `all`、`api`、`document-worker`、`embedding-worker`、`answer-worker` |
 | `LOG_LEVEL` | `info` | 最低日志级别，可选 `debug`、`info`、`warn`、`error` |
 | `LOG_FORMAT` | `json` | 日志输出格式，可选机器友好的 `json` 或终端友好的 `text`；成本汇总必须使用 `json` |
 | `DB_HOST` | `localhost` | Go 连接 PostgreSQL 时使用的主机 |
