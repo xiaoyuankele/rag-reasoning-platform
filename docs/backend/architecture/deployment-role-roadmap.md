@@ -193,6 +193,8 @@ Answer Worker 在问答完整 RAG 链路期间持续心跳。答案成功快照�
 - Compose Worker 服务没有固定 `container_name`，可以使用 `--scale` 创建多个副本；
 - 本地空数据库中 2 个 Document、2 个 Embedding、2 个 Answer Worker 同时就绪；
 - 六个独立容器在未调用远程 Provider 的情况下均能接收 SIGTERM 并以退出码 0 完成清理。
+- Document、Embedding、Answer Worker A 在任务执行中被 `SIGKILL` 后，Worker B 均不会提前越过有效租约；
+- 三类任务都能在租约到期后以新 fencing token 接管，并在第 2 次尝试产生唯一正式结果。
 
 本地隔离验收使用同一个临时镜像和空 pgvector/PostgreSQL，依次启动五种角色并发送 SIGTERM；五个进程均以
 退出码 0 完成清理。API 日志未出现 Python/Worker 组装事件，三个 Worker 日志均显示
@@ -201,3 +203,7 @@ Answer Worker 在问答完整 RAG 链路期间持续心跳。答案成功快照�
 多进程组合验收进一步同时启动六个 Worker 容器，确认 schema 28、角色身份、就绪信号、零远程调用和优雅
 退出。它证明“同一套代码按配置拆成多个独立进程”已真正跑通，但跨主机 Document Worker 仍受本地文件存储
 约束，生产副本数也必须结合数据库连接总量、主机资源和真实队列压测确定。
+
+多进程故障注入验收使用 `verify-worker-fault-recovery.ps1` 对三类 Worker 分别执行真实 `SIGKILL`，并验证租约
+有效期内不抢占、到期后新 token 接管、旧结果不重复以及最终第 2 次尝试成功。验收只连接隔离 PostgreSQL 和
+本地 Fake Provider，远程模型调用数为 0；它补齐了“能并行启动”之后的“进程死亡仍能恢复”发布证据。

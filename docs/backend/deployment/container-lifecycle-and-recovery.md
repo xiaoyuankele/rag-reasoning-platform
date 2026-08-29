@@ -117,11 +117,10 @@ chatgpt/运行产物/临时/container-lifecycle-20260815T075151Z.json
 
 ## 6. 2026-08-29 租约升级说明
 
-第 5 节是旧版单进程恢复的历史证据；`verify-container-lifecycle.ps1` 仍冻结该历史断言，不能用它证明当前
-拆分角色和文档租约门禁。当前租约正确性由真实 PostgreSQL 集成测试
-`TestProcessingJobLeaseRecoveryAndFencing` 验证，覆盖有效续租、到期重领、新 fencing token、旧 Worker
-chunks 写入拒绝和旧 Worker 终态写入拒绝。容器级异常退出脚本需要在后续将 API 与 `document-worker`
-作为两个角色分别验收，更新前不得把旧脚本结果当作当前发布证据。
+第 5 节是旧版单进程恢复的历史证据；`verify-container-lifecycle.ps1` 仍冻结该历史断言，不能单独用它证明当前
+拆分角色和文档租约门禁。真实 PostgreSQL 集成测试 `TestProcessingJobLeaseRecoveryAndFencing` 覆盖有效续租、
+到期重领、新 fencing token、旧 Worker chunks 写入拒绝和旧 Worker 终态写入拒绝。第 9 节进一步使用独立
+Worker 容器完成了真实 `SIGKILL`、到期接管和唯一结果验收。
 
 ## 7. 2026-08-29 Embedding 租约升级说明
 
@@ -144,3 +143,39 @@ Worker 正常关闭时任务暂时保留 `processing`，其他进程只有在租
 真实 PostgreSQL 测试覆盖有效租约不恢复、续租、强制过期、新 token 接管，以及旧 token 的成功、重试、
 失败三种写入全部拒绝。默认租约 60 秒、心跳 15 秒；相关配置为 `ANSWER_JOB_WORKER_ID`、
 `ANSWER_JOB_LEASE_DURATION` 和 `ANSWER_JOB_HEARTBEAT_INTERVAL`。
+
+## 9. 2026-08-29 多进程故障注入验收
+
+本阶段验证的不是“六个 Worker 能同时启动”，而是任意 Worker 在真实任务中被强制终止后，另一个进程能否
+遵守租约边界安全接管。验收入口为：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\scripts\maintenance\verify-worker-fault-recovery.ps1 `
+    -LeaseDurationSeconds 8
+```
+
+脚本会创建隔离数据库、隔离本地存储和本地 OpenAI 兼容 Fake Provider，然后分别执行 Document、Embedding、
+Answer 三条链路：
+
+1. Worker A 原子领取任务并获得 fencing token；
+2. 在任务尚未收尾时对 A 执行 `SIGKILL`，确认容器退出码为 `137`；
+3. 立即启动 Worker B，并证明它在租约有效期内不能提前抢走任务；
+4. 等待真实数据库时间使租约过期，B 使用新 token 接管；
+5. 验证任务在第 2 次尝试进入 `succeeded`，且 chunks、vectors、answer snapshot 均只有一份正式结果。
+
+临时审计触发器只建立在隔离数据库中，用于证明同一任务产生了两个不同租约 token；它不是生产 schema。
+Fake Provider 对首次 Embedding 和首次 Generation 请求各延迟 20 秒，保证 A 能在真实外部调用期间被杀死；
+整个验收不会连接远程模型。最终三类任务全部通过，Fake Provider 收到 4 次 Embedding 请求和 2 次 Generation
+请求，远程 Provider 调用数为 0。
+
+验收期间还发现一个测试工具陷阱：删除持锁的 `psql` 客户端容器，不保证 PostgreSQL 正在 `pg_sleep` 的服务端
+会话立刻结束，因此表锁可能继续存在。脚本现会记录服务端 backend PID，并使用 `pg_terminate_backend` 明确
+释放会话后再启动接管者。修复后完整验收约 44 秒完成。正式结果写入 Git 忽略目录：
+
+```text
+chatgpt/运行产物/临时/worker-fault-recovery-20260829T135241Z.json
+```
+
+该结果证明单机多个独立进程的租约接管和 fencing 正确性，不等于跨主机共享原始文件、生产并发容量或长时间
+稳定性已经通过；这些仍需共享对象存储和后续压力测试。
