@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,12 +27,19 @@ type AnswerJobRepository struct {
 	pool             *pgxpool.Pool
 	admissionLimits  answerapplication.JobAdmissionLimits
 	schedulingPolicy answerapplication.JobSchedulingPolicy
+	leasePolicy      answerapplication.JobLeasePolicy
+	newLeaseToken    func() (string, error)
 }
 
 var _ answerapplication.ScopedJobRepository = (*AnswerJobRepository)(nil)
 var _ answerapplication.JobWorkerRepository = (*AnswerJobRepository)(nil)
-var _ answerapplication.InterruptedJobRecoverer = (*AnswerJobRepository)(nil)
+var _ answerapplication.ExpiredJobRecoverer = (*AnswerJobRepository)(nil)
 var _ answerapplication.JobRetentionRepository = (*AnswerJobRepository)(nil)
+
+var defaultAnswerJobLeasePolicy = answerapplication.JobLeasePolicy{
+	WorkerID:      "answer-worker",
+	LeaseDuration: time.Minute,
+}
 
 // NewAnswerJobRepository 创建带容量和 Owner 公平策略的 PostgreSQL 仓储。
 func NewAnswerJobRepository(
@@ -38,11 +47,37 @@ func NewAnswerJobRepository(
 	admissionLimits answerapplication.JobAdmissionLimits,
 	schedulingPolicy answerapplication.JobSchedulingPolicy,
 ) *AnswerJobRepository {
+	return NewAnswerJobRepositoryWithPolicies(
+		pool,
+		admissionLimits,
+		schedulingPolicy,
+		defaultAnswerJobLeasePolicy,
+	)
+}
+
+// NewAnswerJobRepositoryWithPolicies 创建同时使用容量、公平调度和租约策略的仓储。
+func NewAnswerJobRepositoryWithPolicies(
+	pool *pgxpool.Pool,
+	admissionLimits answerapplication.JobAdmissionLimits,
+	schedulingPolicy answerapplication.JobSchedulingPolicy,
+	leasePolicy answerapplication.JobLeasePolicy,
+) *AnswerJobRepository {
 	return &AnswerJobRepository{
 		pool:             pool,
 		admissionLimits:  admissionLimits,
 		schedulingPolicy: schedulingPolicy,
+		leasePolicy:      leasePolicy,
+		newLeaseToken:    newAnswerJobLeaseToken,
 	}
+}
+
+// newAnswerJobLeaseToken 生成不可预测的 fencing token。
+func newAnswerJobLeaseToken() (string, error) {
+	randomBytes := make([]byte, 32)
+	if _, err := rand.Read(randomBytes); err != nil {
+		return "", fmt.Errorf("read answer job lease randomness: %w", err)
+	}
+	return hex.EncodeToString(randomBytes), nil
 }
 
 // CreateAnswerJob 在 OwnerScope 和全局队列容量边界内创建 queued 任务。
@@ -345,6 +380,17 @@ func (r *AnswerJobRepository) ClaimNextAnswerJob(
 	if !r.schedulingPolicy.IsValid() {
 		return answerapplication.Job{}, answerapplication.ErrInvalidAnswerJobSchedulingPolicy
 	}
+	if !r.leasePolicy.IsValid() {
+		return answerapplication.Job{}, answerapplication.ErrInvalidAnswerJobLeasePolicy
+	}
+
+	leaseToken, err := r.newLeaseToken()
+	if err != nil {
+		return answerapplication.Job{}, fmt.Errorf(
+			"create answer job lease token: %w",
+			err,
+		)
+	}
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -407,7 +453,11 @@ func (r *AnswerJobRepository) ClaimNextAnswerJob(
 			error_message = NULL,
 			updated_at = CURRENT_TIMESTAMP,
 			started_at = CURRENT_TIMESTAMP,
-			completed_at = NULL
+			completed_at = NULL,
+			worker_id = $2,
+			lease_token = $3,
+			lease_expires_at = CURRENT_TIMESTAMP + ($4::BIGINT * INTERVAL '1 millisecond'),
+			heartbeat_at = CURRENT_TIMESTAMP
 		WHERE id = $1 AND status = 'queued'
 		RETURNING
 			id, owner_user_id, document_id, query, top_k,
@@ -415,9 +465,17 @@ func (r *AnswerJobRepository) ClaimNextAnswerJob(
 			error_code, error_message, next_attempt_at,
 			answer_text, resolved_response_language, sources,
 			prompt_tokens, completion_tokens, total_tokens,
-			created_at, updated_at, started_at, completed_at
+			created_at, updated_at, started_at, completed_at,
+			lease_token
 	`
-	claimed, err := scanAnswerJob(tx.QueryRow(ctx, claimQuery, queued.ID))
+	claimed, err := scanClaimedAnswerJob(tx.QueryRow(
+		ctx,
+		claimQuery,
+		queued.ID,
+		r.leasePolicy.WorkerID,
+		leaseToken,
+		r.leasePolicy.LeaseDuration.Milliseconds(),
+	))
 	if err != nil {
 		return answerapplication.Job{}, fmt.Errorf("mark answer job processing: %w", err)
 	}
@@ -599,6 +657,7 @@ func ensureAnswerOwnerSchedule(
 func (r *AnswerJobRepository) MarkAnswerJobSucceeded(
 	ctx context.Context,
 	jobID int64,
+	leaseToken string,
 	output answerapplication.Output,
 ) error {
 	if strings.TrimSpace(output.Answer) == "" ||
@@ -626,8 +685,15 @@ func (r *AnswerJobRepository) MarkAnswerJobSucceeded(
 			completion_tokens = $6,
 			total_tokens = $7,
 			updated_at = CURRENT_TIMESTAMP,
-			completed_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status = 'processing'
+			completed_at = CURRENT_TIMESTAMP,
+			worker_id = NULL,
+			lease_token = NULL,
+			lease_expires_at = NULL,
+			heartbeat_at = NULL
+		WHERE id = $1
+		  AND status = 'processing'
+		  AND lease_token = $8
+		  AND lease_expires_at > CURRENT_TIMESTAMP
 	`
 	commandTag, err := r.pool.Exec(
 		ctx,
@@ -639,12 +705,13 @@ func (r *AnswerJobRepository) MarkAnswerJobSucceeded(
 		output.PromptTokens,
 		output.CompletionTokens,
 		output.TotalTokens,
+		leaseToken,
 	)
 	if err != nil {
 		return fmt.Errorf("mark answer job succeeded: %w", err)
 	}
 	if commandTag.RowsAffected() != 1 {
-		return answerapplication.ErrAnswerJobNotProcessing
+		return answerapplication.ErrAnswerJobLeaseLost
 	}
 	return nil
 }
@@ -653,6 +720,7 @@ func (r *AnswerJobRepository) MarkAnswerJobSucceeded(
 func (r *AnswerJobRepository) RequeueAnswerJob(
 	ctx context.Context,
 	jobID int64,
+	leaseToken string,
 	nextAttemptAt time.Time,
 	errorCode answerapplication.JobErrorCode,
 	errorMessage string,
@@ -672,15 +740,30 @@ func (r *AnswerJobRepository) RequeueAnswerJob(
 			total_tokens = NULL,
 			updated_at = CURRENT_TIMESTAMP,
 			started_at = NULL,
-			completed_at = NULL
-		WHERE id = $1 AND status = 'processing'
+			completed_at = NULL,
+			worker_id = NULL,
+			lease_token = NULL,
+			lease_expires_at = NULL,
+			heartbeat_at = NULL
+		WHERE id = $1
+		  AND status = 'processing'
+		  AND lease_token = $5
+		  AND lease_expires_at > CURRENT_TIMESTAMP
 	`
-	commandTag, err := r.pool.Exec(ctx, query, jobID, nextAttemptAt, errorCode, errorMessage)
+	commandTag, err := r.pool.Exec(
+		ctx,
+		query,
+		jobID,
+		nextAttemptAt,
+		errorCode,
+		errorMessage,
+		leaseToken,
+	)
 	if err != nil {
 		return fmt.Errorf("requeue answer job: %w", err)
 	}
 	if commandTag.RowsAffected() != 1 {
-		return answerapplication.ErrAnswerJobNotProcessing
+		return answerapplication.ErrAnswerJobLeaseLost
 	}
 	return nil
 }
@@ -689,6 +772,7 @@ func (r *AnswerJobRepository) RequeueAnswerJob(
 func (r *AnswerJobRepository) MarkAnswerJobFailed(
 	ctx context.Context,
 	jobID int64,
+	leaseToken string,
 	errorCode answerapplication.JobErrorCode,
 	errorMessage string,
 ) error {
@@ -699,43 +783,111 @@ func (r *AnswerJobRepository) MarkAnswerJobFailed(
 			error_code = $2,
 			error_message = $3,
 			updated_at = CURRENT_TIMESTAMP,
-			completed_at = CURRENT_TIMESTAMP
-		WHERE id = $1 AND status = 'processing'
+			completed_at = CURRENT_TIMESTAMP,
+			worker_id = NULL,
+			lease_token = NULL,
+			lease_expires_at = NULL,
+			heartbeat_at = NULL
+		WHERE id = $1
+		  AND status = 'processing'
+		  AND lease_token = $4
+		  AND lease_expires_at > CURRENT_TIMESTAMP
 	`
-	commandTag, err := r.pool.Exec(ctx, query, jobID, errorCode, errorMessage)
+	commandTag, err := r.pool.Exec(
+		ctx,
+		query,
+		jobID,
+		errorCode,
+		errorMessage,
+		leaseToken,
+	)
 	if err != nil {
 		return fmt.Errorf("mark answer job failed: %w", err)
 	}
 	if commandTag.RowsAffected() != 1 {
-		return answerapplication.ErrAnswerJobNotProcessing
+		return answerapplication.ErrAnswerJobLeaseLost
 	}
 	return nil
 }
 
-// RequeueInterruptedAnswerJobs 恢复上次进程退出时遗留的 processing 任务。
-func (r *AnswerJobRepository) RequeueInterruptedAnswerJobs(
+// RequeueExpiredAnswerJobs 只恢复租约已经到期（或升级前没有租约）的
+// processing 任务。仍在其他进程心跳的任务不会进入恢复范围。
+func (r *AnswerJobRepository) RequeueExpiredAnswerJobs(
 	ctx context.Context,
-	recoveredAt time.Time,
 	errorCode answerapplication.JobErrorCode,
 	errorMessage string,
 ) (int64, error) {
 	const query = `
-		UPDATE answer_jobs
+		WITH expired_jobs AS (
+			SELECT id
+			FROM answer_jobs
+			WHERE status = 'processing'
+			  AND (
+				lease_expires_at IS NULL
+				OR lease_expires_at <= CURRENT_TIMESTAMP
+			  )
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE answer_jobs AS job
 		SET
 			status = 'queued',
-			error_code = $2,
-			error_message = $3,
-			next_attempt_at = $1,
+			error_code = $1,
+			error_message = $2,
+			next_attempt_at = CURRENT_TIMESTAMP,
 			updated_at = CURRENT_TIMESTAMP,
 			started_at = NULL,
-			completed_at = NULL
-		WHERE status = 'processing'
+			completed_at = NULL,
+			worker_id = NULL,
+			lease_token = NULL,
+			lease_expires_at = NULL,
+			heartbeat_at = NULL
+		FROM expired_jobs AS expired
+		WHERE job.id = expired.id
+		  AND job.status = 'processing'
 	`
-	commandTag, err := r.pool.Exec(ctx, query, recoveredAt, errorCode, errorMessage)
+	commandTag, err := r.pool.Exec(ctx, query, errorCode, errorMessage)
 	if err != nil {
-		return 0, fmt.Errorf("requeue interrupted answer jobs: %w", err)
+		return 0, fmt.Errorf("requeue expired answer jobs: %w", err)
 	}
 	return commandTag.RowsAffected(), nil
+}
+
+// RenewAnswerJobLease 只允许仍持有有效 fencing token 的 Worker 续租。
+// 已经过期的租约不能复活，否则可能与接管任务的新 Worker 同时写答案。
+func (r *AnswerJobRepository) RenewAnswerJobLease(
+	ctx context.Context,
+	jobID int64,
+	leaseToken string,
+) error {
+	if !r.leasePolicy.IsValid() {
+		return answerapplication.ErrInvalidAnswerJobLeasePolicy
+	}
+
+	const query = `
+		UPDATE answer_jobs
+		SET
+			lease_expires_at = CURRENT_TIMESTAMP + ($3::BIGINT * INTERVAL '1 millisecond'),
+			heartbeat_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+		  AND status = 'processing'
+		  AND lease_token = $2
+		  AND lease_expires_at > CURRENT_TIMESTAMP
+	`
+	commandTag, err := r.pool.Exec(
+		ctx,
+		query,
+		jobID,
+		leaseToken,
+		r.leasePolicy.LeaseDuration.Milliseconds(),
+	)
+	if err != nil {
+		return fmt.Errorf("renew answer job lease: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return answerapplication.ErrAnswerJobLeaseLost
+	}
+	return nil
 }
 
 func scanAnswerJob(row pgx.Row) (answerapplication.Job, error) {
@@ -808,5 +960,62 @@ func scanAnswerJob(row pgx.Row) (answerapplication.Job, error) {
 		}
 	}
 
+	return job, nil
+}
+
+// scanClaimedAnswerJob 比普通用户查询多读取内部 lease_token。
+func scanClaimedAnswerJob(row pgx.Row) (answerapplication.Job, error) {
+	var job answerapplication.Job
+	var requestedLanguage string
+	var status string
+	var errorCode *string
+	var answerText *string
+	var resolvedLanguage *string
+	var sourcesJSON []byte
+	var promptTokens *int
+	var completionTokens *int
+	var totalTokens *int
+
+	err := row.Scan(
+		&job.ID,
+		&job.OwnerUserID,
+		&job.DocumentID,
+		&job.Query,
+		&job.TopK,
+		&requestedLanguage,
+		&status,
+		&job.AttemptCount,
+		&errorCode,
+		&job.ErrorMessage,
+		&job.NextAttemptAt,
+		&answerText,
+		&resolvedLanguage,
+		&sourcesJSON,
+		&promptTokens,
+		&completionTokens,
+		&totalTokens,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+		&job.StartedAt,
+		&job.CompletedAt,
+		&job.LeaseToken,
+	)
+	if err != nil {
+		return answerapplication.Job{}, err
+	}
+
+	job.RequestedResponseLanguage = answerapplication.ResponseLanguage(requestedLanguage)
+	job.Status = answerapplication.JobStatus(status)
+	if errorCode != nil {
+		job.ErrorCode = answerapplication.JobErrorCode(*errorCode)
+	}
+	if !job.Status.IsValid() {
+		return answerapplication.Job{}, fmt.Errorf("invalid answer job status %q", status)
+	}
+	if job.LeaseToken == "" {
+		return answerapplication.Job{}, errors.New(
+			"claimed answer job has empty lease token",
+		)
+	}
 	return job, nil
 }

@@ -181,10 +181,9 @@ Worker 会先删除就绪文件，再等待 goroutine，最后关闭数据库连
 
 ## 11. 后台任务多进程边界（2026-08-29）
 
-- Document 与 Embedding Worker 已分别使用 PostgreSQL 持久化租约、心跳和 fencing token；
+- Document、Embedding 与 Answer Worker 已分别使用 PostgreSQL 持久化租约、心跳和 fencing token；
 - 多个同类 Worker 进程可以共享队列，只有租约真正过期的 `processing` 任务会被重排；
 - 文档 chunks 写入以及向量整批覆盖都核对当前 token，旧 Worker 不能提交陈旧结果；
-- `DOCUMENT_*LEASE*` 与 `EMBEDDING_*LEASE*` 配置均要求心跳周期短于租约时长；
-- Answer Worker 尚未完成相同租约升级，因此不能据此任意增加 Answer Worker 进程数；
+- 三类任务的 `*_LEASE_DURATION` 与 `*_HEARTBEAT_INTERVAL` 配置均要求心跳周期短于租约时长；
 - 原始文件仍是本地绑定目录，跨主机部署前必须改为共享对象存储。
-- 迁移 27 后不得混跑不认识租约字段的旧 Embedding Worker；升级时先停止旧 Worker，再迁移并启动同一版本的新 Worker。
+- 迁移 28 后不得混跑不认识租约字段的旧 Worker；升级时先停止旧 Worker，再迁移并启动同一版本的新 Worker。

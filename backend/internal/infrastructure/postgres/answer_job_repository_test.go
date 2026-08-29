@@ -300,7 +300,12 @@ func TestAnswerJobRepository(t *testing.T) {
 				CompletionTokens: 3,
 				TotalTokens:      11,
 			}
-			if err := repository.MarkAnswerJobSucceeded(ctx, job.ID, output); err != nil {
+			if err := repository.MarkAnswerJobSucceeded(
+				ctx,
+				job.ID,
+				job.LeaseToken,
+				output,
+			); err != nil {
 				t.Fatalf("mark answer job %d succeeded: %v", job.ID, err)
 			}
 			scope, err := accessdomain.NewOwnerScope(job.OwnerUserID)

@@ -27,7 +27,10 @@ func TestLoadAnswerJobsUsesSafeDefaults(t *testing.T) {
 		config.RetryMaxDelay != 30*time.Second ||
 		config.Retention != 7*24*time.Hour ||
 		config.CleanupInterval != time.Hour ||
-		config.CleanupBatchSize != 500 {
+		config.CleanupBatchSize != 500 ||
+		config.WorkerID == "" ||
+		config.JobLeaseDuration != time.Minute ||
+		config.JobHeartbeatInterval != 15*time.Second {
 		t.Fatalf("default answer jobs config = %+v", config)
 	}
 }
@@ -49,6 +52,9 @@ func TestLoadAnswerJobsUsesEnvironment(t *testing.T) {
 	t.Setenv("ANSWER_JOB_RETENTION", "336h")
 	t.Setenv("ANSWER_JOB_CLEANUP_INTERVAL", "30m")
 	t.Setenv("ANSWER_JOB_CLEANUP_BATCH_SIZE", "250")
+	t.Setenv("ANSWER_JOB_WORKER_ID", "answer-worker-test")
+	t.Setenv("ANSWER_JOB_LEASE_DURATION", "2m")
+	t.Setenv("ANSWER_JOB_HEARTBEAT_INTERVAL", "20s")
 
 	config, err := LoadAnswerJobs()
 	if err != nil {
@@ -68,7 +74,10 @@ func TestLoadAnswerJobsUsesEnvironment(t *testing.T) {
 		config.RetryMaxDelay != time.Minute ||
 		config.Retention != 14*24*time.Hour ||
 		config.CleanupInterval != 30*time.Minute ||
-		config.CleanupBatchSize != 250 {
+		config.CleanupBatchSize != 250 ||
+		config.WorkerID != "answer-worker-test" ||
+		config.JobLeaseDuration != 2*time.Minute ||
+		config.JobHeartbeatInterval != 20*time.Second {
 		t.Fatalf("answer jobs config = %+v", config)
 	}
 }
@@ -112,6 +121,14 @@ func TestLoadAnswerJobsRejectsCrossFieldErrors(t *testing.T) {
 			},
 			want: ErrInvalidAnswerJobsRetry,
 		},
+		{
+			name: "heartbeat not shorter than lease",
+			environment: map[string]string{
+				"ANSWER_JOB_LEASE_DURATION":     "15s",
+				"ANSWER_JOB_HEARTBEAT_INTERVAL": "15s",
+			},
+			want: ErrInvalidAnswerJobsLeaseTiming,
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -146,6 +163,9 @@ func clearAnswerJobsEnvironment(t *testing.T) {
 		"ANSWER_JOB_RETENTION",
 		"ANSWER_JOB_CLEANUP_INTERVAL",
 		"ANSWER_JOB_CLEANUP_BATCH_SIZE",
+		"ANSWER_JOB_WORKER_ID",
+		"ANSWER_JOB_LEASE_DURATION",
+		"ANSWER_JOB_HEARTBEAT_INTERVAL",
 	} {
 		t.Setenv(name, "")
 	}

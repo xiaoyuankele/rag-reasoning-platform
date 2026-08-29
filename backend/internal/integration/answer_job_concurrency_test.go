@@ -310,9 +310,19 @@ func TestAnswerJobWorkerShutdownLeavesRecoverableJob(t *testing.T) {
 	if err != nil || stored.Status != answerapplication.JobStatusProcessing {
 		t.Fatalf("interrupted job = %+v, %v, want processing", stored, err)
 	}
-	recovery, err := answerapplication.NewInterruptedJobRecoveryService(repository)
+	// 正常 shutdown 后不能立即抢走任务；只有租约真正到期才允许恢复。
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE answer_jobs
+		 SET lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+		 WHERE id = $1`,
+		job.ID,
+	); err != nil {
+		t.Fatalf("expire interrupted answer job lease: %v", err)
+	}
+	recovery, err := answerapplication.NewExpiredJobRecoveryService(repository)
 	if err != nil {
-		t.Fatalf("NewInterruptedJobRecoveryService() error = %v", err)
+		t.Fatalf("NewExpiredJobRecoveryService() error = %v", err)
 	}
 	recoveredCount, err := recovery.Recover(ctx)
 	if err != nil || recoveredCount != 1 {

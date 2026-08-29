@@ -235,7 +235,7 @@ Worker Application 已定义可替换的文档处理器端口，并实现单次�
 
 文档解析任务入队已经增加 PostgreSQL 原子背压：默认每个用户最多保留 5 条 `queued/processing` 任务，全系统最多 40 条；并发请求通过文档行锁和短事务 advisory lock 竞争容量，不会突破最后一个名额。用户满额返回 `429`，全局满额返回 `503`，成功或失败的历史任务不占用名额。
 
-服务启动时会在 Worker 运行前恢复上一次异常退出遗留的 `processing` 任务，并在同一 PostgreSQL 事务内把任务和关联文档标记为 `failed`。真实启动测试已验证恢复数量、双表状态一致性、安全错误信息和第二次启动的幂等性。当前恢复策略建立在单实例 Worker 约束上；未来扩展为多实例时需要使用 lease/heartbeat 判断任务是否真正失联。
+Document、Embedding 与 Answer 三类后台任务都已使用 PostgreSQL 持久化租约、周期心跳和随机 fencing token。Worker 只恢复租约真正过期的 `processing` 任务；仍在其他进程心跳的任务不会被重排。成功、重试和失败收尾都必须携带当前未过期 token，因此旧 Worker 即使稍后恢复运行，也不能覆盖新 Worker 的 chunks、vectors、答案或任务终态。
 
 `ProcessorDispatcher` 已作为统一处理器入口接入 Worker，根据数据库中的可信 MIME 类型选择具体实现。`text/markdown` 和 `text/plain` 路由到 Go `TextProcessor`，`application/pdf` 路由到生产 `PythonProcessor`；尚未注册的格式会返回可判断的错误，而不会误用其他处理器。未来增加 DOCX、OCR 或替换 PDF 解析器时，可以继续添加或替换适配器，Worker 的任务领取、超时、文本块保存和状态收尾流程不需要修改。
 
@@ -500,6 +500,9 @@ Go 后端当前支持以下环境变量：
 | `ANSWER_JOB_RETENTION` | `168h` | succeeded/failed/canceled 异步问答结果的保留期；到期后问题、答案和来源快照一并删除 |
 | `ANSWER_JOB_CLEANUP_INTERVAL` | `1h` | 后台保留期清理在队列为空时的检查间隔 |
 | `ANSWER_JOB_CLEANUP_BATCH_SIZE` | `500` | 每个短事务最多删除的过期终态任务数，范围 1～10000 |
+| `ANSWER_JOB_WORKER_ID` | 自动生成 | 当前异步问答 Worker 进程的排障标识；容器编排可显式设置实例名 |
+| `ANSWER_JOB_LEASE_DURATION` | `60s` | 问答任务租约时长；失联超过该时间后允许其他 Worker 接管 |
+| `ANSWER_JOB_HEARTBEAT_INTERVAL` | `15s` | 问答任务续租周期；必须短于租约时长 |
 | `DASHSCOPE_GENERATION_ENDPOINT` | 百炼中国内地兼容地址 | DashScope Chat Completions HTTP API 地址 |
 | `GENERATION_MODEL` | `qwen3.6-flash` | 第一版回答生成模型；由后端配置，不接受前端任意指定 |
 | `GENERATION_HTTP_TIMEOUT` | `60s` | 单次远程回答生成请求超时 |

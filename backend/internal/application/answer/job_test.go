@@ -32,6 +32,12 @@ func TestAnswerJobStatusAndPolicies(t *testing.T) {
 	if (JobSchedulingPolicy{MaxInFlightPerOwner: 2, MaxBorrowedInFlightPerOwner: 1, StarvationThreshold: time.Second}).IsValid() {
 		t.Fatal("borrowed limit below base limit should be invalid")
 	}
+	if !(JobLeasePolicy{WorkerID: "answer-worker-1", LeaseDuration: time.Minute}).IsValid() {
+		t.Fatal("expected answer job lease policy to be valid")
+	}
+	if (JobLeasePolicy{LeaseDuration: time.Minute}).IsValid() {
+		t.Fatal("empty answer worker ID should be invalid")
+	}
 	if !(JobQueueStats{
 		QueuedCount:             5,
 		ReadyQueuedCount:        3,

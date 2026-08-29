@@ -54,15 +54,16 @@ Compose 和镜像使用三个配套设置：
 | --- | --- | --- | --- |
 | 文档解析 | `processing` 且租约过期 | 任务回到 `queued`，文档暂时变为 `failed`，随后可重新领取 | chunks 与终态均受 fencing token 保护，旧 Worker 已不能覆盖新结果，因此可以自动接管 |
 | Embedding | `processing` 且租约过期 | 任务回到 `queued`，文档仍为 `ready` | 向量事务与终态受 fencing token 保护，旧 Worker 不能覆盖接管后的结果 |
+| Answer | `processing` 且租约过期 | 任务回到 `queued`，保留有限重试语义 | 答案快照、成功、重试和失败收尾都受 fencing token 保护 |
 
 恢复错误信息使用稳定安全文本：
 
 - 文档解析：`document processing lease expired and was requeued`；
 - Embedding：`embedding job lease expired and was requeued`。
+- Answer：`answer job lease expired and was requeued`。
 
-文档解析和 Embedding 都已使用 PostgreSQL 持久化 lease、heartbeat、Worker 身份和随机 fencing token，
-只恢复真正过期的任务；这允许多个同类 Worker 进程共享各自队列。Answer 仍保留原有恢复模型，在完成同类
-租约升级前不能任意增加 Answer Worker 的多实例数量。
+三类后台任务都已使用 PostgreSQL 持久化 lease、heartbeat、Worker 身份和随机 fencing token，
+只恢复真正过期的任务；这允许多个同类 Worker 进程共享各自队列。
 
 ## 4. 可重复验收脚本
 
@@ -132,3 +133,14 @@ Embedding Worker 现在会在领取事务中写入 `worker_id`、随机 `lease_t
 恢复器只重排真正过期或升级前没有租约的 `processing` 任务。Application 在启动和每次领取前执行恢复，
 PostgreSQL 使用部分索引与 `SKIP LOCKED` 支持多个实例同时检查。默认租约 60 秒、心跳 15 秒；Fake Provider
 测试验证处理期间续租和续租失败停止写入，真实 PostgreSQL 测试验证过期重领与旧 token 拒绝。
+
+## 8. 2026-08-29 Answer 租约升级说明
+
+Answer Worker 领取任务时也会写入进程身份、随机 token、到期时间和心跳。语义检索与生成期间由独立
+goroutine 续租；成功答案快照、指数退避 requeue 和永久失败终态都必须匹配当前 token 且租约尚未过期。
+Worker 正常关闭时任务暂时保留 `processing`，其他进程只有在租约到期后才能恢复，避免启动一个新实例就
+错误抢走健康实例正在生成的回答。
+
+真实 PostgreSQL 测试覆盖有效租约不恢复、续租、强制过期、新 token 接管，以及旧 token 的成功、重试、
+失败三种写入全部拒绝。默认租约 60 秒、心跳 15 秒；相关配置为 `ANSWER_JOB_WORKER_ID`、
+`ANSWER_JOB_LEASE_DURATION` 和 `ANSWER_JOB_HEARTBEAT_INTERVAL`。

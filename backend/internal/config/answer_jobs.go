@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -28,6 +30,8 @@ const (
 	defaultAnswerJobsCleanupInterval   = time.Hour
 	defaultAnswerJobsCleanupBatchSize  = 500
 	maximumAnswerJobsCleanupBatchSize  = 10000
+	defaultAnswerJobsLeaseDuration     = 60 * time.Second
+	defaultAnswerJobsHeartbeatInterval = 15 * time.Second
 )
 
 var (
@@ -39,6 +43,11 @@ var (
 	// ErrInvalidAnswerJobsRetry 表示重试基础间隔大于最大退避间隔。
 	ErrInvalidAnswerJobsRetry = errors.New(
 		"answer job retry base delay must not exceed retry max delay",
+	)
+
+	// ErrInvalidAnswerJobsLeaseTiming 表示心跳周期无法在租约过期前续租。
+	ErrInvalidAnswerJobsLeaseTiming = errors.New(
+		"answer job heartbeat interval must be shorter than lease duration",
 	)
 )
 
@@ -60,6 +69,9 @@ type AnswerJobsConfig struct {
 	Retention                  time.Duration
 	CleanupInterval            time.Duration
 	CleanupBatchSize           int
+	WorkerID                   string
+	JobLeaseDuration           time.Duration
+	JobHeartbeatInterval       time.Duration
 }
 
 // LoadAnswerJobs 从环境变量读取异步问答配置。
@@ -174,6 +186,28 @@ func LoadAnswerJobs() (AnswerJobsConfig, error) {
 	if err != nil {
 		return AnswerJobsConfig{}, fmt.Errorf("load answer job cleanup batch size: %w", err)
 	}
+	workerID := strings.TrimSpace(os.Getenv("ANSWER_JOB_WORKER_ID"))
+	if workerID == "" {
+		hostname, hostnameErr := os.Hostname()
+		if hostnameErr != nil || strings.TrimSpace(hostname) == "" {
+			hostname = "answer-worker"
+		}
+		workerID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	}
+	jobLeaseDuration, err := loadPositiveDuration(
+		"ANSWER_JOB_LEASE_DURATION",
+		defaultAnswerJobsLeaseDuration,
+	)
+	if err != nil {
+		return AnswerJobsConfig{}, fmt.Errorf("load answer job lease duration: %w", err)
+	}
+	jobHeartbeatInterval, err := loadPositiveDuration(
+		"ANSWER_JOB_HEARTBEAT_INTERVAL",
+		defaultAnswerJobsHeartbeatInterval,
+	)
+	if err != nil {
+		return AnswerJobsConfig{}, fmt.Errorf("load answer job heartbeat interval: %w", err)
+	}
 
 	if maxQueuedPerUser > maxQueuedGlobal ||
 		ownerInFlight > ownerBorrowed ||
@@ -182,6 +216,9 @@ func LoadAnswerJobs() (AnswerJobsConfig, error) {
 	}
 	if retryBaseDelay > retryMaxDelay {
 		return AnswerJobsConfig{}, ErrInvalidAnswerJobsRetry
+	}
+	if jobHeartbeatInterval >= jobLeaseDuration {
+		return AnswerJobsConfig{}, ErrInvalidAnswerJobsLeaseTiming
 	}
 
 	return AnswerJobsConfig{
@@ -200,5 +237,8 @@ func LoadAnswerJobs() (AnswerJobsConfig, error) {
 		Retention:                  retention,
 		CleanupInterval:            cleanupInterval,
 		CleanupBatchSize:           cleanupBatchSize,
+		WorkerID:                   workerID,
+		JobLeaseDuration:           jobLeaseDuration,
+		JobHeartbeatInterval:       jobHeartbeatInterval,
 	}, nil
 }

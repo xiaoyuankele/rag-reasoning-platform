@@ -23,6 +23,11 @@ type fakeAnswerJobWorkerRepository struct {
 	requeueCode     JobErrorCode
 	failedID        int64
 	failureCode     JobErrorCode
+	renewCount      int
+	renewErr        error
+	renew           func(context.Context, int64, string) error
+	recoveredCount  int64
+	recoveryErr     error
 }
 
 func (f *fakeAnswerJobWorkerRepository) ClaimNextAnswerJob(context.Context) (Job, error) {
@@ -36,6 +41,7 @@ func (f *fakeAnswerJobWorkerRepository) GetAnswerJobQueueStats(
 func (f *fakeAnswerJobWorkerRepository) MarkAnswerJobSucceeded(
 	_ context.Context,
 	jobID int64,
+	_ string,
 	output Output,
 ) error {
 	f.succeededID = jobID
@@ -45,6 +51,7 @@ func (f *fakeAnswerJobWorkerRepository) MarkAnswerJobSucceeded(
 func (f *fakeAnswerJobWorkerRepository) RequeueAnswerJob(
 	_ context.Context,
 	jobID int64,
+	_ string,
 	next time.Time,
 	code JobErrorCode,
 	_ string,
@@ -57,12 +64,33 @@ func (f *fakeAnswerJobWorkerRepository) RequeueAnswerJob(
 func (f *fakeAnswerJobWorkerRepository) MarkAnswerJobFailed(
 	_ context.Context,
 	jobID int64,
+	_ string,
 	code JobErrorCode,
 	_ string,
 ) error {
 	f.failedID = jobID
 	f.failureCode = code
 	return nil
+}
+
+func (f *fakeAnswerJobWorkerRepository) RenewAnswerJobLease(
+	ctx context.Context,
+	jobID int64,
+	leaseToken string,
+) error {
+	f.renewCount++
+	if f.renew != nil {
+		return f.renew(ctx, jobID, leaseToken)
+	}
+	return f.renewErr
+}
+
+func (f *fakeAnswerJobWorkerRepository) RequeueExpiredAnswerJobs(
+	context.Context,
+	JobErrorCode,
+	string,
+) (int64, error) {
+	return f.recoveredCount, f.recoveryErr
 }
 
 type recordingAnswerJobObserver struct {
@@ -252,6 +280,87 @@ func TestAnswerJobWorkerIgnoresQueueStatsFailure(t *testing.T) {
 	}
 }
 
+func TestAnswerJobWorkerRenewsLeaseDuringAnswer(t *testing.T) {
+	renewed := make(chan struct{})
+	var renewedOnce sync.Once
+	repository := &fakeAnswerJobWorkerRepository{
+		job: testClaimedAnswerJob(16, 1),
+		renew: func(_ context.Context, jobID int64, leaseToken string) error {
+			if jobID != 16 || leaseToken != "answer-lease-token" {
+				t.Errorf("renew lease = (%d, %q), want claimed job", jobID, leaseToken)
+			}
+			renewedOnce.Do(func() { close(renewed) })
+			return nil
+		},
+	}
+	answerer := &fakeAnswerer{answer: func(
+		ctx context.Context,
+		_ accessdomain.OwnerScope,
+		_ Input,
+	) (Output, error) {
+		select {
+		case <-renewed:
+			return Output{Answer: "answer", Sources: []Source{}}, nil
+		case <-ctx.Done():
+			return Output{}, ctx.Err()
+		}
+	}}
+	worker := newAnswerJobWorkerWithHeartbeatForTest(
+		t,
+		repository,
+		answerer,
+		time.Millisecond,
+	)
+
+	handled, err := worker.RunOnce(t.Context())
+	if err != nil || !handled {
+		t.Fatalf("RunOnce() = %t, %v", handled, err)
+	}
+	if repository.renewCount < 1 || repository.succeededID != 16 {
+		t.Fatalf(
+			"renew/success = %d/%d, want at least 1 and 16",
+			repository.renewCount,
+			repository.succeededID,
+		)
+	}
+}
+
+func TestAnswerJobWorkerStopsFinalizationAfterLeaseLoss(t *testing.T) {
+	repository := &fakeAnswerJobWorkerRepository{
+		job:      testClaimedAnswerJob(17, 1),
+		renewErr: ErrAnswerJobLeaseLost,
+	}
+	answerer := &fakeAnswerer{answer: func(
+		ctx context.Context,
+		_ accessdomain.OwnerScope,
+		_ Input,
+	) (Output, error) {
+		<-ctx.Done()
+		return Output{}, ctx.Err()
+	}}
+	worker := newAnswerJobWorkerWithHeartbeatForTest(
+		t,
+		repository,
+		answerer,
+		time.Millisecond,
+	)
+
+	handled, err := worker.RunOnce(t.Context())
+	if !handled || !errors.Is(err, ErrAnswerJobLeaseLost) {
+		t.Fatalf("RunOnce() = %t, %v, want lease lost", handled, err)
+	}
+	if repository.succeededID != 0 ||
+		repository.requeuedID != 0 ||
+		repository.failedID != 0 {
+		t.Fatalf(
+			"finalization IDs = success %d requeue %d fail %d, want none",
+			repository.succeededID,
+			repository.requeuedID,
+			repository.failedID,
+		)
+	}
+}
+
 func TestAnswerJobQueueWaitUsesRetryReadyTime(t *testing.T) {
 	createdAt := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
 	readyAt := createdAt.Add(3 * time.Second)
@@ -304,6 +413,31 @@ func newAnswerJobWorkerWithObserverForTest(
 	return worker
 }
 
+func newAnswerJobWorkerWithHeartbeatForTest(
+	t *testing.T,
+	repository JobWorkerRepository,
+	answerer answerer,
+	heartbeatInterval time.Duration,
+) *JobWorker {
+	t.Helper()
+	retryPolicy, err := NewJobRetryPolicy(3, time.Second, 10*time.Second)
+	if err != nil {
+		t.Fatalf("NewJobRetryPolicy() error = %v", err)
+	}
+	worker, err := NewJobWorkerWithHeartbeatInterval(
+		repository,
+		answerer,
+		&recordingAnswerJobObserver{},
+		time.Minute,
+		retryPolicy,
+		heartbeatInterval,
+	)
+	if err != nil {
+		t.Fatalf("NewJobWorkerWithHeartbeatInterval() error = %v", err)
+	}
+	return worker
+}
+
 func testClaimedAnswerJob(id int64, attempt int) Job {
 	return Job{
 		ID:                        id,
@@ -313,5 +447,6 @@ func testClaimedAnswerJob(id int64, attempt int) Job {
 		RequestedResponseLanguage: ResponseLanguageAuto,
 		Status:                    JobStatusProcessing,
 		AttemptCount:              attempt,
+		LeaseToken:                "answer-lease-token",
 	}
 }

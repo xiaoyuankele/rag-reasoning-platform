@@ -129,7 +129,7 @@ Redis 原子租约（跨进程）
 部署角色拆分不等于已经可以任意增加实例。跨主机或多副本之前仍必须完成：
 
 1. 本地 `storage/` 迁移为共享对象存储；
-2. 文档与 Embedding 任务的 lease、heartbeat、fencing 条件收尾和过期恢复已经完成；Answer 任务仍需按相同原则升级；
+2. 文档、Embedding 与 Answer 任务的 lease、heartbeat、fencing 条件收尾和过期恢复已经完成；
 3. Redis Provider 并发闸门已完成；验证码、认证、上传等待区等共享频率/排队限制仍需按实测逐项迁移；
 4. 数据库迁移的单一执行者或受控 migration job；
 5. 各角色独立资源、队列和故障注入压测。
@@ -158,6 +158,13 @@ Embedding Worker 领取任务时同样持久化 Worker 身份、随机 token、�
 写向量或终态。默认租约 60 秒、心跳 15 秒，对应 `EMBEDDING_JOB_LEASE_DURATION` 和
 `EMBEDDING_JOB_HEARTBEAT_INTERVAL`。
 
+### Answer 任务租约（已完成）
+
+Answer Worker 在问答完整 RAG 链路期间持续心跳。答案成功快照、临时失败重排和永久失败终态都要求当前
+随机 token 仍有效；过期旧 Worker 不能覆盖接管者结果。恢复器只重排真正过期或升级前没有租约的
+`processing` 任务。默认租约 60 秒、心跳 15 秒，对应 `ANSWER_JOB_LEASE_DURATION` 和
+`ANSWER_JOB_HEARTBEAT_INTERVAL`。
+
 ## 7. 已完成验收标准
 
 - 未设置 `APP_ROLE` 时返回 `all`；
@@ -180,6 +187,8 @@ Embedding Worker 领取任务时同样持久化 Worker 身份、随机 token、�
 - 旧 token 不能写 chunks，也不能写成功或失败终态。
 - Embedding 有效心跳不会被恢复，过期任务可重新领取且产生不同 token；
 - Embedding 旧 token 不能覆盖向量、requeue 或写成功/失败终态。
+- Answer 有效心跳不会被恢复，过期任务可重新领取且产生不同 token；
+- Answer 旧 token 不能保存答案、requeue 或写失败终态。
 
 本地隔离验收使用同一个临时镜像和空 pgvector/PostgreSQL，依次启动五种角色并发送 SIGTERM；五个进程均以
 退出码 0 完成清理。API 日志未出现 Python/Worker 组装事件，三个 Worker 日志均显示

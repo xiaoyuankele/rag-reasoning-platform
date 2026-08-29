@@ -16,7 +16,8 @@ import (
 const (
 	safeAnswerJobRetryMessage    = "answer service temporarily unavailable"
 	safeAnswerJobFailureMessage  = "answer generation failed"
-	safeAnswerJobRecoveryMessage = "answer worker was interrupted and the task was requeued"
+	safeAnswerJobRecoveryMessage = "answer job lease expired and was requeued"
+	defaultAnswerJobHeartbeat    = 15 * time.Second
 )
 
 var (
@@ -28,6 +29,9 @@ var (
 	)
 	ErrInvalidAnswerJobRetryPolicy = errors.New(
 		"answer job retry policy is invalid",
+	)
+	ErrInvalidAnswerJobHeartbeatInterval = errors.New(
+		"answer job heartbeat interval must be positive",
 	)
 )
 
@@ -144,6 +148,7 @@ type JobWorker struct {
 	answerer          answerer
 	events            JobEventObserver
 	processingTimeout time.Duration
+	heartbeatInterval time.Duration
 	retryPolicy       JobRetryPolicy
 	now               func() time.Time
 }
@@ -156,11 +161,33 @@ func NewJobWorker(
 	processingTimeout time.Duration,
 	retryPolicy JobRetryPolicy,
 ) (*JobWorker, error) {
+	return NewJobWorkerWithHeartbeatInterval(
+		jobs,
+		answerer,
+		events,
+		processingTimeout,
+		retryPolicy,
+		defaultAnswerJobHeartbeat,
+	)
+}
+
+// NewJobWorkerWithHeartbeatInterval 创建使用指定租约心跳周期的 Answer Worker。
+func NewJobWorkerWithHeartbeatInterval(
+	jobs JobWorkerRepository,
+	answerer answerer,
+	events JobEventObserver,
+	processingTimeout time.Duration,
+	retryPolicy JobRetryPolicy,
+	heartbeatInterval time.Duration,
+) (*JobWorker, error) {
 	if jobs == nil || answerer == nil || events == nil {
 		return nil, ErrAnswerJobWorkerDependencies
 	}
 	if processingTimeout <= 0 {
 		return nil, ErrInvalidAnswerJobWorkerTimeout
+	}
+	if heartbeatInterval <= 0 {
+		return nil, ErrInvalidAnswerJobHeartbeatInterval
 	}
 	if retryPolicy.maxAttempts <= 0 {
 		return nil, ErrInvalidAnswerJobRetryPolicy
@@ -170,6 +197,7 @@ func NewJobWorker(
 		answerer:          answerer,
 		events:            events,
 		processingTimeout: processingTimeout,
+		heartbeatInterval: heartbeatInterval,
 		retryPolicy:       retryPolicy,
 		now:               time.Now,
 	}, nil
@@ -177,6 +205,15 @@ func NewJobWorker(
 
 // RunOnce 领取并执行一条任务；空队列返回 handled=false、err=nil。
 func (w *JobWorker) RunOnce(ctx context.Context) (handled bool, err error) {
+	// 多实例都可以执行恢复，但只允许回收真正过期的 processing 租约。
+	if _, err := w.jobs.RequeueExpiredAnswerJobs(
+		ctx,
+		JobErrorCodeWorkerInterrupted,
+		safeAnswerJobRecoveryMessage,
+	); err != nil {
+		return false, fmt.Errorf("requeue expired answer jobs: %w", err)
+	}
+
 	job, err := w.jobs.ClaimNextAnswerJob(ctx)
 	if errors.Is(err, ErrNoQueuedAnswerJob) {
 		return false, nil
@@ -218,16 +255,57 @@ func (w *JobWorker) RunOnce(ctx context.Context) (handled bool, err error) {
 		w.observeJobEvent(ctx, finalEvent)
 	}()
 
+	// 问答检索和远程生成可能持续数秒到数十秒。心跳与业务处理并行；
+	// 续租失败会取消 workContext，旧 Worker 也无法再通过数据库 fencing。
+	workContext, cancelWork := context.WithCancel(ctx)
+	heartbeatContext, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatErrors := make(chan error, 1)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(w.heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatContext.Done():
+				return
+			case <-ticker.C:
+				if renewErr := w.jobs.RenewAnswerJobLease(
+					heartbeatContext,
+					job.ID,
+					job.LeaseToken,
+				); renewErr != nil {
+					heartbeatErrors <- renewErr
+					cancelWork()
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		stopHeartbeat()
+		cancelWork()
+		<-heartbeatDone
+	}()
+	leaseError := func() error {
+		select {
+		case heartbeatErr := <-heartbeatErrors:
+			return fmt.Errorf("renew answer job lease: %w", heartbeatErr)
+		default:
+			return nil
+		}
+	}
+
 	scope, scopeErr := accessdomain.NewOwnerScope(job.OwnerUserID)
 	if scopeErr != nil {
-		err = w.failJob(ctx, job, scopeErr)
+		err = w.failJob(workContext, job, scopeErr)
 		finalEvent.Type = JobEventFailed
 		finalEvent.Status = JobStatusFailed
 		finalEvent.ErrorCode = JobErrorCodeExecutionFailed
 		return true, err
 	}
 
-	processingContext, cancel := context.WithTimeout(ctx, w.processingTimeout)
+	processingContext, cancel := context.WithTimeout(workContext, w.processingTimeout)
 	output, processingErr := w.answerer.Answer(
 		processingContext,
 		scope,
@@ -239,6 +317,9 @@ func (w *JobWorker) RunOnce(ctx context.Context) (handled bool, err error) {
 		},
 	)
 	cancel()
+	if heartbeatErr := leaseError(); heartbeatErr != nil {
+		return true, heartbeatErr
+	}
 
 	// shutdown 期间不执行数据库收尾；启动恢复会把遗留 processing 重新排队。
 	if ctx.Err() != nil {
@@ -252,8 +333,9 @@ func (w *JobWorker) RunOnce(ctx context.Context) (handled bool, err error) {
 		if !isPermanentAnswerJobError(processingErr) {
 			if nextAttemptAt, retry := w.retryPolicy.nextAttempt(job.AttemptCount, w.now()); retry {
 				requeueErr := w.jobs.RequeueAnswerJob(
-					ctx,
+					workContext,
 					job.ID,
+					job.LeaseToken,
 					nextAttemptAt,
 					JobErrorCodeTemporarilyUnavailable,
 					safeAnswerJobRetryMessage,
@@ -276,14 +358,19 @@ func (w *JobWorker) RunOnce(ctx context.Context) (handled bool, err error) {
 			}
 		}
 
-		err = w.failJob(ctx, job, processingErr)
+		err = w.failJob(workContext, job, processingErr)
 		finalEvent.Type = JobEventFailed
 		finalEvent.Status = JobStatusFailed
 		finalEvent.ErrorCode = JobErrorCodeExecutionFailed
 		return true, err
 	}
 
-	if finalizeErr := w.jobs.MarkAnswerJobSucceeded(ctx, job.ID, output); finalizeErr != nil {
+	if finalizeErr := w.jobs.MarkAnswerJobSucceeded(
+		workContext,
+		job.ID,
+		job.LeaseToken,
+		output,
+	); finalizeErr != nil {
 		err = fmt.Errorf("mark answer job %d succeeded: %w", job.ID, finalizeErr)
 		return true, err
 	}
@@ -343,6 +430,7 @@ func (w *JobWorker) failJob(
 	if err := w.jobs.MarkAnswerJobFailed(
 		ctx,
 		job.ID,
+		job.LeaseToken,
 		JobErrorCodeExecutionFailed,
 		safeAnswerJobFailureMessage,
 	); err != nil {
@@ -426,34 +514,32 @@ func classifyAnswerJobError(err error) JobErrorCategory {
 	}
 }
 
-// InterruptedJobRecoveryService 编排启动时恢复遗留 processing 任务。
-type InterruptedJobRecoveryService struct {
-	jobs InterruptedJobRecoverer
-	now  func() time.Time
+// ExpiredJobRecoveryService 编排多实例安全的 Answer 任务租约恢复。
+type ExpiredJobRecoveryService struct {
+	jobs ExpiredJobRecoverer
 }
 
-// NewInterruptedJobRecoveryService 创建启动恢复服务。
-func NewInterruptedJobRecoveryService(
-	jobs InterruptedJobRecoverer,
-) (*InterruptedJobRecoveryService, error) {
+// NewExpiredJobRecoveryService 创建过期任务租约恢复服务。
+func NewExpiredJobRecoveryService(
+	jobs ExpiredJobRecoverer,
+) (*ExpiredJobRecoveryService, error) {
 	if jobs == nil {
 		return nil, ErrAnswerJobWorkerDependencies
 	}
-	return &InterruptedJobRecoveryService{jobs: jobs, now: time.Now}, nil
+	return &ExpiredJobRecoveryService{jobs: jobs}, nil
 }
 
-// Recover 把上次异常退出遗留的 processing 任务放回 queued。
-func (s *InterruptedJobRecoveryService) Recover(
+// Recover 把真正过期的 processing 任务放回 queued。
+func (s *ExpiredJobRecoveryService) Recover(
 	ctx context.Context,
 ) (int64, error) {
-	count, err := s.jobs.RequeueInterruptedAnswerJobs(
+	count, err := s.jobs.RequeueExpiredAnswerJobs(
 		ctx,
-		s.now(),
 		JobErrorCodeWorkerInterrupted,
 		safeAnswerJobRecoveryMessage,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("recover interrupted answer jobs: %w", err)
+		return 0, fmt.Errorf("recover expired answer jobs: %w", err)
 	}
 	return count, nil
 }

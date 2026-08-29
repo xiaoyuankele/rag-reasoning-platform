@@ -144,7 +144,8 @@ advisory lock 只覆盖“计数 + 插入”的短临界区，绝不能覆盖 PD
 6. 文档解析收尾仍需要保持 chunks 替换与 document/job 状态的一致事务边界；
 7. 向量写回继续在同一事务中替换向量并更新 embedding_jobs。
 
-现有 InterruptedJobRecoveryService 必须在多实例模式下被“仅恢复过期租约”的实现替代。不能在 API 或 Worker 启动时无条件重置所有 processing 任务。
+Document、Embedding 与 Answer 的恢复服务都已改成“仅恢复过期租约”。API 或 Worker 启动不会再无条件重置
+所有 `processing` 任务；三类任务的成功、重试和失败收尾均受随机 fencing token 保护。
 
 ## 6. B100-5：Redis 的精确职责
 

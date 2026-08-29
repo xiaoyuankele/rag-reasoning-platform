@@ -443,7 +443,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	var answerJobRepository *postgres.AnswerJobRepository
 	if answerJobsConfig.Enabled &&
 		(rolePlan.serveHTTP || rolePlan.runAnswerWorker) {
-		answerJobRepository = postgres.NewAnswerJobRepository(
+		answerJobRepository = postgres.NewAnswerJobRepositoryWithPolicies(
 			databasePool,
 			answerapplication.JobAdmissionLimits{
 				MaxQueuedJobsPerOwner: answerJobsConfig.MaxQueuedPerUser,
@@ -453,6 +453,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 				MaxInFlightPerOwner:         answerJobsConfig.OwnerInFlightLimit,
 				MaxBorrowedInFlightPerOwner: answerJobsConfig.OwnerBorrowedInFlightLimit,
 				StarvationThreshold:         answerJobsConfig.StarvationThreshold,
+			},
+			answerapplication.JobLeasePolicy{
+				WorkerID:      answerJobsConfig.WorkerID,
+				LeaseDuration: answerJobsConfig.JobLeaseDuration,
 			},
 		)
 	}
@@ -900,7 +904,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	if answerJobsConfig.Enabled && rolePlan.runAnswerWorker {
 		answerJobRecoveryService, err :=
-			answerapplication.NewInterruptedJobRecoveryService(
+			answerapplication.NewExpiredJobRecoveryService(
 				answerJobRepository,
 			)
 		if err != nil {
@@ -930,12 +934,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			return fmt.Errorf("create answer job retry policy: %w", err)
 		}
 		answerJobLogger := observability.NewAnswerJobLogger(logger)
-		answerJobWorker, err := answerapplication.NewJobWorker(
+		answerJobWorker, err := answerapplication.NewJobWorkerWithHeartbeatInterval(
 			answerJobRepository,
 			answerService,
 			answerJobLogger,
 			answerJobsConfig.ProcessingTimeout,
 			answerJobRetryPolicy,
+			answerJobsConfig.JobHeartbeatInterval,
 		)
 		if err != nil {
 			return fmt.Errorf("create answer job worker: %w", err)
@@ -1001,6 +1006,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			"cleanup_interval_ms",
 			answerJobsConfig.CleanupInterval.Milliseconds(),
 			"cleanup_batch_size", answerJobsConfig.CleanupBatchSize,
+			"worker_id", answerJobsConfig.WorkerID,
+			"lease_duration_ms",
+			answerJobsConfig.JobLeaseDuration.Milliseconds(),
+			"heartbeat_interval_ms",
+			answerJobsConfig.JobHeartbeatInterval.Milliseconds(),
 		)
 	}
 

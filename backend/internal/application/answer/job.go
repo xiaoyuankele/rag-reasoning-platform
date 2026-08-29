@@ -3,6 +3,7 @@ package answer
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
@@ -42,6 +43,15 @@ var (
 	// ErrInvalidAnswerJobSchedulingPolicy 表示 Owner 公平领取策略无效。
 	ErrInvalidAnswerJobSchedulingPolicy = errors.New(
 		"answer job scheduling policy is invalid",
+	)
+
+	// ErrAnswerJobLeaseLost 表示当前 Worker 已不再拥有这条任务的租约。
+	// 旧 Worker 必须停止写答案或任务终态，避免覆盖接管任务的新 Worker。
+	ErrAnswerJobLeaseLost = errors.New("answer job lease lost")
+
+	// ErrInvalidAnswerJobLeasePolicy 表示 Worker 身份或租约时长无效。
+	ErrInvalidAnswerJobLeasePolicy = errors.New(
+		"answer job lease policy is invalid",
 	)
 )
 
@@ -110,6 +120,9 @@ type Job struct {
 	UpdatedAt                 time.Time
 	StartedAt                 *time.Time
 	CompletedAt               *time.Time
+	// LeaseToken 只供后台 Worker 执行 fencing，不属于 HTTP 响应契约。
+	// 非 processing 任务和普通用户查询结果可以为空。
+	LeaseToken string
 }
 
 // JobListOptions 是仓储层使用的分页窗口。
@@ -145,6 +158,18 @@ type JobSchedulingPolicy struct {
 	MaxInFlightPerOwner         int
 	MaxBorrowedInFlightPerOwner int
 	StarvationThreshold         time.Duration
+}
+
+// JobLeasePolicy 定义一个 Answer Worker 实例如何持有数据库任务。
+// WorkerID 用于排障；LeaseDuration 决定失联多久后允许其他 Worker 接管。
+type JobLeasePolicy struct {
+	WorkerID      string
+	LeaseDuration time.Duration
+}
+
+// IsValid 判断租约策略是否具备可持久化的 Worker 身份和正租约时长。
+func (p JobLeasePolicy) IsValid() bool {
+	return strings.TrimSpace(p.WorkerID) != "" && p.LeaseDuration > 0
 }
 
 // JobQueueStats 是 PostgreSQL 在某个时刻返回的全局异步问答队列快照。
@@ -208,11 +233,13 @@ type JobWorkerRepository interface {
 	MarkAnswerJobSucceeded(
 		ctx context.Context,
 		jobID int64,
+		leaseToken string,
 		output Output,
 	) error
 	RequeueAnswerJob(
 		ctx context.Context,
 		jobID int64,
+		leaseToken string,
 		nextAttemptAt time.Time,
 		errorCode JobErrorCode,
 		errorMessage string,
@@ -220,16 +247,27 @@ type JobWorkerRepository interface {
 	MarkAnswerJobFailed(
 		ctx context.Context,
 		jobID int64,
+		leaseToken string,
 		errorCode JobErrorCode,
 		errorMessage string,
 	) error
+	RenewAnswerJobLease(
+		ctx context.Context,
+		jobID int64,
+		leaseToken string,
+	) error
+	RequeueExpiredAnswerJobs(
+		ctx context.Context,
+		errorCode JobErrorCode,
+		errorMessage string,
+	) (int64, error)
 }
 
-// InterruptedJobRecoverer 在应用重启时恢复上次遗留的 processing 任务。
-type InterruptedJobRecoverer interface {
-	RequeueInterruptedAnswerJobs(
+// ExpiredJobRecoverer 定义恢复真正过期 processing 任务的能力。
+// 仍有有效租约和心跳的其他实例任务绝不能被恢复。
+type ExpiredJobRecoverer interface {
+	RequeueExpiredAnswerJobs(
 		ctx context.Context,
-		recoveredAt time.Time,
 		errorCode JobErrorCode,
 		errorMessage string,
 	) (int64, error)
