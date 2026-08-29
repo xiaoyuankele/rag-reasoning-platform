@@ -4,51 +4,41 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 )
 
-type fakeInterruptedEmbeddingJobRecoverer struct {
-	requeueFunc func(context.Context, time.Time, string) (int64, error)
+type fakeExpiredEmbeddingJobRecoverer struct {
+	requeueFunc func(context.Context, string) (int64, error)
 	calls       int
 }
 
-func (f *fakeInterruptedEmbeddingJobRecoverer) RequeueInterruptedEmbeddingJobs(
+func (f *fakeExpiredEmbeddingJobRecoverer) RequeueExpiredEmbeddingJobs(
 	ctx context.Context,
-	recoveredAt time.Time,
 	errorMessage string,
 ) (int64, error) {
 	f.calls++
-	return f.requeueFunc(ctx, recoveredAt, errorMessage)
+	return f.requeueFunc(ctx, errorMessage)
 }
 
-func TestInterruptedEmbeddingJobRecoveryServiceRecoversJobs(t *testing.T) {
+func TestExpiredEmbeddingJobRecoveryServiceRecoversJobs(t *testing.T) {
 	expectedContext := context.Background()
-	recoveredAt := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
-	jobs := &fakeInterruptedEmbeddingJobRecoverer{
+	jobs := &fakeExpiredEmbeddingJobRecoverer{
 		requeueFunc: func(
 			ctx context.Context,
-			actualRecoveredAt time.Time,
 			errorMessage string,
 		) (int64, error) {
 			if ctx != expectedContext {
 				t.Fatal("recovery repository received a different context")
 			}
-			if !actualRecoveredAt.Equal(recoveredAt) {
-				t.Fatalf("recovered at = %v, want %v", actualRecoveredAt, recoveredAt)
-			}
-			if errorMessage != safeInterruptedEmbeddingMessage {
-				t.Fatalf("recovery message = %q, want %q", errorMessage, safeInterruptedEmbeddingMessage)
+			if errorMessage != safeExpiredEmbeddingMessage {
+				t.Fatalf("recovery message = %q, want %q", errorMessage, safeExpiredEmbeddingMessage)
 			}
 			return 2, nil
 		},
 	}
 
-	service, err := newInterruptedJobRecoveryService(
-		jobs,
-		func() time.Time { return recoveredAt },
-	)
+	service, err := NewExpiredJobRecoveryService(jobs)
 	if err != nil {
-		t.Fatalf("newInterruptedJobRecoveryService() error = %v", err)
+		t.Fatalf("NewExpiredJobRecoveryService() error = %v", err)
 	}
 
 	recoveredCount, err := service.Recover(expectedContext)
@@ -60,16 +50,16 @@ func TestInterruptedEmbeddingJobRecoveryServiceRecoversJobs(t *testing.T) {
 	}
 }
 
-func TestInterruptedEmbeddingJobRecoveryServiceWrapsRepositoryError(t *testing.T) {
+func TestExpiredEmbeddingJobRecoveryServiceWrapsRepositoryError(t *testing.T) {
 	repositoryError := errors.New("database unavailable")
-	jobs := &fakeInterruptedEmbeddingJobRecoverer{
-		requeueFunc: func(context.Context, time.Time, string) (int64, error) {
+	jobs := &fakeExpiredEmbeddingJobRecoverer{
+		requeueFunc: func(context.Context, string) (int64, error) {
 			return 0, repositoryError
 		},
 	}
-	service, err := NewInterruptedJobRecoveryService(jobs)
+	service, err := NewExpiredJobRecoveryService(jobs)
 	if err != nil {
-		t.Fatalf("NewInterruptedJobRecoveryService() error = %v", err)
+		t.Fatalf("NewExpiredJobRecoveryService() error = %v", err)
 	}
 
 	recoveredCount, err := service.Recover(context.Background())
@@ -81,9 +71,9 @@ func TestInterruptedEmbeddingJobRecoveryServiceWrapsRepositoryError(t *testing.T
 	}
 }
 
-func TestNewInterruptedEmbeddingJobRecoveryServiceRejectsMissingDependencies(t *testing.T) {
-	_, err := NewInterruptedJobRecoveryService(nil)
+func TestNewExpiredEmbeddingJobRecoveryServiceRejectsMissingDependencies(t *testing.T) {
+	_, err := NewExpiredJobRecoveryService(nil)
 	if !errors.Is(err, ErrEmbeddingRecoveryDependencies) {
-		t.Fatalf("NewInterruptedJobRecoveryService() error = %v, want ErrEmbeddingRecoveryDependencies", err)
+		t.Fatalf("NewExpiredJobRecoveryService() error = %v, want ErrEmbeddingRecoveryDependencies", err)
 	}
 }

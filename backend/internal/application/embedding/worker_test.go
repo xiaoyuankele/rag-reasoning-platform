@@ -24,6 +24,10 @@ type fakeEmbeddingJobWorkerRepository struct {
 	succeedCalls int
 	requeueCalls int
 	failCalls    int
+	recoverFunc  func(context.Context, string) (int64, error)
+	renewFunc    func(context.Context, int64, string) error
+	recoverCalls int
+	renewCalls   int
 }
 
 // ClaimNextEmbeddingJob 模拟原子领取下一条 queued 向量任务。
@@ -38,6 +42,7 @@ func (f *fakeEmbeddingJobWorkerRepository) ClaimNextEmbeddingJob(
 func (f *fakeEmbeddingJobWorkerRepository) MarkEmbeddingJobSucceeded(
 	ctx context.Context,
 	jobID int64,
+	_ string,
 	completion embeddingdomain.JobCompletion,
 ) error {
 	f.succeedCalls++
@@ -48,6 +53,7 @@ func (f *fakeEmbeddingJobWorkerRepository) MarkEmbeddingJobSucceeded(
 func (f *fakeEmbeddingJobWorkerRepository) RequeueEmbeddingJob(
 	ctx context.Context,
 	jobID int64,
+	_ string,
 	nextAttemptAt time.Time,
 	errorMessage string,
 ) error {
@@ -59,10 +65,34 @@ func (f *fakeEmbeddingJobWorkerRepository) RequeueEmbeddingJob(
 func (f *fakeEmbeddingJobWorkerRepository) MarkEmbeddingJobFailed(
 	ctx context.Context,
 	jobID int64,
+	_ string,
 	errorMessage string,
 ) error {
 	f.failCalls++
 	return f.failFunc(ctx, jobID, errorMessage)
+}
+
+func (f *fakeEmbeddingJobWorkerRepository) RequeueExpiredEmbeddingJobs(
+	ctx context.Context,
+	errorMessage string,
+) (int64, error) {
+	f.recoverCalls++
+	if f.recoverFunc == nil {
+		return 0, nil
+	}
+	return f.recoverFunc(ctx, errorMessage)
+}
+
+func (f *fakeEmbeddingJobWorkerRepository) RenewEmbeddingJobLease(
+	ctx context.Context,
+	jobID int64,
+	leaseToken string,
+) error {
+	f.renewCalls++
+	if f.renewFunc == nil {
+		return nil
+	}
+	return f.renewFunc(ctx, jobID, leaseToken)
 }
 
 // fakeEmbeddingChunkLister 模拟按 document ID 读取已经入库的全部文本块。
@@ -131,6 +161,135 @@ func TestEmbeddingWorkerReturnsIdleForEmptyQueue(t *testing.T) {
 	if len(events.events) != 0 {
 		t.Fatalf("empty queue events = %d, want 0", len(events.events))
 	}
+}
+
+func TestEmbeddingWorkerRenewsLeaseWhileProviderIsRunning(t *testing.T) {
+	renewed := make(chan struct{})
+	job := embeddingdomain.Job{
+		ID:           41,
+		DocumentID:   51,
+		ModelName:    "test-model",
+		Dimensions:   2,
+		Status:       embeddingdomain.JobStatusProcessing,
+		AttemptCount: 1,
+		LeaseToken:   "current-lease",
+	}
+	jobs := &fakeEmbeddingJobWorkerRepository{
+		claimFunc: func(context.Context) (embeddingdomain.Job, error) {
+			return job, nil
+		},
+		renewFunc: func(_ context.Context, jobID int64, leaseToken string) error {
+			if jobID != job.ID || leaseToken != job.LeaseToken {
+				t.Fatalf("RenewEmbeddingJobLease() = (%d, %q), want (%d, %q)", jobID, leaseToken, job.ID, job.LeaseToken)
+			}
+			select {
+			case <-renewed:
+			default:
+				close(renewed)
+			}
+			return nil
+		},
+		succeedFunc: func(_ context.Context, jobID int64, completion embeddingdomain.JobCompletion) error {
+			if jobID != job.ID || len(completion.Vectors) != 1 {
+				t.Fatalf("success result = job %d vectors %d", jobID, len(completion.Vectors))
+			}
+			return nil
+		},
+		requeueFunc: failOnEmbeddingRequeue(t),
+		failFunc:    failOnEmbeddingFailure(t),
+	}
+	embedder := &fakeEmbedder{
+		embedFunc: func(ctx context.Context, _ embeddingdomain.EmbedRequest) (embeddingdomain.EmbedResult, error) {
+			select {
+			case <-ctx.Done():
+				return embeddingdomain.EmbedResult{}, ctx.Err()
+			case <-renewed:
+				return embeddingdomain.EmbedResult{
+					Vectors:      [][]float32{{0.1, 0.2}},
+					PromptTokens: 1,
+					TotalTokens:  1,
+				}, nil
+			}
+		},
+	}
+	policy, err := NewRetryPolicy(3, time.Second, time.Minute)
+	if err != nil {
+		t.Fatalf("NewRetryPolicy() error = %v", err)
+	}
+	worker, err := NewWorkerWithHeartbeatInterval(
+		jobs,
+		oneChunkLister(),
+		embedder,
+		newRecordingJobEventObserver(),
+		1,
+		time.Minute,
+		policy,
+		5*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("NewWorkerWithHeartbeatInterval() error = %v", err)
+	}
+
+	handled, runErr := worker.RunOnce(context.Background())
+	if runErr != nil || !handled {
+		t.Fatalf("RunOnce() = (%t, %v), want (true, nil)", handled, runErr)
+	}
+	if jobs.renewCalls == 0 || jobs.succeedCalls != 1 {
+		t.Fatalf("lease/success calls = %d/%d, want at least 1/1", jobs.renewCalls, jobs.succeedCalls)
+	}
+}
+
+func TestEmbeddingWorkerStopsWhenLeaseRenewalFails(t *testing.T) {
+	leaseFailure := errors.New("database lease unavailable")
+	job := embeddingdomain.Job{
+		ID:           61,
+		DocumentID:   71,
+		ModelName:    "test-model",
+		Dimensions:   2,
+		Status:       embeddingdomain.JobStatusProcessing,
+		AttemptCount: 1,
+		LeaseToken:   "lost-lease",
+	}
+	jobs := &fakeEmbeddingJobWorkerRepository{
+		claimFunc: func(context.Context) (embeddingdomain.Job, error) {
+			return job, nil
+		},
+		renewFunc: func(context.Context, int64, string) error {
+			return leaseFailure
+		},
+		succeedFunc: failOnEmbeddingSuccess(t),
+		requeueFunc: failOnEmbeddingRequeue(t),
+		failFunc:    failOnEmbeddingFailure(t),
+	}
+	embedder := &fakeEmbedder{
+		embedFunc: func(ctx context.Context, _ embeddingdomain.EmbedRequest) (embeddingdomain.EmbedResult, error) {
+			<-ctx.Done()
+			return embeddingdomain.EmbedResult{}, ctx.Err()
+		},
+	}
+	policy, err := NewRetryPolicy(3, time.Second, time.Minute)
+	if err != nil {
+		t.Fatalf("NewRetryPolicy() error = %v", err)
+	}
+	worker, err := NewWorkerWithHeartbeatInterval(
+		jobs,
+		oneChunkLister(),
+		embedder,
+		newRecordingJobEventObserver(),
+		1,
+		time.Minute,
+		policy,
+		5*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("NewWorkerWithHeartbeatInterval() error = %v", err)
+	}
+
+	handled, runErr := worker.RunOnce(context.Background())
+	if !handled || !errors.Is(runErr, leaseFailure) {
+		t.Fatalf("RunOnce() = (%t, %v), want handled lease error", handled, runErr)
+	}
+	assertEmbeddingFinalizationCalls(t, jobs, 0, 0, 0)
 }
 
 func TestEmbeddingWorkerBatchesChunksAndCompletesJob(t *testing.T) {

@@ -399,12 +399,16 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	var embeddingJobRepository *postgres.EmbeddingJobRepository
 	if rolePlan.runEmbeddingWorker {
 		embeddingJobRepository =
-			postgres.NewEmbeddingJobRepositoryWithSchedulingPolicy(
+			postgres.NewEmbeddingJobRepositoryWithPolicies(
 				databasePool,
 				embeddingdomain.JobSchedulingPolicy{
 					MaxInFlightPerOwner:         embeddingConfig.OwnerInFlightLimit,
 					MaxBorrowedInFlightPerOwner: embeddingConfig.OwnerBorrowedLimit,
 					StarvationThreshold:         embeddingConfig.StarvationThreshold,
+				},
+				embeddingdomain.JobLeasePolicy{
+					WorkerID:      embeddingConfig.WorkerID,
+					LeaseDuration: embeddingConfig.JobLeaseDuration,
 				},
 			)
 		if chunkRepository == nil {
@@ -477,11 +481,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 	}
 
-	// Embedding Worker 在 shutdown 时保留 processing，避免把正常停机伪装成业务失败。
-	// 单实例服务重新启动后，必须先把这些遗留任务放回 queued，随后才能启动 Worker。
+	// Embedding Worker 只恢复真正过期的 processing 租约。其他实例仍在
+	// 心跳的任务不会被重排，因此不同进程可以安全共享同一队列。
 	if rolePlan.runEmbeddingWorker {
 		embeddingRecoveryService, err :=
-			embeddingapplication.NewInterruptedJobRecoveryService(
+			embeddingapplication.NewExpiredJobRecoveryService(
 				embeddingJobRepository,
 			)
 		if err != nil {
@@ -490,13 +494,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		embeddingRecoveredJobCount, err := embeddingRecoveryService.Recover(ctx)
 		if err != nil {
 			return fmt.Errorf(
-				"recover interrupted embedding jobs during startup: %w",
+				"recover expired embedding jobs during startup: %w",
 				err,
 			)
 		}
 		if embeddingRecoveredJobCount > 0 {
 			logger.Info(
-				"Requeued interrupted embedding jobs",
+				"Requeued expired embedding jobs",
 				"event", "embedding_jobs_requeued",
 				"job_count", embeddingRecoveredJobCount,
 			)
@@ -1129,7 +1133,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			return fmt.Errorf("create embedding retry policy: %w", err)
 		}
 
-		embeddingWorker, err := embeddingapplication.NewWorker(
+		embeddingWorker, err := embeddingapplication.NewWorkerWithHeartbeatInterval(
 			embeddingJobRepository,
 			chunkRepository,
 			workerEmbedder,
@@ -1137,6 +1141,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			embeddingConfig.BatchSize,
 			embeddingConfig.ProcessingTimeout,
 			retryPolicy,
+			embeddingConfig.JobHeartbeatInterval,
 		)
 		if err != nil {
 			return fmt.Errorf("create embedding worker: %w", err)
@@ -1173,6 +1178,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			"owner_borrowed_limit", embeddingConfig.OwnerBorrowedLimit,
 			"starvation_threshold_ms",
 			embeddingConfig.StarvationThreshold.Milliseconds(),
+			"worker_id", embeddingConfig.WorkerID,
+			"lease_duration_ms", embeddingConfig.JobLeaseDuration.Milliseconds(),
+			"heartbeat_interval_ms",
+			embeddingConfig.JobHeartbeatInterval.Milliseconds(),
 		)
 	}
 

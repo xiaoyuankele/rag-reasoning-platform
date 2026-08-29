@@ -32,6 +32,8 @@ const (
 	defaultEmbeddingOwnerBorrowedLimit        = 2
 	maximumEmbeddingOwnerInFlightLimit        = 64
 	defaultEmbeddingStarvationThreshold       = 2 * time.Minute
+	defaultEmbeddingJobLeaseDuration          = 60 * time.Second
+	defaultEmbeddingJobHeartbeatInterval      = 15 * time.Second
 )
 
 // EmbeddingProvider 是远程向量服务提供方的配置枚举。
@@ -85,6 +87,9 @@ var (
 	ErrInvalidEmbeddingOwnerSchedulingLimits = errors.New(
 		"embedding borrowed owner in-flight limit must not be smaller than the base owner limit",
 	)
+	ErrInvalidEmbeddingJobLeaseTiming = errors.New(
+		"embedding job heartbeat interval must be shorter than lease duration",
+	)
 )
 
 // EmbeddingConfig 保存任务入队、后台执行和在线语义检索需要的向量配置。
@@ -115,6 +120,9 @@ type EmbeddingConfig struct {
 	OwnerInFlightLimit        int
 	OwnerBorrowedLimit        int
 	StarvationThreshold       time.Duration
+	WorkerID                  string
+	JobLeaseDuration          time.Duration
+	JobHeartbeatInterval      time.Duration
 }
 
 // LoadEmbedding 从环境变量加载向量任务、Worker 与语义检索配置。
@@ -357,6 +365,40 @@ func LoadEmbedding() (EmbeddingConfig, error) {
 		)
 	}
 
+	workerID := strings.TrimSpace(os.Getenv("EMBEDDING_WORKER_ID"))
+	if workerID == "" {
+		hostname, hostnameErr := os.Hostname()
+		if hostnameErr != nil || strings.TrimSpace(hostname) == "" {
+			hostname = "embedding-worker"
+		}
+		workerID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	}
+
+	jobLeaseDuration, err := loadPositiveDuration(
+		"EMBEDDING_JOB_LEASE_DURATION",
+		defaultEmbeddingJobLeaseDuration,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding job lease duration: %w",
+			err,
+		)
+	}
+
+	jobHeartbeatInterval, err := loadPositiveDuration(
+		"EMBEDDING_JOB_HEARTBEAT_INTERVAL",
+		defaultEmbeddingJobHeartbeatInterval,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding job heartbeat interval: %w",
+			err,
+		)
+	}
+	if jobHeartbeatInterval >= jobLeaseDuration {
+		return EmbeddingConfig{}, ErrInvalidEmbeddingJobLeaseTiming
+	}
+
 	return EmbeddingConfig{
 		WorkerEnabled:             workerEnabled,
 		WorkerConcurrency:         workerConcurrency,
@@ -382,6 +424,9 @@ func LoadEmbedding() (EmbeddingConfig, error) {
 		OwnerInFlightLimit:        ownerInFlightLimit,
 		OwnerBorrowedLimit:        ownerBorrowedLimit,
 		StarvationThreshold:       starvationThreshold,
+		WorkerID:                  workerID,
+		JobLeaseDuration:          jobLeaseDuration,
+		JobHeartbeatInterval:      jobHeartbeatInterval,
 	}, nil
 }
 

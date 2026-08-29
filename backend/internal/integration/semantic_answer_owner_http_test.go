@@ -415,18 +415,26 @@ func createSemanticOwnerIntegrationDocument(
 	if err != nil {
 		t.Fatalf("create semantic owner embedding job %q: %v", name, err)
 	}
+	leaseToken := fmt.Sprintf("semantic-owner-test-lease-%d", job.ID)
 	if _, err := pool.Exec(
 		ctx,
 		`UPDATE embedding_jobs
-		 SET status = 'processing', started_at = CURRENT_TIMESTAMP
+		 SET status = 'processing',
+		     started_at = CURRENT_TIMESTAMP,
+		     worker_id = 'semantic-owner-test-worker',
+		     lease_token = $2,
+		     lease_expires_at = CURRENT_TIMESTAMP + INTERVAL '1 minute',
+		     heartbeat_at = CURRENT_TIMESTAMP
 		 WHERE id = $1`,
 		job.ID,
+		leaseToken,
 	); err != nil {
 		t.Fatalf("mark semantic owner embedding job %q processing: %v", name, err)
 	}
 	if err := jobs.MarkEmbeddingJobSucceeded(
 		ctx,
 		job.ID,
+		leaseToken,
 		embeddingdomain.JobCompletion{
 			Vectors: []embeddingdomain.ChunkVector{{
 				ChunkID: persistedChunks[0].ID,

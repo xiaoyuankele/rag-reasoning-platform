@@ -53,16 +53,16 @@ Compose 和镜像使用三个配套设置：
 | 任务类型 | 启动前状态 | 恢复后状态 | 原因 |
 | --- | --- | --- | --- |
 | 文档解析 | `processing` 且租约过期 | 任务回到 `queued`，文档暂时变为 `failed`，随后可重新领取 | chunks 与终态均受 fencing token 保护，旧 Worker 已不能覆盖新结果，因此可以自动接管 |
-| Embedding | `processing` | 任务回到 `queued`，文档仍为 `ready` | 文本 chunks 已经稳定存在；向量采用全部成功才提交的事务，可安全重新生成 |
+| Embedding | `processing` 且租约过期 | 任务回到 `queued`，文档仍为 `ready` | 向量事务与终态受 fencing token 保护，旧 Worker 不能覆盖接管后的结果 |
 
 恢复错误信息使用稳定安全文本：
 
 - 文档解析：`document processing lease expired and was requeued`；
-- Embedding：`embedding generation was interrupted`。
+- Embedding：`embedding job lease expired and was requeued`。
 
-文档解析已经使用 PostgreSQL 持久化 lease、heartbeat、Worker 身份和随机 fencing token，只恢复真正过期的
-任务；这允许多个文档 Worker 进程共享同一队列。Embedding 与 Answer 仍保留各自原有恢复模型，在完成同类
-租约升级前不能仅凭文档任务已安全就任意增加这些 Worker 的多实例数量。
+文档解析和 Embedding 都已使用 PostgreSQL 持久化 lease、heartbeat、Worker 身份和随机 fencing token，
+只恢复真正过期的任务；这允许多个同类 Worker 进程共享各自队列。Answer 仍保留原有恢复模型，在完成同类
+租约升级前不能任意增加 Answer Worker 的多实例数量。
 
 ## 4. 可重复验收脚本
 
@@ -121,3 +121,14 @@ chatgpt/运行产物/临时/container-lifecycle-20260815T075151Z.json
 `TestProcessingJobLeaseRecoveryAndFencing` 验证，覆盖有效续租、到期重领、新 fencing token、旧 Worker
 chunks 写入拒绝和旧 Worker 终态写入拒绝。容器级异常退出脚本需要在后续将 API 与 `document-worker`
 作为两个角色分别验收，更新前不得把旧脚本结果当作当前发布证据。
+
+## 7. 2026-08-29 Embedding 租约升级说明
+
+Embedding Worker 现在会在领取事务中写入 `worker_id`、随机 `lease_token`、`lease_expires_at` 和
+`heartbeat_at`。远程批次调用期间由独立 goroutine 续租；向量覆盖、任务成功、延迟重试和永久失败都必须
+携带仍有效的 token。向量覆盖与成功终态仍处在同一事务中，因此过期旧 Worker 既不能写半份向量，也不能
+改变新 Worker 的状态。
+
+恢复器只重排真正过期或升级前没有租约的 `processing` 任务。Application 在启动和每次领取前执行恢复，
+PostgreSQL 使用部分索引与 `SKIP LOCKED` 支持多个实例同时检查。默认租约 60 秒、心跳 15 秒；Fake Provider
+测试验证处理期间续租和续租失败停止写入，真实 PostgreSQL 测试验证过期重领与旧 token 拒绝。

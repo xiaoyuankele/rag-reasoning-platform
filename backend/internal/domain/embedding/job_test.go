@@ -86,6 +86,42 @@ func TestJobSchedulingPolicyIsValid(t *testing.T) {
 	}
 }
 
+func TestJobLeasePolicyIsValid(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy JobLeasePolicy
+		want   bool
+	}{
+		{
+			name: "valid",
+			policy: JobLeasePolicy{
+				WorkerID:      "embedding-worker-1",
+				LeaseDuration: time.Minute,
+			},
+			want: true,
+		},
+		{
+			name: "empty worker ID",
+			policy: JobLeasePolicy{
+				LeaseDuration: time.Minute,
+			},
+		},
+		{
+			name: "zero duration",
+			policy: JobLeasePolicy{
+				WorkerID: "embedding-worker-1",
+			},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := testCase.policy.IsValid(); got != testCase.want {
+				t.Fatalf("JobLeasePolicy.IsValid() = %t, want %t", got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestJobStatusIsValid(t *testing.T) {
 	testCases := []struct {
 		name   string

@@ -90,6 +90,7 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 		if err := jobRepository.MarkEmbeddingJobFailed(
 			ctx,
 			claimedJob.ID,
+			claimedJob.LeaseToken,
 			"embedding claim integration test cleanup",
 		); err != nil {
 			t.Fatalf("finalize claimed embedding job: %v", err)
@@ -160,7 +161,7 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 			fixtures[0].job.ID: {},
 			fixtures[1].job.ID: {},
 		}
-		claimedIDs := make(map[int64]struct{}, len(fixtures))
+		claimedJobs := make(map[int64]embeddingdomain.Job, len(fixtures))
 		for result := range results {
 			if result.err != nil {
 				t.Fatalf("claim embedding job concurrently: %v", result.err)
@@ -171,23 +172,24 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 					result.job.ID,
 				)
 			}
-			if _, duplicate := claimedIDs[result.job.ID]; duplicate {
+			if _, duplicate := claimedJobs[result.job.ID]; duplicate {
 				t.Fatalf("embedding job %d was claimed twice", result.job.ID)
 			}
-			claimedIDs[result.job.ID] = struct{}{}
+			claimedJobs[result.job.ID] = result.job
 		}
 
-		if len(claimedIDs) != len(fixtures) {
+		if len(claimedJobs) != len(fixtures) {
 			t.Fatalf(
 				"claimed %d distinct jobs, want %d",
-				len(claimedIDs),
+				len(claimedJobs),
 				len(fixtures),
 			)
 		}
-		for claimedID := range claimedIDs {
+		for claimedID, claimedJob := range claimedJobs {
 			if err := jobRepository.MarkEmbeddingJobFailed(
 				ctx,
 				claimedID,
+				claimedJob.LeaseToken,
 				"concurrent embedding claim integration test cleanup",
 			); err != nil {
 				t.Fatalf("finalize concurrently claimed job %d: %v", claimedID, err)
@@ -206,7 +208,7 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 			"success",
 			[]string{"first semantic chunk", "second semantic chunk"},
 		)
-		markEmbeddingJobProcessing(t, ctx, pool, fixture.job.ID)
+		leaseToken := markEmbeddingJobProcessing(t, ctx, pool, fixture.job.ID)
 		revisionBefore, err := revisionRepository.GetCorpusRevision(
 			ctx,
 			documentRepository.scope,
@@ -226,6 +228,7 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 		if err := jobRepository.MarkEmbeddingJobSucceeded(
 			ctx,
 			fixture.job.ID,
+			leaseToken,
 			completion,
 		); err != nil {
 			t.Fatalf("mark embedding job succeeded: %v", err)
@@ -265,11 +268,12 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create replacement embedding job: %v", err)
 		}
-		markEmbeddingJobProcessing(t, ctx, pool, replacementJob.ID)
+		replacementLeaseToken := markEmbeddingJobProcessing(t, ctx, pool, replacementJob.ID)
 
 		err = jobRepository.MarkEmbeddingJobSucceeded(
 			ctx,
 			replacementJob.ID,
+			replacementLeaseToken,
 			embeddingdomain.JobCompletion{
 				Vectors: []embeddingdomain.ChunkVector{
 					{ChunkID: fixture.chunks[0].ID, Values: embeddingVector(1536, 0.3)},
@@ -326,12 +330,13 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 			"failed",
 			[]string{"failed job chunk"},
 		)
-		markEmbeddingJobProcessing(t, ctx, pool, fixture.job.ID)
+		leaseToken := markEmbeddingJobProcessing(t, ctx, pool, fixture.job.ID)
 
 		const safeMessage = "embedding generation failed"
 		if err := jobRepository.MarkEmbeddingJobFailed(
 			ctx,
 			fixture.job.ID,
+			leaseToken,
 			safeMessage,
 		); err != nil {
 			t.Fatalf("mark embedding job failed: %v", err)
@@ -357,9 +362,9 @@ func TestEmbeddingJobWorkerRepository(t *testing.T) {
 			t.Fatalf("failed embedding job state = (%q, %v, %v)", status, errorMessage, completedAt)
 		}
 
-		err := jobRepository.MarkEmbeddingJobFailed(ctx, fixture.job.ID, safeMessage)
-		if !errors.Is(err, embeddingdomain.ErrJobNotProcessing) {
-			t.Fatalf("second failure finalization error = %v, want ErrJobNotProcessing", err)
+		err := jobRepository.MarkEmbeddingJobFailed(ctx, fixture.job.ID, leaseToken, safeMessage)
+		if !errors.Is(err, embeddingdomain.ErrJobLeaseLost) {
+			t.Fatalf("second failure finalization error = %v, want ErrJobLeaseLost", err)
 		}
 	})
 }
@@ -467,8 +472,9 @@ func markEmbeddingJobProcessing(
 	ctx context.Context,
 	pool *pgxpool.Pool,
 	jobID int64,
-) {
+) string {
 	t.Helper()
+	leaseToken := fmt.Sprintf("embedding-test-lease-%d", jobID)
 
 	if _, err := pool.Exec(
 		ctx,
@@ -477,12 +483,18 @@ func markEmbeddingJobProcessing(
 			status = 'processing',
 			attempt_count = attempt_count + 1,
 			started_at = CURRENT_TIMESTAMP,
-			updated_at = CURRENT_TIMESTAMP
+			updated_at = CURRENT_TIMESTAMP,
+			worker_id = 'embedding-test-worker',
+			lease_token = $2,
+			lease_expires_at = CURRENT_TIMESTAMP + INTERVAL '1 minute',
+			heartbeat_at = CURRENT_TIMESTAMP
 		WHERE id = $1`,
 		jobID,
+		leaseToken,
 	); err != nil {
 		t.Fatalf("mark embedding job processing: %v", err)
 	}
+	return leaseToken
 }
 
 func assertEmbeddingJobState(

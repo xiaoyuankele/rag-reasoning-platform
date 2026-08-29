@@ -63,7 +63,10 @@ func TestLoadEmbeddingUsesDefaults(t *testing.T) {
 		embeddingConfig.ActiveJobsGlobalLimit != defaultEmbeddingActiveGlobalLimit ||
 		embeddingConfig.OwnerInFlightLimit != defaultEmbeddingOwnerInFlightLimit ||
 		embeddingConfig.OwnerBorrowedLimit != defaultEmbeddingOwnerBorrowedLimit ||
-		embeddingConfig.StarvationThreshold != defaultEmbeddingStarvationThreshold {
+		embeddingConfig.StarvationThreshold != defaultEmbeddingStarvationThreshold ||
+		embeddingConfig.WorkerID == "" ||
+		embeddingConfig.JobLeaseDuration != defaultEmbeddingJobLeaseDuration ||
+		embeddingConfig.JobHeartbeatInterval != defaultEmbeddingJobHeartbeatInterval {
 		t.Fatalf("default worker configuration was not loaded")
 	}
 }
@@ -93,6 +96,9 @@ func TestLoadEmbeddingUsesOpenAIEnvironment(t *testing.T) {
 	t.Setenv("EMBEDDING_MAX_IN_FLIGHT_PER_OWNER", "2")
 	t.Setenv("EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", "3")
 	t.Setenv("EMBEDDING_STARVATION_THRESHOLD", "90s")
+	t.Setenv("EMBEDDING_WORKER_ID", " embedding-worker-test ")
+	t.Setenv("EMBEDDING_JOB_LEASE_DURATION", "45s")
+	t.Setenv("EMBEDDING_JOB_HEARTBEAT_INTERVAL", "10s")
 
 	embeddingConfig, err := LoadEmbedding()
 	if err != nil {
@@ -121,7 +127,10 @@ func TestLoadEmbeddingUsesOpenAIEnvironment(t *testing.T) {
 		embeddingConfig.ActiveJobsGlobalLimit != 200 ||
 		embeddingConfig.OwnerInFlightLimit != 2 ||
 		embeddingConfig.OwnerBorrowedLimit != 3 ||
-		embeddingConfig.StarvationThreshold != 90*time.Second {
+		embeddingConfig.StarvationThreshold != 90*time.Second ||
+		embeddingConfig.WorkerID != "embedding-worker-test" ||
+		embeddingConfig.JobLeaseDuration != 45*time.Second ||
+		embeddingConfig.JobHeartbeatInterval != 10*time.Second {
 		t.Fatal("LoadEmbedding() did not preserve configured values")
 	}
 }
@@ -427,6 +436,38 @@ func TestLoadEmbeddingRejectsInvalidOwnerScheduling(t *testing.T) {
 	})
 }
 
+func TestLoadEmbeddingRejectsInvalidJobLeaseTiming(t *testing.T) {
+	testCases := []struct {
+		name        string
+		environment string
+		value       string
+	}{
+		{name: "invalid lease", environment: "EMBEDDING_JOB_LEASE_DURATION", value: "later"},
+		{name: "zero lease", environment: "EMBEDDING_JOB_LEASE_DURATION", value: "0s"},
+		{name: "invalid heartbeat", environment: "EMBEDDING_JOB_HEARTBEAT_INTERVAL", value: "soon"},
+		{name: "zero heartbeat", environment: "EMBEDDING_JOB_HEARTBEAT_INTERVAL", value: "0s"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			clearEmbeddingEnvironment(t)
+			t.Setenv(testCase.environment, testCase.value)
+			if _, err := LoadEmbedding(); err == nil {
+				t.Fatalf("LoadEmbedding() error = nil for %s=%q", testCase.environment, testCase.value)
+			}
+		})
+	}
+
+	t.Run("heartbeat must be shorter than lease", func(t *testing.T) {
+		clearEmbeddingEnvironment(t)
+		t.Setenv("EMBEDDING_JOB_LEASE_DURATION", "10s")
+		t.Setenv("EMBEDDING_JOB_HEARTBEAT_INTERVAL", "10s")
+		_, err := LoadEmbedding()
+		if !errors.Is(err, ErrInvalidEmbeddingJobLeaseTiming) {
+			t.Fatalf("LoadEmbedding() error = %v, want ErrInvalidEmbeddingJobLeaseTiming", err)
+		}
+	})
+}
+
 func clearEmbeddingEnvironment(t *testing.T) {
 	t.Helper()
 
@@ -457,6 +498,9 @@ func clearEmbeddingEnvironment(t *testing.T) {
 		"EMBEDDING_MAX_IN_FLIGHT_PER_OWNER",
 		"EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER",
 		"EMBEDDING_STARVATION_THRESHOLD",
+		"EMBEDDING_WORKER_ID",
+		"EMBEDDING_JOB_LEASE_DURATION",
+		"EMBEDDING_JOB_HEARTBEAT_INTERVAL",
 	} {
 		t.Setenv(name, "")
 	}

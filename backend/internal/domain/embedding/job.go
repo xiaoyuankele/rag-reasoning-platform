@@ -4,6 +4,7 @@ package embedding
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
@@ -40,6 +41,13 @@ var (
 
 	// ErrInvalidJobSchedulingPolicy 表示 Worker 收到了无效的 Owner 公平策略。
 	ErrInvalidJobSchedulingPolicy = errors.New("embedding job scheduling policy is invalid")
+
+	// ErrJobLeaseLost 表示当前 Worker 已不再拥有这条向量任务的租约。
+	// 旧 Worker 必须停止写向量和任务终态，避免覆盖已经接管任务的新 Worker。
+	ErrJobLeaseLost = errors.New("embedding job lease lost")
+
+	// ErrInvalidJobLeasePolicy 表示 Worker 身份或租约时长无效。
+	ErrInvalidJobLeasePolicy = errors.New("embedding job lease policy is invalid")
 )
 
 // JobStatus 是向量任务的生命周期状态。
@@ -90,6 +98,9 @@ type Job struct {
 	UpdatedAt     time.Time
 	StartedAt     *time.Time
 	CompletedAt   *time.Time
+	// LeaseToken 只供后台 Worker 执行 fencing，不属于 HTTP 查询契约。
+	// 非 processing 任务和普通查询结果可以为空。
+	LeaseToken string
 }
 
 // JobRequestResult 表示一次向量化申请的持久化结果。
@@ -128,6 +139,18 @@ func (p JobSchedulingPolicy) IsValid() bool {
 	return p.MaxInFlightPerOwner > 0 &&
 		p.MaxBorrowedInFlightPerOwner >= p.MaxInFlightPerOwner &&
 		p.StarvationThreshold > 0
+}
+
+// JobLeasePolicy 定义一个 Embedding Worker 实例如何持有数据库任务。
+// WorkerID 用于排障；LeaseDuration 决定失联多久后允许其他 Worker 接管。
+type JobLeasePolicy struct {
+	WorkerID      string
+	LeaseDuration time.Duration
+}
+
+// IsValid 判断租约策略是否具备可持久化的 Worker 身份和正租约时长。
+func (p JobLeasePolicy) IsValid() bool {
+	return strings.TrimSpace(p.WorkerID) != "" && p.LeaseDuration > 0
 }
 
 // JobCreator 定义创建向量任务所需的最小持久化能力。
@@ -204,14 +227,11 @@ type JobClaimer interface {
 	ClaimNextEmbeddingJob(ctx context.Context) (Job, error)
 }
 
-// InterruptedJobRecoverer 定义单实例应用启动时恢复遗留 processing 任务的能力。
-//
-// 第一版没有 lease 和 heartbeat，因此只有确认旧进程已经退出后才能调用该能力。
-// recoveredAt 同时作为任务下一次允许执行的时间。
-type InterruptedJobRecoverer interface {
-	RequeueInterruptedEmbeddingJobs(
+// ExpiredJobRecoverer 定义恢复真正过期 processing 任务的能力。
+// 仍有有效租约和心跳的其他实例任务绝不能被恢复。
+type ExpiredJobRecoverer interface {
+	RequeueExpiredEmbeddingJobs(
 		ctx context.Context,
-		recoveredAt time.Time,
 		errorMessage string,
 	) (recoveredCount int64, err error)
 }
@@ -224,6 +244,7 @@ type JobFinalizer interface {
 	MarkEmbeddingJobSucceeded(
 		ctx context.Context,
 		jobID int64,
+		leaseToken string,
 		completion JobCompletion,
 	) error
 
@@ -231,6 +252,7 @@ type JobFinalizer interface {
 	RequeueEmbeddingJob(
 		ctx context.Context,
 		jobID int64,
+		leaseToken string,
 		nextAttemptAt time.Time,
 		errorMessage string,
 	) error
@@ -239,6 +261,16 @@ type JobFinalizer interface {
 	MarkEmbeddingJobFailed(
 		ctx context.Context,
 		jobID int64,
+		leaseToken string,
 		errorMessage string,
+	) error
+}
+
+// JobLeaseRenewer 定义 Worker 在远程向量调用期间续租所需的能力。
+type JobLeaseRenewer interface {
+	RenewEmbeddingJobLease(
+		ctx context.Context,
+		jobID int64,
+		leaseToken string,
 	) error
 }

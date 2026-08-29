@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -17,12 +19,19 @@ import (
 type EmbeddingJobRepository struct {
 	pool             *pgxpool.Pool
 	schedulingPolicy embeddingdomain.JobSchedulingPolicy
+	leasePolicy      embeddingdomain.JobLeasePolicy
+	newLeaseToken    func() (string, error)
 }
 
 var defaultEmbeddingJobSchedulingPolicy = embeddingdomain.JobSchedulingPolicy{
 	MaxInFlightPerOwner:         1,
 	MaxBorrowedInFlightPerOwner: 2,
 	StarvationThreshold:         2 * time.Minute,
+}
+
+var defaultEmbeddingJobLeasePolicy = embeddingdomain.JobLeasePolicy{
+	WorkerID:      "embedding-worker",
+	LeaseDuration: time.Minute,
 }
 
 var _ embeddingdomain.JobCreator = (*EmbeddingJobRepository)(nil)
@@ -43,10 +52,35 @@ func NewEmbeddingJobRepositoryWithSchedulingPolicy(
 	pool *pgxpool.Pool,
 	policy embeddingdomain.JobSchedulingPolicy,
 ) *EmbeddingJobRepository {
+	return NewEmbeddingJobRepositoryWithPolicies(
+		pool,
+		policy,
+		defaultEmbeddingJobLeasePolicy,
+	)
+}
+
+// NewEmbeddingJobRepositoryWithPolicies 创建同时使用 Owner 公平调度和
+// 持久化任务租约的仓储。租约策略由领取、续租和终态 fencing 共同使用。
+func NewEmbeddingJobRepositoryWithPolicies(
+	pool *pgxpool.Pool,
+	schedulingPolicy embeddingdomain.JobSchedulingPolicy,
+	leasePolicy embeddingdomain.JobLeasePolicy,
+) *EmbeddingJobRepository {
 	return &EmbeddingJobRepository{
 		pool:             pool,
-		schedulingPolicy: policy,
+		schedulingPolicy: schedulingPolicy,
+		leasePolicy:      leasePolicy,
+		newLeaseToken:    newEmbeddingJobLeaseToken,
 	}
+}
+
+// newEmbeddingJobLeaseToken 生成不可预测的 fencing token。
+func newEmbeddingJobLeaseToken() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("read embedding job lease randomness: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
 }
 
 // CreateEmbeddingJob 为文档创建 queued 状态的向量任务。

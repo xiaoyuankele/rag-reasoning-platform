@@ -13,6 +13,8 @@ import (
 const (
 	safeEmbeddingFailureMessage = "embedding generation failed"
 	safeEmbeddingRetryMessage   = "embedding service temporarily unavailable"
+	safeExpiredEmbeddingMessage = "embedding job lease expired and was requeued"
+	defaultEmbeddingHeartbeat   = 15 * time.Second
 )
 
 var (
@@ -25,6 +27,9 @@ var (
 	ErrInvalidEmbeddingTimeout = errors.New(
 		"embedding processing timeout must be positive",
 	)
+	ErrInvalidEmbeddingHeartbeatInterval = errors.New(
+		"embedding job heartbeat interval must be positive",
+	)
 	ErrDocumentHasNoChunks = errors.New(
 		"document has no text chunks to embed",
 	)
@@ -36,6 +41,8 @@ var (
 type embeddingJobWorkerRepository interface {
 	embeddingdomain.JobClaimer
 	embeddingdomain.JobFinalizer
+	embeddingdomain.JobLeaseRenewer
+	embeddingdomain.ExpiredJobRecoverer
 }
 
 // Worker 编排一条 embedding_jobs 任务的完整执行过程。
@@ -49,6 +56,7 @@ type Worker struct {
 	events            JobEventObserver
 	batchSize         int
 	processingTimeout time.Duration
+	heartbeatInterval time.Duration
 	retryPolicy       RetryPolicy
 	now               func() time.Time
 }
@@ -75,6 +83,30 @@ func NewWorker(
 	)
 }
 
+// NewWorkerWithHeartbeatInterval 创建使用指定租约心跳周期的 Embedding Worker。
+func NewWorkerWithHeartbeatInterval(
+	jobs embeddingJobWorkerRepository,
+	chunks documentdomain.ChunkLister,
+	embedder embeddingdomain.Embedder,
+	events JobEventObserver,
+	batchSize int,
+	processingTimeout time.Duration,
+	retryPolicy RetryPolicy,
+	heartbeatInterval time.Duration,
+) (*Worker, error) {
+	return newWorkerWithHeartbeatInterval(
+		jobs,
+		chunks,
+		embedder,
+		events,
+		batchSize,
+		processingTimeout,
+		retryPolicy,
+		heartbeatInterval,
+		time.Now,
+	)
+}
+
 // newWorker 允许单元测试注入固定时钟，从而精确核对 nextAttemptAt。
 func newWorker(
 	jobs embeddingJobWorkerRepository,
@@ -86,6 +118,30 @@ func newWorker(
 	retryPolicy RetryPolicy,
 	now func() time.Time,
 ) (*Worker, error) {
+	return newWorkerWithHeartbeatInterval(
+		jobs,
+		chunks,
+		embedder,
+		events,
+		batchSize,
+		processingTimeout,
+		retryPolicy,
+		defaultEmbeddingHeartbeat,
+		now,
+	)
+}
+
+func newWorkerWithHeartbeatInterval(
+	jobs embeddingJobWorkerRepository,
+	chunks documentdomain.ChunkLister,
+	embedder embeddingdomain.Embedder,
+	events JobEventObserver,
+	batchSize int,
+	processingTimeout time.Duration,
+	retryPolicy RetryPolicy,
+	heartbeatInterval time.Duration,
+	now func() time.Time,
+) (*Worker, error) {
 	if jobs == nil || chunks == nil || embedder == nil || events == nil || now == nil {
 		return nil, ErrEmbeddingWorkerDependencies
 	}
@@ -94,6 +150,9 @@ func newWorker(
 	}
 	if processingTimeout <= 0 {
 		return nil, ErrInvalidEmbeddingTimeout
+	}
+	if heartbeatInterval <= 0 {
+		return nil, ErrInvalidEmbeddingHeartbeatInterval
 	}
 	if retryPolicy.maxAttempts <= 0 {
 		return nil, ErrInvalidMaxEmbeddingAttempts
@@ -106,6 +165,7 @@ func newWorker(
 		events:            events,
 		batchSize:         batchSize,
 		processingTimeout: processingTimeout,
+		heartbeatInterval: heartbeatInterval,
 		retryPolicy:       retryPolicy,
 		now:               now,
 	}, nil
@@ -116,6 +176,14 @@ func newWorker(
 // handled=false、err=nil 表示队列为空；handled=true 表示已经领取过任务，
 // 即使后续把它安排为重试或标记为失败，本轮也仍然处理过一条任务。
 func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
+	// 多实例都可以执行恢复，但只允许回收真正过期的 processing 租约。
+	if _, err := w.jobs.RequeueExpiredEmbeddingJobs(
+		ctx,
+		safeExpiredEmbeddingMessage,
+	); err != nil {
+		return false, fmt.Errorf("requeue expired embedding jobs: %w", err)
+	}
+
 	job, err := w.jobs.ClaimNextEmbeddingJob(ctx)
 	if errors.Is(err, embeddingdomain.ErrNoQueuedJob) {
 		return false, nil
@@ -167,11 +235,55 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 		})
 	}()
 
+	// 远程模型调用可能持续数十秒或数分钟。心跳与处理并行；续租失败会
+	// 取消 workContext，旧 Worker 随后也无法通过数据库 fencing 校验。
+	workContext, cancelWork := context.WithCancel(ctx)
+	heartbeatContext, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatErrors := make(chan error, 1)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(w.heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatContext.Done():
+				return
+			case <-ticker.C:
+				if renewErr := w.jobs.RenewEmbeddingJobLease(
+					heartbeatContext,
+					job.ID,
+					job.LeaseToken,
+				); renewErr != nil {
+					heartbeatErrors <- renewErr
+					cancelWork()
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		stopHeartbeat()
+		cancelWork()
+		<-heartbeatDone
+	}()
+	leaseError := func() error {
+		select {
+		case heartbeatErr := <-heartbeatErrors:
+			return fmt.Errorf("renew embedding job lease: %w", heartbeatErr)
+		default:
+			return nil
+		}
+	}
+
 	// timeoutContext 覆盖读取 chunks 和所有远程批次，但不覆盖最后的数据库收尾。
 	// 收尾使用父 ctx，避免任务刚完成时恰好触发处理超时而无法更新状态。
-	timeoutContext, cancel := context.WithTimeout(ctx, w.processingTimeout)
+	timeoutContext, cancel := context.WithTimeout(workContext, w.processingTimeout)
 	completion, metrics, processingErr = w.process(timeoutContext, job)
 	cancel()
+	if heartbeatErr := leaseError(); heartbeatErr != nil {
+		return true, heartbeatErr
+	}
 
 	// 父 ctx 被取消通常表示程序正在 shutdown。此时不要把正常停机伪装成业务失败；
 	// 任务暂时保留 processing，后续由启动恢复机制重新排队。
@@ -186,7 +298,7 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 
 	if processingErr != nil {
 		finalizationStartedAt := time.Now()
-		outcome, failureErr := w.finalizeFailure(ctx, job, processingErr)
+		outcome, failureErr := w.finalizeFailure(workContext, job, processingErr)
 		elapsed := time.Since(finalizationStartedAt)
 		finalizationDuration = &elapsed
 		finalEventType = outcome.eventType
@@ -196,7 +308,12 @@ func (w *Worker) RunOnce(ctx context.Context) (handled bool, err error) {
 	}
 
 	finalizationStartedAt := time.Now()
-	finalizationErr := w.jobs.MarkEmbeddingJobSucceeded(ctx, job.ID, completion)
+	finalizationErr := w.jobs.MarkEmbeddingJobSucceeded(
+		workContext,
+		job.ID,
+		job.LeaseToken,
+		completion,
+	)
 	elapsed := time.Since(finalizationStartedAt)
 	finalizationDuration = &elapsed
 	if finalizationErr != nil {
@@ -331,6 +448,7 @@ func (w *Worker) finalizeFailure(
 			if err := w.jobs.RequeueEmbeddingJob(
 				ctx,
 				job.ID,
+				job.LeaseToken,
 				nextAttemptAt,
 				safeEmbeddingRetryMessage,
 			); err != nil {
@@ -351,6 +469,7 @@ func (w *Worker) finalizeFailure(
 	if err := w.jobs.MarkEmbeddingJobFailed(
 		ctx,
 		job.ID,
+		job.LeaseToken,
 		safeEmbeddingFailureMessage,
 	); err != nil {
 		return unfinished, errors.Join(

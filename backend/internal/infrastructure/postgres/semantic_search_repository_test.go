@@ -550,7 +550,7 @@ func createSemanticSearchFixture(
 	if err != nil {
 		t.Fatalf("create semantic embedding job for %s: %v", name, err)
 	}
-	markEmbeddingJobProcessing(t, ctx, pool, job.ID)
+	leaseToken := markEmbeddingJobProcessing(t, ctx, pool, job.ID)
 
 	vectors := make([]embeddingdomain.ChunkVector, len(chunkFixtures))
 	for index, fixture := range chunkFixtures {
@@ -562,6 +562,7 @@ func createSemanticSearchFixture(
 	if err := jobRepository.MarkEmbeddingJobSucceeded(
 		ctx,
 		job.ID,
+		leaseToken,
 		embeddingdomain.JobCompletion{
 			Vectors:      vectors,
 			PromptTokens: len(vectors),

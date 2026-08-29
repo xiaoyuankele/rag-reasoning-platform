@@ -332,6 +332,26 @@ func TestEmbeddingJobRepositoryRejectsInvalidSchedulingPolicy(t *testing.T) {
 	}
 }
 
+func TestEmbeddingJobRepositoryRejectsInvalidLeasePolicy(t *testing.T) {
+	repository := postgresrepository.NewEmbeddingJobRepositoryWithPolicies(
+		nil,
+		embeddingdomain.JobSchedulingPolicy{
+			MaxInFlightPerOwner:         1,
+			MaxBorrowedInFlightPerOwner: 2,
+			StarvationThreshold:         time.Minute,
+		},
+		embeddingdomain.JobLeasePolicy{},
+	)
+
+	_, err := repository.ClaimNextEmbeddingJob(context.Background())
+	if !errors.Is(err, embeddingdomain.ErrInvalidJobLeasePolicy) {
+		t.Fatalf(
+			"ClaimNextEmbeddingJob() error = %v, want ErrInvalidJobLeasePolicy",
+			err,
+		)
+	}
+}
+
 func openEmbeddingFairClaimTestDatabase(
 	t *testing.T,
 ) (context.Context, *pgxpool.Pool) {
@@ -453,6 +473,7 @@ func failClaimedEmbeddingJobForCleanup(
 	if err := repository.MarkEmbeddingJobFailed(
 		ctx,
 		job.ID,
+		job.LeaseToken,
 		"owner-fair embedding scheduling integration test cleanup",
 	); err != nil {
 		t.Fatalf("finalize claimed embedding job %d: %v", job.ID, err)
