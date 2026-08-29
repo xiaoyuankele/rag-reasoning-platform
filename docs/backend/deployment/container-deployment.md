@@ -65,6 +65,22 @@ docker compose --profile embedding up -d embedding-worker
 docker compose --profile answer up -d answer-worker
 ```
 
+同一台主机需要增加 Worker 进程时，可以使用 Compose 的 `--scale`。三个 Worker 服务故意不设置固定
+`container_name`，否则 Compose 无法为副本生成互不冲突的容器名：
+
+```powershell
+docker compose up -d --scale document-worker=2 document-worker
+docker compose --profile embedding up -d --scale embedding-worker=2 embedding-worker
+docker compose --profile answer up -d --scale answer-worker=2 answer-worker
+```
+
+每个副本都会运行独立进程和独立 Worker Loop，并通过 PostgreSQL 租约安全领取任务。未显式配置
+`*_WORKER_ID` 时，程序会使用容器 hostname 与进程 ID 生成身份；如果自行设置，必须保证每个副本唯一。
+数据库连接池也是“每进程一份”，扩容前要按“单进程连接数 × 副本数”核算 PostgreSQL 上限。
+
+同机 Document Worker 共享相同的 `STORAGE_HOST_PATH`，所以能读取 API 保存的原始文件；这不代表已经支持
+跨主机扩容，跨主机前仍需把原始文件迁移到共享对象存储。
+
 所有角色都会等待 PostgreSQL 健康后启动，并执行嵌入二进制的迁移；迁移通过 advisory lock 串行化，避免
 四个进程同时修改 schema。API、Embedding Worker 和 Answer Worker 还会等待 `redis-coordination` 健康；
 只有实际启用远程能力时，后端才创建容量客户端并执行启动 Ping。
@@ -82,7 +98,7 @@ docker compose ps
 
 成功标准：
 
-- `rag_reasoning_postgres`、`rag_reasoning_backend` 和 `rag_reasoning_document_worker` 都显示 `healthy`；
+- PostgreSQL、`backend` 和所有 `document-worker` 副本都显示 `healthy`；
 - `rag_reasoning_redis_coordination` 显示 `healthy`；
 - HTTP 返回 `200 OK` 和 `{"status":"ok"}`；
 - Document Worker 日志包含 `role=document-worker`、`ready_file_enabled=true`；
@@ -187,3 +203,25 @@ Worker 会先删除就绪文件，再等待 goroutine，最后关闭数据库连
 - 三类任务的 `*_LEASE_DURATION` 与 `*_HEARTBEAT_INTERVAL` 配置均要求心跳周期短于租约时长；
 - 原始文件仍是本地绑定目录，跨主机部署前必须改为共享对象存储。
 - 迁移 28 后不得混跑不认识租约字段的旧 Worker；升级时先停止旧 Worker，再迁移并启动同一版本的新 Worker。
+
+## 12. 多进程组合验收（2026-08-29）
+
+在本地空数据库中同时启动了 2 个 Document Worker、2 个 Embedding Worker 和 2 个 Answer Worker：
+
+- 六个容器均使用同一镜像，但拥有独立的角色进程、Worker ID 和数据库连接池；
+- 第一条 Document Worker 完成迁移后，数据库 schema 达到版本 28；
+- 每个容器的 `APP_ROLE` 与预期一致，全部写入 Worker 就绪文件；
+- 空任务库和不可达的本地假 Provider 地址共同保证没有产生远程模型调用；
+- 六个容器收到 `SIGTERM` 后均以退出码 0 停止，并删除临时容器和临时数据库；
+- 验收脚本位于 `scripts/maintenance/verify-worker-multiprocess.ps1`，默认每类角色启动两个副本。
+
+执行命令：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\scripts\maintenance\verify-worker-multiprocess.ps1 `
+    -ReplicasPerRole 2
+```
+
+`-SkipBuild` 仅用于已经明确构建过当前工作区镜像的情况。该验收证明同机进程隔离、启动和退出边界正确，
+不等价于生产负载、跨主机共享存储或真实 Provider 压测。

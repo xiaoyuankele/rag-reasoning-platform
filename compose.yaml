@@ -199,7 +199,6 @@ services:
 
   document-worker:
     <<: *backend-runtime
-    container_name: rag_reasoning_document_worker
     environment:
       <<: [*backend-common-environment, *storage-environment, *document-environment, *python-environment]
       APP_ROLE: document-worker
@@ -216,7 +215,6 @@ services:
     <<: *backend-runtime
     depends_on: *remote-backend-dependencies
     profiles: ["embedding"]
-    container_name: rag_reasoning_embedding_worker
     environment:
       <<: [*backend-common-environment, *embedding-environment, *capacity-coordination-environment]
       APP_ROLE: embedding-worker
@@ -231,7 +229,6 @@ services:
     <<: *backend-runtime
     depends_on: *remote-backend-dependencies
     profiles: ["answer"]
-    container_name: rag_reasoning_answer_worker
     environment:
       <<: [*backend-common-environment, *embedding-environment, *generation-environment, *answer-jobs-environment, *cache-environment, *capacity-coordination-environment]
       APP_ROLE: answer-worker

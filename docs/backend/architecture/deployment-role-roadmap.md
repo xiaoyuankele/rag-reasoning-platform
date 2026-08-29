@@ -72,8 +72,8 @@ Answer Job Worker    按开关 -        -          -         必须启用
 - `APP_ROLE=api` 可以按原有开关选择是否暴露语义检索、同步问答和异步任务提交接口；
 - `APP_ROLE=all` 保持向后兼容，所有可选远程能力仍默认关闭。
 
-本阶段只证明单机角色隔离，尚未证明可以任意扩容。Embedding Provider Gate、Answer 并发闸门和上传闸门
-目前仍是进程内状态；同时启动多个同类角色会把真实总并发按进程数放大。
+本阶段最初只证明单机角色隔离；后续阶段已经补齐远程 Provider 的 Redis 跨进程容量租约，以及三类后台
+任务的 PostgreSQL 租约、心跳和 fencing。上传等待区等仍是进程内状态，不能据此把所有 API 组件任意扩容。
 
 ## 4. 第三阶段：同机部署清单与角色探针（已完成）
 
@@ -131,7 +131,8 @@ Redis 原子租约（跨进程）
 1. 本地 `storage/` 迁移为共享对象存储；
 2. 文档、Embedding 与 Answer 任务的 lease、heartbeat、fencing 条件收尾和过期恢复已经完成；
 3. Redis Provider 并发闸门已完成；验证码、认证、上传等待区等共享频率/排队限制仍需按实测逐项迁移；
-4. 数据库迁移的单一执行者或受控 migration job；
+4. 数据库迁移通过 PostgreSQL advisory lock 串行执行；生产升级仍需采用“停止旧 Worker、迁移、启动同版本
+   新 Worker”的受控顺序；
 5. 各角色独立资源、队列和故障注入压测。
 
 `FOR UPDATE SKIP LOCKED` 可以避免两个 Worker 同时领取同一数据库任务，但不能自动解决本地文件不可见、
@@ -189,7 +190,14 @@ Answer Worker 在问答完整 RAG 链路期间持续心跳。答案成功快照�
 - Embedding 旧 token 不能覆盖向量、requeue 或写成功/失败终态。
 - Answer 有效心跳不会被恢复，过期任务可重新领取且产生不同 token；
 - Answer 旧 token 不能保存答案、requeue 或写失败终态。
+- Compose Worker 服务没有固定 `container_name`，可以使用 `--scale` 创建多个副本；
+- 本地空数据库中 2 个 Document、2 个 Embedding、2 个 Answer Worker 同时就绪；
+- 六个独立容器在未调用远程 Provider 的情况下均能接收 SIGTERM 并以退出码 0 完成清理。
 
 本地隔离验收使用同一个临时镜像和空 pgvector/PostgreSQL，依次启动五种角色并发送 SIGTERM；五个进程均以
 退出码 0 完成清理。API 日志未出现 Python/Worker 组装事件，三个 Worker 日志均显示
 `http_enabled=false`；空任务库保证验收过程没有远程 Provider 调用。
+
+多进程组合验收进一步同时启动六个 Worker 容器，确认 schema 28、角色身份、就绪信号、零远程调用和优雅
+退出。它证明“同一套代码按配置拆成多个独立进程”已真正跑通，但跨主机 Document Worker 仍受本地文件存储
+约束，生产副本数也必须结合数据库连接总量、主机资源和真实队列压测确定。
