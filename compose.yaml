@@ -21,6 +21,8 @@ services:
 
     environment:
       APP_PORT: 8080
+      # 第一阶段保留 all；独立角色将在条件组装完成后由分角色服务覆盖。
+      APP_ROLE: ${APP_ROLE:-all}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: ${LOG_FORMAT:-json}
 

@@ -142,6 +142,7 @@ $reportPath = Join-Path $ReportDirectory "backend-default-$timestamp.json"
 # 默认回归必须隔离会访问数据库、启动 Python 集成链路或调用远程模型的开关。
 # 同时保存调用者原来的进程环境，脚本结束后原样恢复。
 $isolatedEnvironment = @(
+    "APP_ROLE",
     "RUN_DATABASE_TESTS",
     "RUN_PYTHON_TESTS",
     "EMBEDDING_WORKER_ENABLED",
@@ -170,6 +171,9 @@ try {
         throw "ai/pyproject.toml was not found under project root '$projectRoot'"
     }
 
+    # 默认回归固定使用兼容角色，避免调用者残留的 APP_ROLE 让测试或
+    # Compose 校验意外进入尚未放开的独立角色。
+    $env:APP_ROLE = "all"
     $env:RUN_DATABASE_TESTS = "0"
     $env:RUN_PYTHON_TESTS = "0"
     $env:EMBEDDING_WORKER_ENABLED = "false"

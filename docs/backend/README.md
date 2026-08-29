@@ -21,6 +21,7 @@
 - [向量任务并发、版本与 Redis 演进交接](architecture/document-vectorization-concurrency-handoff.md)
 - [Redis 查询向量与问答结果缓存](architecture/redis-rag-cache.md)
 - [100 人在线并发演进后端交接](architecture/100-user-concurrency-handoff.md)
+- [同一二进制部署角色拆分路线](architecture/deployment-role-roadmap.md)
 - [文档处理并发与 Python 进程复用交接](../shared/architecture/document-processing-concurrency-review.md)
 - [文档文本块浏览接口](architecture/document-chunk-browsing.md)
 - [运行路径与配置契约](development/runtime-path-configuration.md)

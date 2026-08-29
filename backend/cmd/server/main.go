@@ -92,6 +92,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			err,
 		)
 	}
+	if err := validateImplementedApplicationRole(appConfig.Role); err != nil {
+		return err
+	}
 
 	databaseConfig, err := config.LoadDatabase()
 	if err != nil {
@@ -1176,6 +1179,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	logger.Info(
 		"Application started",
 		"event", "application_started",
+		"role", appConfig.Role,
 		"address", appConfig.ServerAddress(),
 	)
 
@@ -1217,6 +1221,18 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 		return nil
 	}
+}
+
+// validateImplementedApplicationRole 防止第一阶段产生“配置为独立角色，
+// 实际仍启动全部组件”的假隔离。第二阶段完成条件组装后将逐个放开角色。
+func validateImplementedApplicationRole(role config.ApplicationRole) error {
+	if role == config.ApplicationRoleAll {
+		return nil
+	}
+	return fmt.Errorf(
+		"APP_ROLE %q is reserved but not runnable until role-specific assembly is implemented; use APP_ROLE=all",
+		role,
+	)
 }
 
 // wrapHTTPServerCloseError 只包装真实的强制关闭错误。
