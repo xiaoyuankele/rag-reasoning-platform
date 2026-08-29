@@ -50,8 +50,10 @@ type fakeWorkerChunkReplacer struct {
 	replaceCalls int
 }
 
-func (f *fakeWorkerChunkReplacer) ReplaceForDocument(
+func (f *fakeWorkerChunkReplacer) ReplaceForProcessingJob(
 	ctx context.Context,
+	_ int64,
+	_ string,
 	documentID int64,
 	chunks []documentdomain.ChunkInput,
 ) error {
@@ -61,6 +63,107 @@ func (f *fakeWorkerChunkReplacer) ReplaceForDocument(
 	}
 
 	return f.replaceFunc(ctx, documentID, chunks)
+}
+
+func TestWorkerRunOnceRenewsLeaseWhileProcessorIsRunning(t *testing.T) {
+	job := documentdomain.ProcessingJob{
+		ID:           91,
+		DocumentID:   41,
+		Status:       documentdomain.ProcessingJobStatusProcessing,
+		AttemptCount: 1,
+		LeaseToken:   "lease-91",
+	}
+	jobs := &fakeProcessingJobClaimer{
+		claimNextFunc: func(context.Context) (documentdomain.ProcessingJob, error) {
+			return job, nil
+		},
+		renewLeaseFunc: func(_ context.Context, jobID int64, token string) error {
+			if jobID != job.ID || token != job.LeaseToken {
+				t.Fatalf("renew lease received job=%d token=%q", jobID, token)
+			}
+			return nil
+		},
+	}
+	documents := &fakeWorkerDocumentFinder{
+		getByIDFunc: func(context.Context, int64) (documentdomain.Document, error) {
+			return documentdomain.Document{ID: job.DocumentID}, nil
+		},
+	}
+	processor := &fakeDocumentProcessor{
+		processFunc: func(context.Context, documentdomain.Document) (ProcessingResult, error) {
+			time.Sleep(25 * time.Millisecond)
+			return ProcessingResult{}, nil
+		},
+	}
+
+	worker, err := NewWorkerWithHeartbeatInterval(
+		jobs,
+		documents,
+		processor,
+		&fakeWorkerChunkReplacer{},
+		newRecordingProcessingJobEventObserver(),
+		time.Second,
+		5*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("NewWorkerWithHeartbeatInterval() error = %v", err)
+	}
+	if handled, runErr := worker.RunOnce(context.Background()); runErr != nil || !handled {
+		t.Fatalf("RunOnce() handled=%t error=%v, want true/nil", handled, runErr)
+	}
+	if jobs.renewLeaseCalls < 2 {
+		t.Fatalf("RenewProcessingJobLease() calls = %d, want at least 2", jobs.renewLeaseCalls)
+	}
+}
+
+func TestWorkerRunOnceStopsWhenLeaseRenewalFails(t *testing.T) {
+	leaseFailure := errors.New("lease database unavailable")
+	job := documentdomain.ProcessingJob{
+		ID:           92,
+		DocumentID:   42,
+		Status:       documentdomain.ProcessingJobStatusProcessing,
+		AttemptCount: 1,
+		LeaseToken:   "lease-92",
+	}
+	jobs := &fakeProcessingJobClaimer{
+		claimNextFunc: func(context.Context) (documentdomain.ProcessingJob, error) {
+			return job, nil
+		},
+		renewLeaseFunc: func(context.Context, int64, string) error {
+			return leaseFailure
+		},
+	}
+	documents := &fakeWorkerDocumentFinder{
+		getByIDFunc: func(context.Context, int64) (documentdomain.Document, error) {
+			return documentdomain.Document{ID: job.DocumentID}, nil
+		},
+	}
+	processor := &fakeDocumentProcessor{
+		processFunc: func(ctx context.Context, _ documentdomain.Document) (ProcessingResult, error) {
+			<-ctx.Done()
+			return ProcessingResult{}, ctx.Err()
+		},
+	}
+
+	worker, err := NewWorkerWithHeartbeatInterval(
+		jobs,
+		documents,
+		processor,
+		&fakeWorkerChunkReplacer{},
+		newRecordingProcessingJobEventObserver(),
+		time.Second,
+		5*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("NewWorkerWithHeartbeatInterval() error = %v", err)
+	}
+	handled, runErr := worker.RunOnce(context.Background())
+	if !handled || !errors.Is(runErr, leaseFailure) {
+		t.Fatalf("RunOnce() handled=%t error=%v, want true/lease failure", handled, runErr)
+	}
+	if jobs.markSucceededCalls != 0 || jobs.markFailedCalls != 0 {
+		t.Fatal("lost lease must not finalize the job")
+	}
 }
 
 func TestWorkerRunOnceReturnsIdleWhenQueueIsEmpty(t *testing.T) {

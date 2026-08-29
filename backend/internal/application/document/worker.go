@@ -10,14 +10,22 @@ import (
 )
 
 const (
-	safeProcessingFailureMessage = "document processing failed"
-	safeProcessingTimeoutMessage = "document processing timed out"
+	safeProcessingFailureMessage  = "document processing failed"
+	safeProcessingTimeoutMessage  = "document processing timed out"
+	safeExpiredProcessingMessage  = "document processing lease expired and was requeued"
+	defaultLeaseHeartbeatInterval = 15 * time.Second
+)
+
+var ErrInvalidLeaseHeartbeatInterval = errors.New(
+	"document worker lease heartbeat interval must be positive",
 )
 
 // processingJobWorkerRepository 组合 Worker 领取和收尾任务所需的能力。
 type processingJobWorkerRepository interface {
 	documentdomain.ProcessingJobClaimer
 	documentdomain.ProcessingJobFinalizer
+	documentdomain.ProcessingJobLeaseRenewer
+	documentdomain.ExpiredProcessingJobRecoverer
 }
 
 // ProcessingResult 表示文档处理器产生的统一结果。
@@ -46,9 +54,10 @@ type Worker struct {
 	jobs              processingJobWorkerRepository
 	documents         documentdomain.Finder
 	processor         DocumentProcessor
-	chunks            documentdomain.ChunkReplacer
+	chunks            documentdomain.LeasedChunkReplacer
 	events            ProcessingJobEventObserver
 	processingTimeout time.Duration
+	heartbeatInterval time.Duration
 }
 
 // NewWorker 创建文档解析 Worker。
@@ -56,12 +65,40 @@ func NewWorker(
 	jobs processingJobWorkerRepository,
 	documents documentdomain.Finder,
 	processor DocumentProcessor,
-	chunks documentdomain.ChunkReplacer,
+	chunks documentdomain.LeasedChunkReplacer,
 	events ProcessingJobEventObserver,
 	processingTimeout time.Duration,
 ) *Worker {
+	worker, err := NewWorkerWithHeartbeatInterval(
+		jobs,
+		documents,
+		processor,
+		chunks,
+		events,
+		processingTimeout,
+		defaultLeaseHeartbeatInterval,
+	)
+	if err != nil {
+		panic(err)
+	}
+	return worker
+}
+
+// NewWorkerWithHeartbeatInterval 创建使用指定租约心跳周期的文档 Worker。
+func NewWorkerWithHeartbeatInterval(
+	jobs processingJobWorkerRepository,
+	documents documentdomain.Finder,
+	processor DocumentProcessor,
+	chunks documentdomain.LeasedChunkReplacer,
+	events ProcessingJobEventObserver,
+	processingTimeout time.Duration,
+	heartbeatInterval time.Duration,
+) (*Worker, error) {
 	if events == nil {
 		panic("NewWorker requires a non-nil processing job event observer")
+	}
+	if heartbeatInterval <= 0 {
+		return nil, ErrInvalidLeaseHeartbeatInterval
 	}
 
 	return &Worker{
@@ -71,7 +108,8 @@ func NewWorker(
 		chunks:            chunks,
 		events:            events,
 		processingTimeout: processingTimeout,
-	}
+		heartbeatInterval: heartbeatInterval,
+	}, nil
 }
 
 // ClaimNext 尝试领取下一条排队任务。
@@ -85,6 +123,18 @@ func (w *Worker) ClaimNext(
 	claimed bool,
 	err error,
 ) {
+	// 每次领取前先回收真正过期的任务。多实例同时执行时由 PostgreSQL
+	// SKIP LOCKED 保证每条任务只被一个恢复事务处理。
+	if _, err := w.jobs.RequeueExpiredProcessingJobs(
+		ctx,
+		safeExpiredProcessingMessage,
+	); err != nil {
+		return documentdomain.ProcessingJob{}, false, fmt.Errorf(
+			"requeue expired processing jobs: %w",
+			err,
+		)
+	}
+
 	foundJob, err := w.jobs.ClaimNextProcessingJob(ctx)
 	if errors.Is(err, documentdomain.ErrNoQueuedProcessingJob) {
 		return documentdomain.ProcessingJob{}, false, nil
@@ -122,7 +172,6 @@ func (w *Worker) RunOnce(
 	if !claimed {
 		return false, nil
 	}
-
 	// 从领取成功开始，任务已经进入 processing。观察器先记录 started，
 	// 然后 defer 保证每条已领取任务最终都有一条终结事件。
 	startedAt := time.Now()
@@ -171,10 +220,54 @@ func (w *Worker) RunOnce(
 		})
 	}()
 
+	// 心跳与真正处理并行运行。续租失败会取消 workContext；旧 Worker 随后
+	// 不能再通过 chunks 或终态写入处的 fencing 校验。
+	workContext, cancelWork := context.WithCancel(ctx)
+	heartbeatContext, stopHeartbeat := context.WithCancel(ctx)
+	heartbeatErrors := make(chan error, 1)
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(w.heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatContext.Done():
+				return
+			case <-ticker.C:
+				if renewErr := w.jobs.RenewProcessingJobLease(
+					heartbeatContext,
+					job.ID,
+					job.LeaseToken,
+				); renewErr != nil {
+					heartbeatErrors <- renewErr
+					cancelWork()
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		stopHeartbeat()
+		cancelWork()
+		<-heartbeatDone
+	}()
+	leaseError := func() error {
+		select {
+		case heartbeatErr := <-heartbeatErrors:
+			return fmt.Errorf("renew processing job lease: %w", heartbeatErr)
+		default:
+			return nil
+		}
+	}
+
 	// 从这里开始已经领取过任务，因此后续即使失败，
 	// handled 也必须返回 true。
-	foundDocument, err := w.documents.GetByID(ctx, job.DocumentID)
+	foundDocument, err := w.documents.GetByID(workContext, job.DocumentID)
 	if err != nil {
+		if heartbeatErr := leaseError(); heartbeatErr != nil {
+			return true, heartbeatErr
+		}
 		errorCode = documentdomain.ProcessingErrorCodeDocumentLookup
 		return true, fmt.Errorf(
 			"get claimed processing job document: %w",
@@ -186,13 +279,23 @@ func (w *Worker) RunOnce(
 	// processContext 只限制文档处理器的执行时间。
 	// 父级 ctx 取消时，它也会立刻取消；即使父级仍然有效，
 	// 超过 processingTimeout 后也会自动返回 DeadlineExceeded。
-	processContext, cancelProcess := context.WithTimeout(ctx, w.processingTimeout)
+	processContext, cancelProcess := context.WithTimeout(
+		workContext,
+		w.processingTimeout,
+	)
 	processorStartedAt := time.Now()
 	processingResult, processingErr := w.processor.Process(processContext, foundDocument)
 	processorDuration = time.Since(processorStartedAt)
 
 	// 处理器已经返回，不再需要定时器，立即释放相关资源。
 	cancelProcess()
+	if heartbeatErr := leaseError(); heartbeatErr != nil {
+		return true, heartbeatErr
+	}
+	if ctx.Err() != nil {
+		// 正常停机不伪装成业务失败；任务会在租约到期后被其他实例重排。
+		return true, ctx.Err()
+	}
 
 	if processingErr != nil {
 		// 真实处理错误返回给 Worker 循环写后端日志。
@@ -212,8 +315,9 @@ func (w *Worker) RunOnce(
 		// 数据库只保存可安全展示给前端的通用失败说明。
 		finalizationStartedAt := time.Now()
 		finalizationErr := w.jobs.MarkProcessingJobFailed(
-			ctx,
+			workContext,
 			job.ID,
+			job.LeaseToken,
 			documentdomain.ProcessingFailure{
 				Message: failureMessage,
 				Metrics: newProcessingExecutionMetrics(
@@ -250,7 +354,13 @@ func (w *Worker) RunOnce(
 	chunkCount = len(processingResult.Chunks)
 	// 处理器成功后先保存文本块；只有结果成功入库，任务才能进入 succeeded。
 	chunkWriteStartedAt := time.Now()
-	replaceErr := w.chunks.ReplaceForDocument(ctx, foundDocument.ID, processingResult.Chunks)
+	replaceErr := w.chunks.ReplaceForProcessingJob(
+		workContext,
+		job.ID,
+		job.LeaseToken,
+		foundDocument.ID,
+		processingResult.Chunks,
+	)
 	measuredChunkWriteDuration := time.Since(chunkWriteStartedAt)
 	chunkWriteDuration = &measuredChunkWriteDuration
 	if replaceErr != nil {
@@ -263,8 +373,9 @@ func (w *Worker) RunOnce(
 
 		finalizationStartedAt := time.Now()
 		markFailedErr := w.jobs.MarkProcessingJobFailed(
-			ctx,
+			workContext,
 			job.ID,
+			job.LeaseToken,
 			documentdomain.ProcessingFailure{
 				Message: safeProcessingFailureMessage,
 				Metrics: newProcessingExecutionMetrics(
@@ -298,8 +409,9 @@ func (w *Worker) RunOnce(
 	// 只有处理器真正成功后，才能把任务和文档标记为成功。
 	finalizationStartedAt := time.Now()
 	if err := w.jobs.MarkProcessingJobSucceeded(
-		ctx,
+		workContext,
 		job.ID,
+		job.LeaseToken,
 		documentdomain.ProcessingCompletion{
 			DetectedTitle: processingResult.DetectedTitle,
 			Metrics: newProcessingExecutionMetrics(

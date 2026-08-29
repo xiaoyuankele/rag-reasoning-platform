@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -17,6 +19,8 @@ import (
 type ProcessingJobRepository struct {
 	pool             *pgxpool.Pool
 	schedulingPolicy document.ProcessingJobSchedulingPolicy
+	leasePolicy      document.ProcessingJobLeasePolicy
+	newLeaseToken    func() (string, error)
 }
 
 var defaultProcessingJobSchedulingPolicy = document.ProcessingJobSchedulingPolicy{
@@ -25,10 +29,17 @@ var defaultProcessingJobSchedulingPolicy = document.ProcessingJobSchedulingPolic
 	StarvationThreshold:         2 * time.Minute,
 }
 
+var defaultProcessingJobLeasePolicy = document.ProcessingJobLeasePolicy{
+	WorkerID:      "document-worker",
+	LeaseDuration: time.Minute,
+}
+
 var _ document.ProcessingJobCreator = (*ProcessingJobRepository)(nil)
 var _ document.ProcessingJobFinder = (*ProcessingJobRepository)(nil)
 var _ document.ProcessingJobClaimer = (*ProcessingJobRepository)(nil)
 var _ document.ProcessingJobFinalizer = (*ProcessingJobRepository)(nil)
+var _ document.ProcessingJobLeaseRenewer = (*ProcessingJobRepository)(nil)
+var _ document.ExpiredProcessingJobRecoverer = (*ProcessingJobRepository)(nil)
 
 // NewProcessingJobRepository 创建 PostgreSQL 解析任务仓储。
 func NewProcessingJobRepository(
@@ -45,10 +56,36 @@ func NewProcessingJobRepositoryWithSchedulingPolicy(
 	pool *pgxpool.Pool,
 	policy document.ProcessingJobSchedulingPolicy,
 ) *ProcessingJobRepository {
+	return NewProcessingJobRepositoryWithPolicies(
+		pool,
+		policy,
+		defaultProcessingJobLeasePolicy,
+	)
+}
+
+// NewProcessingJobRepositoryWithPolicies 创建同时使用 Owner 公平调度和
+// 持久化任务租约的仓储。租约策略在领取、续租和 fencing 校验中共享。
+func NewProcessingJobRepositoryWithPolicies(
+	pool *pgxpool.Pool,
+	schedulingPolicy document.ProcessingJobSchedulingPolicy,
+	leasePolicy document.ProcessingJobLeasePolicy,
+) *ProcessingJobRepository {
 	return &ProcessingJobRepository{
 		pool:             pool,
-		schedulingPolicy: policy,
+		schedulingPolicy: schedulingPolicy,
+		leasePolicy:      leasePolicy,
+		newLeaseToken:    newProcessingJobLeaseToken,
 	}
+}
+
+// newProcessingJobLeaseToken 使用密码学安全随机数产生 fencing token。
+// token 不承担用户认证，只需要在并发 Worker 之间不可预测且几乎不碰撞。
+func newProcessingJobLeaseToken() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("read processing job lease randomness: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
 }
 
 // CreateProcessingJob 为文档创建 queued 状态的解析任务。
@@ -187,6 +224,18 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 		return document.ProcessingJob{},
 			document.ErrInvalidProcessingJobSchedulingPolicy
 	}
+	if !r.leasePolicy.IsValid() {
+		return document.ProcessingJob{},
+			document.ErrInvalidProcessingJobLeasePolicy
+	}
+
+	leaseToken, err := r.newLeaseToken()
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"create processing job lease token: %w",
+			err,
+		)
+	}
 
 	transaction, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -284,7 +333,11 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 			chunk_count = NULL,
 			updated_at = CURRENT_TIMESTAMP,
 			started_at = CURRENT_TIMESTAMP,
-			completed_at = NULL
+			completed_at = NULL,
+			worker_id = $2,
+			lease_token = $3,
+			lease_expires_at = CURRENT_TIMESTAMP + ($4::BIGINT * INTERVAL '1 millisecond'),
+			heartbeat_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 			AND status = 'queued'
 		RETURNING
@@ -296,11 +349,19 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 			created_at,
 			updated_at,
 			started_at,
-			completed_at
+			completed_at,
+			lease_token
 	`
 
-	claimedJob, err := scanProcessingJob(
-		transaction.QueryRow(ctx, updateJobQuery, queuedJob.ID),
+	claimedJob, err := scanClaimedProcessingJob(
+		transaction.QueryRow(
+			ctx,
+			updateJobQuery,
+			queuedJob.ID,
+			r.leasePolicy.WorkerID,
+			leaseToken,
+			r.leasePolicy.LeaseDuration.Milliseconds(),
+		),
 	)
 	if err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
@@ -459,11 +520,13 @@ func ensureProcessingOwnerSchedule(
 func (r *ProcessingJobRepository) MarkProcessingJobSucceeded(
 	ctx context.Context,
 	jobID int64,
+	leaseToken string,
 	completion document.ProcessingCompletion,
 ) error {
 	return r.finalizeProcessingJob(
 		ctx,
 		jobID,
+		leaseToken,
 		document.ProcessingJobStatusSucceeded,
 		document.StatusReady,
 		nil,
@@ -477,11 +540,13 @@ func (r *ProcessingJobRepository) MarkProcessingJobSucceeded(
 func (r *ProcessingJobRepository) MarkProcessingJobFailed(
 	ctx context.Context,
 	jobID int64,
+	leaseToken string,
 	failure document.ProcessingFailure,
 ) error {
 	return r.finalizeProcessingJob(
 		ctx,
 		jobID,
+		leaseToken,
 		document.ProcessingJobStatusFailed,
 		document.StatusFailed,
 		&failure.Message,
@@ -490,20 +555,54 @@ func (r *ProcessingJobRepository) MarkProcessingJobFailed(
 	)
 }
 
-// MarkInterruptedProcessingJobsFailed 在应用启动时，把上一次进程异常退出
-// 遗留的 processing 任务及其文档原子地标记为 failed。
-//
-// 当前实现建立在单 Worker 实例约束上：新进程启动时，不应存在另一个仍
-// 合法处理任务的实例。未来扩展为多实例时，需要使用 lease/heartbeat
-// 判断任务是否真正失联，不能继续恢复全部 processing 任务。
-func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
+// RenewProcessingJobLease 只允许仍持有有效 fencing token 的 Worker 续租。
+// 已过期租约不能复活，否则可能与已经接管任务的新 Worker 同时写结果。
+func (r *ProcessingJobRepository) RenewProcessingJobLease(
+	ctx context.Context,
+	jobID int64,
+	leaseToken string,
+) error {
+	if !r.leasePolicy.IsValid() {
+		return document.ErrInvalidProcessingJobLeasePolicy
+	}
+
+	const query = `
+		UPDATE document_jobs
+		SET
+			lease_expires_at = CURRENT_TIMESTAMP + ($3::BIGINT * INTERVAL '1 millisecond'),
+			heartbeat_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+		  AND status = 'processing'
+		  AND lease_token = $2
+		  AND lease_expires_at > CURRENT_TIMESTAMP
+	`
+	commandTag, err := r.pool.Exec(
+		ctx,
+		query,
+		jobID,
+		leaseToken,
+		r.leasePolicy.LeaseDuration.Milliseconds(),
+	)
+	if err != nil {
+		return fmt.Errorf("renew processing job lease: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return document.ErrProcessingJobLeaseLost
+	}
+	return nil
+}
+
+// RequeueExpiredProcessingJobs 只恢复租约已经到期（或升级前没有租约）的
+// processing 任务。仍在心跳的其他进程任务不会进入恢复范围。
+func (r *ProcessingJobRepository) RequeueExpiredProcessingJobs(
 	ctx context.Context,
 	errorMessage string,
 ) (int64, error) {
 	transaction, err := r.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf(
-			"begin interrupted processing job recovery transaction: %w",
+			"begin expired processing job recovery transaction: %w",
 			err,
 		)
 	}
@@ -511,14 +610,18 @@ func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
 		_ = transaction.Rollback(context.Background())
 	}()
 
-	// interrupted_jobs 先锁定恢复范围；两个 UPDATE CTE 分别修改文档和任务。
-	// 最终 SELECT 同时返回两张表的更新数量，用于验证事务内状态仍然一致。
+	// SKIP LOCKED 允许多个 Worker 实例同时执行恢复；每条过期任务只会被
+	// 一个事务接管。文档先回到 failed（可重新领取），任务再回到 queued。
 	const recoveryQuery = `
-		WITH interrupted_jobs AS (
+		WITH expired_jobs AS (
 			SELECT id, document_id
 			FROM document_jobs
 			WHERE status = 'processing'
-			FOR UPDATE
+			  AND (
+				lease_expires_at IS NULL
+				OR lease_expires_at <= CURRENT_TIMESTAMP
+			  )
+			FOR UPDATE SKIP LOCKED
 		),
 		updated_documents AS (
 			UPDATE documents AS d
@@ -526,29 +629,26 @@ func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
 				status = 'failed',
 				error_message = $1,
 				updated_at = CURRENT_TIMESTAMP
-			FROM interrupted_jobs AS interrupted
-			WHERE d.id = interrupted.document_id
+			FROM expired_jobs AS expired
+			WHERE d.id = expired.document_id
 				AND d.status = 'processing'
 			RETURNING d.id
 		),
 		updated_jobs AS (
 			UPDATE document_jobs AS j
 			SET
-				status = 'failed',
+				status = 'queued',
 				error_message = $1,
-				error_code = 'worker_interrupted',
-				queue_wait_ms = GREATEST(
-					0,
-					ROUND(EXTRACT(EPOCH FROM (j.started_at - j.created_at)) * 1000)::BIGINT
-				),
-				total_ms = GREATEST(
-					0,
-					ROUND(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - j.started_at)) * 1000)::BIGINT
-				),
+				error_code = 'worker_lease_expired',
 				updated_at = CURRENT_TIMESTAMP,
-				completed_at = CURRENT_TIMESTAMP
-			FROM interrupted_jobs AS interrupted
-			WHERE j.id = interrupted.id
+				started_at = NULL,
+				completed_at = NULL,
+				worker_id = NULL,
+				lease_token = NULL,
+				lease_expires_at = NULL,
+				heartbeat_at = NULL
+			FROM expired_jobs AS expired
+			WHERE j.id = expired.id
 				AND j.status = 'processing'
 			RETURNING j.id
 		)
@@ -568,22 +668,18 @@ func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
 		&recoveredDocumentCount,
 	); err != nil {
 		return 0, fmt.Errorf(
-			"recover interrupted processing jobs: %w",
+			"recover expired processing jobs: %w",
 			err,
 		)
 	}
 
-	if recoveredJobCount != recoveredDocumentCount {
-		return 0, fmt.Errorf(
-			"recover interrupted processing jobs: updated %d jobs and %d documents",
-			recoveredJobCount,
-			recoveredDocumentCount,
-		)
-	}
+	// 正常数据会一一对应。这里不因文档已经被其他维护流程改成 failed 而
+	// 阻止任务重排，但保留计数变量便于未来增加结构化观测。
+	_ = recoveredDocumentCount
 
 	if err := transaction.Commit(ctx); err != nil {
 		return 0, fmt.Errorf(
-			"commit interrupted processing job recovery: %w",
+			"commit expired processing job recovery: %w",
 			err,
 		)
 	}
@@ -594,6 +690,7 @@ func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
 func (r *ProcessingJobRepository) finalizeProcessingJob(
 	ctx context.Context,
 	jobID int64,
+	leaseToken string,
 	jobStatus document.ProcessingJobStatus,
 	documentStatus document.Status,
 	errorMessage *string,
@@ -618,6 +715,8 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		INNER JOIN documents AS d ON d.id = j.document_id
 		WHERE j.id = $1
 			AND j.status = 'processing'
+			AND j.lease_token = $2
+			AND j.lease_expires_at > CURRENT_TIMESTAMP
 			AND d.status = 'processing'
 		FOR UPDATE OF j, d
 	`
@@ -627,9 +726,10 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		ctx,
 		lockQuery,
 		jobID,
+		leaseToken,
 	).Scan(&documentID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return document.ErrProcessingJobNotProcessing
+		return document.ErrProcessingJobLeaseLost
 	}
 	if err != nil {
 		return fmt.Errorf(
@@ -665,7 +765,11 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 			slowest_page_number = $15,
 			slowest_page_ms = $16,
 			updated_at = CURRENT_TIMESTAMP,
-			completed_at = CURRENT_TIMESTAMP
+			completed_at = CURRENT_TIMESTAMP,
+			worker_id = NULL,
+			lease_token = NULL,
+			lease_expires_at = NULL,
+			heartbeat_at = NULL
 		WHERE id = $1
 			AND status = 'processing'
 	`
@@ -858,6 +962,46 @@ func scanProcessingJob(
 		return document.ProcessingJob{}, fmt.Errorf(
 			"invalid processing job status %q",
 			status,
+		)
+	}
+
+	return job, nil
+}
+
+// scanClaimedProcessingJob 比普通任务扫描多读取 lease_token。普通 HTTP 查询
+// 不需要暴露该值，只有刚完成原子领取的 Worker 才能得到 fencing token。
+func scanClaimedProcessingJob(
+	row pgx.Row,
+) (document.ProcessingJob, error) {
+	var job document.ProcessingJob
+	var status string
+
+	err := row.Scan(
+		&job.ID,
+		&job.DocumentID,
+		&status,
+		&job.AttemptCount,
+		&job.ErrorMessage,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+		&job.StartedAt,
+		&job.CompletedAt,
+		&job.LeaseToken,
+	)
+	if err != nil {
+		return document.ProcessingJob{}, err
+	}
+
+	job.Status = document.ProcessingJobStatus(status)
+	if !job.Status.IsValid() {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"invalid processing job status %q",
+			status,
+		)
+	}
+	if job.LeaseToken == "" {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"claimed processing job has empty lease token",
 		)
 	}
 

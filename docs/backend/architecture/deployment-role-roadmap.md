@@ -129,13 +129,26 @@ Redis 原子租约（跨进程）
 部署角色拆分不等于已经可以任意增加实例。跨主机或多副本之前仍必须完成：
 
 1. 本地 `storage/` 迁移为共享对象存储；
-2. 任务 lease、heartbeat、条件收尾和过期恢复；
+2. 文档任务 lease、heartbeat、fencing 条件收尾和过期恢复已经完成；Embedding 与 Answer 任务仍需按相同原则升级；
 3. Redis Provider 并发闸门已完成；验证码、认证、上传等待区等共享频率/排队限制仍需按实测逐项迁移；
 4. 数据库迁移的单一执行者或受控 migration job；
 5. 各角色独立资源、队列和故障注入压测。
 
 `FOR UPDATE SKIP LOCKED` 可以避免两个 Worker 同时领取同一数据库任务，但不能自动解决本地文件不可见、
 远程 Provider 总并发被实例数放大或异常实例长期占用任务的问题。
+
+### 文档任务租约（已完成）
+
+文档 Worker 领取任务时会把 `worker_id`、随机 `lease_token`、`lease_expires_at` 和 `heartbeat_at`
+与 `processing` 状态写入同一事务。处理期间按固定周期续租；只有仍持有未过期 token 的 Worker 才能：
+
+- 原子替换该文档的 chunks；
+- 把任务和文档写成 succeeded/failed；
+- 激活等待中的 Embedding 任务。
+
+恢复器只选择已经过期或升级前没有租约的 `processing` 任务，并通过 `FOR UPDATE SKIP LOCKED`
+将其重新放回 `queued`。旧 Worker 即使稍后返回结果，也会收到 `ErrProcessingJobLeaseLost`，不能覆盖新 Worker。
+默认租约为 60 秒、心跳为 15 秒；两者可通过环境变量调整，且心跳周期必须短于租约。
 
 ## 7. 已完成验收标准
 
@@ -155,6 +168,8 @@ Redis 原子租约（跨进程）
 - 进程异常遗留的容量租约会按 TTL 自动回收；
 - Redis 协调故障不会绕过闸门直接调用远程 Provider；
 - 容量协调关闭时，原有单进程开发模式保持兼容。
+- 文档任务有效心跳不会被恢复，过期任务能够获得新 fencing token 重新领取；
+- 旧 token 不能写 chunks，也不能写成功或失败终态。
 
 本地隔离验收使用同一个临时镜像和空 pgvector/PostgreSQL，依次启动五种角色并发送 SIGTERM；五个进程均以
 退出码 0 完成清理。API 日志未出现 Python/Worker 组装事件，三个 Worker 日志均显示

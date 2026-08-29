@@ -59,6 +59,20 @@ type ChunkReplacer interface {
 	) error
 }
 
+// LeasedChunkReplacer 定义文档 Worker 在有效任务租约保护下替换 chunks 的能力。
+//
+// 普通维护和测试数据仍可使用 ChunkReplacer；后台解析必须使用这个带 fencing
+// token 的端口，防止已经失去任务所有权的旧 Worker 覆盖新结果。
+type LeasedChunkReplacer interface {
+	ReplaceForProcessingJob(
+		ctx context.Context,
+		jobID int64,
+		leaseToken string,
+		documentID int64,
+		chunks []ChunkInput,
+	) error
+}
+
 // ChunkLister 定义按文档和块序号查询全部文本块的能力。
 type ChunkLister interface {
 	ListByDocumentID(

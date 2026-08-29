@@ -16,6 +16,9 @@ func TestLoadWorkerUsesDefaults(t *testing.T) {
 	t.Setenv("PROCESSING_MAX_IN_FLIGHT_PER_OWNER", "")
 	t.Setenv("PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", "")
 	t.Setenv("PROCESSING_STARVATION_THRESHOLD", "")
+	t.Setenv("DOCUMENT_WORKER_ID", "")
+	t.Setenv("DOCUMENT_JOB_LEASE_DURATION", "")
+	t.Setenv("DOCUMENT_JOB_HEARTBEAT_INTERVAL", "")
 
 	workerConfig, err := LoadWorker()
 	if err != nil {
@@ -77,6 +80,23 @@ func TestLoadWorkerUsesDefaults(t *testing.T) {
 			defaultProcessingStarvationThreshold,
 		)
 	}
+	if workerConfig.DocumentWorkerID == "" {
+		t.Fatal("DocumentWorkerID must receive a generated default")
+	}
+	if workerConfig.JobLeaseDuration != defaultDocumentJobLeaseDuration {
+		t.Fatalf(
+			"JobLeaseDuration = %v, want %v",
+			workerConfig.JobLeaseDuration,
+			defaultDocumentJobLeaseDuration,
+		)
+	}
+	if workerConfig.JobHeartbeatInterval != defaultDocumentJobHeartbeatInterval {
+		t.Fatalf(
+			"JobHeartbeatInterval = %v, want %v",
+			workerConfig.JobHeartbeatInterval,
+			defaultDocumentJobHeartbeatInterval,
+		)
+	}
 }
 
 func TestLoadWorkerUsesEnvironmentValues(t *testing.T) {
@@ -88,6 +108,9 @@ func TestLoadWorkerUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("PROCESSING_MAX_IN_FLIGHT_PER_OWNER", "2")
 	t.Setenv("PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER", "3")
 	t.Setenv("PROCESSING_STARVATION_THRESHOLD", "90s")
+	t.Setenv("DOCUMENT_WORKER_ID", "worker-a")
+	t.Setenv("DOCUMENT_JOB_LEASE_DURATION", "45s")
+	t.Setenv("DOCUMENT_JOB_HEARTBEAT_INTERVAL", "10s")
 
 	workerConfig, err := LoadWorker()
 	if err != nil {
@@ -144,6 +167,15 @@ func TestLoadWorkerUsesEnvironmentValues(t *testing.T) {
 			workerConfig.StarvationThreshold,
 			90*time.Second,
 		)
+	}
+	if workerConfig.DocumentWorkerID != "worker-a" {
+		t.Fatalf("DocumentWorkerID = %q, want worker-a", workerConfig.DocumentWorkerID)
+	}
+	if workerConfig.JobLeaseDuration != 45*time.Second {
+		t.Fatalf("JobLeaseDuration = %v, want 45s", workerConfig.JobLeaseDuration)
+	}
+	if workerConfig.JobHeartbeatInterval != 10*time.Second {
+		t.Fatalf("JobHeartbeatInterval = %v, want 10s", workerConfig.JobHeartbeatInterval)
 	}
 }
 
@@ -268,6 +300,26 @@ func TestLoadWorkerRejectsInvalidValues(t *testing.T) {
 			environmentName: "PROCESSING_STARVATION_THRESHOLD",
 			value:           "0s",
 		},
+		{
+			name:            "invalid lease duration",
+			environmentName: "DOCUMENT_JOB_LEASE_DURATION",
+			value:           "later",
+		},
+		{
+			name:            "zero lease duration",
+			environmentName: "DOCUMENT_JOB_LEASE_DURATION",
+			value:           "0s",
+		},
+		{
+			name:            "invalid heartbeat interval",
+			environmentName: "DOCUMENT_JOB_HEARTBEAT_INTERVAL",
+			value:           "often",
+		},
+		{
+			name:            "zero heartbeat interval",
+			environmentName: "DOCUMENT_JOB_HEARTBEAT_INTERVAL",
+			value:           "0s",
+		},
 	}
 
 	for _, test := range tests {
@@ -309,6 +361,22 @@ func TestLoadWorkerRejectsInvalidValues(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestLoadWorkerRejectsHeartbeatNotShorterThanLease(t *testing.T) {
+	t.Setenv("DOCUMENT_JOB_LEASE_DURATION", "30s")
+	t.Setenv("DOCUMENT_JOB_HEARTBEAT_INTERVAL", "30s")
+
+	workerConfig, err := LoadWorker()
+	if !errors.Is(err, ErrInvalidDocumentJobLeaseTiming) {
+		t.Fatalf(
+			"LoadWorker() error = %v, want ErrInvalidDocumentJobLeaseTiming",
+			err,
+		)
+	}
+	if workerConfig != (WorkerConfig{}) {
+		t.Fatalf("LoadWorker() config = %+v, want zero value", workerConfig)
 	}
 }
 

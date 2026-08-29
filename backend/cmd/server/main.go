@@ -360,12 +360,16 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if rolePlan.runDocumentWorker {
 		documentRepository = postgres.NewDocumentRepository(databasePool)
 		processingJobRepository =
-			postgres.NewProcessingJobRepositoryWithSchedulingPolicy(
+			postgres.NewProcessingJobRepositoryWithPolicies(
 				databasePool,
 				documentdomain.ProcessingJobSchedulingPolicy{
 					MaxInFlightPerOwner:         workerConfig.OwnerInFlightLimit,
 					MaxBorrowedInFlightPerOwner: workerConfig.OwnerBorrowedLimit,
 					StarvationThreshold:         workerConfig.StarvationThreshold,
+				},
+				documentdomain.ProcessingJobLeasePolicy{
+					WorkerID:      workerConfig.DocumentWorkerID,
+					LeaseDuration: workerConfig.JobLeaseDuration,
 				},
 			)
 		chunkRepository = postgres.NewChunkRepository(databasePool)
@@ -449,24 +453,24 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		)
 	}
 
-	// Worker 启动前，先恢复上一次异常退出遗留的 processing 任务。
-	// main 只负责决定调用时机；恢复规则位于 Application，SQL 位于 Repository。
+	// Worker 启动前先重排已经过期的 processing 租约。仍在其他实例心跳的
+	// 任务不会被恢复；规则位于 Application，SQL 位于 Repository。
 	if rolePlan.runDocumentWorker {
-		interruptedJobRecoveryService :=
-			documentapplication.NewInterruptedJobRecoveryService(
+		expiredJobRecoveryService :=
+			documentapplication.NewExpiredJobRecoveryService(
 				processingJobRepository,
 			)
-		recoveredJobCount, err := interruptedJobRecoveryService.Recover(ctx)
+		recoveredJobCount, err := expiredJobRecoveryService.Recover(ctx)
 		if err != nil {
 			return fmt.Errorf(
-				"recover interrupted processing jobs during startup: %w",
+				"recover expired processing jobs during startup: %w",
 				err,
 			)
 		}
 
 		if recoveredJobCount > 0 {
 			logger.Info(
-				"Recovered interrupted processing jobs",
+				"Requeued expired processing jobs",
 				"event", "processing_jobs_recovered",
 				"job_count", recoveredJobCount,
 			)
@@ -581,14 +585,18 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	var documentWorkerPool *documentapplication.WorkerPool
 	if rolePlan.runDocumentWorker {
-		documentWorker := documentapplication.NewWorker(
+		documentWorker, err := documentapplication.NewWorkerWithHeartbeatInterval(
 			processingJobRepository,
 			documentRepository,
 			processorDispatcher,
 			chunkRepository,
 			observability.NewProcessingJobLogger(logger),
 			workerConfig.ProcessingTimeout,
+			workerConfig.JobHeartbeatInterval,
 		)
+		if err != nil {
+			return fmt.Errorf("create leased document worker: %w", err)
+		}
 		documentWorkerErrorReporter := func(err error) {
 			logger.Error(
 				"Document worker iteration failed",
@@ -619,6 +627,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			"owner_borrowed_limit", workerConfig.OwnerBorrowedLimit,
 			"starvation_threshold_ms",
 			workerConfig.StarvationThreshold.Milliseconds(),
+			"worker_id", workerConfig.DocumentWorkerID,
+			"lease_duration_ms", workerConfig.JobLeaseDuration.Milliseconds(),
+			"heartbeat_interval_ms",
+			workerConfig.JobHeartbeatInterval.Milliseconds(),
 		)
 	}
 

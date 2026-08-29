@@ -18,14 +18,18 @@ import (
 // ProcessingJobFinalizer；这是因为 Worker 既需要领取任务，也需要更新最终状态。
 type fakeProcessingJobClaimer struct {
 	// 三个 Func 字段定义本次测试希望仓储表现出的行为。
-	claimNextFunc     func(context.Context) (documentdomain.ProcessingJob, error)
-	markSucceededFunc func(context.Context, int64, documentdomain.ProcessingCompletion) error
-	markFailedFunc    func(context.Context, int64, documentdomain.ProcessingFailure) error
+	claimNextFunc      func(context.Context) (documentdomain.ProcessingJob, error)
+	markSucceededFunc  func(context.Context, int64, documentdomain.ProcessingCompletion) error
+	markFailedFunc     func(context.Context, int64, documentdomain.ProcessingFailure) error
+	renewLeaseFunc     func(context.Context, int64, string) error
+	recoverExpiredFunc func(context.Context, string) (int64, error)
 
 	// 三个 Calls 字段记录对应方法实际被调用的次数，供测试断言使用。
-	claimNextCalls     int
-	markSucceededCalls int
-	markFailedCalls    int
+	claimNextCalls      int
+	markSucceededCalls  int
+	markFailedCalls     int
+	renewLeaseCalls     int
+	recoverExpiredCalls int
 }
 
 // ClaimNextProcessingJob 模拟从任务队列领取下一条文档处理任务。
@@ -40,6 +44,7 @@ func (f *fakeProcessingJobClaimer) ClaimNextProcessingJob(
 func (f *fakeProcessingJobClaimer) MarkProcessingJobSucceeded(
 	ctx context.Context,
 	jobID int64,
+	_ string,
 	completion documentdomain.ProcessingCompletion,
 ) error {
 	f.markSucceededCalls++
@@ -53,6 +58,7 @@ func (f *fakeProcessingJobClaimer) MarkProcessingJobSucceeded(
 func (f *fakeProcessingJobClaimer) MarkProcessingJobFailed(
 	ctx context.Context,
 	jobID int64,
+	_ string,
 	failure documentdomain.ProcessingFailure,
 ) error {
 	f.markFailedCalls++
@@ -60,6 +66,29 @@ func (f *fakeProcessingJobClaimer) MarkProcessingJobFailed(
 		return nil
 	}
 	return f.markFailedFunc(ctx, jobID, failure)
+}
+
+func (f *fakeProcessingJobClaimer) RenewProcessingJobLease(
+	ctx context.Context,
+	jobID int64,
+	leaseToken string,
+) error {
+	f.renewLeaseCalls++
+	if f.renewLeaseFunc != nil {
+		return f.renewLeaseFunc(ctx, jobID, leaseToken)
+	}
+	return nil
+}
+
+func (f *fakeProcessingJobClaimer) RequeueExpiredProcessingJobs(
+	ctx context.Context,
+	errorMessage string,
+) (int64, error) {
+	f.recoverExpiredCalls++
+	if f.recoverExpiredFunc != nil {
+		return f.recoverExpiredFunc(ctx, errorMessage)
+	}
+	return 0, nil
 }
 
 func TestWorkerClaimNextReturnsIdleWhenQueueIsEmpty(t *testing.T) {

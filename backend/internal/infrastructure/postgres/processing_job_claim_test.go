@@ -459,6 +459,7 @@ func failClaimedProcessingJobForCleanup(
 	if err := jobRepository.MarkProcessingJobFailed(
 		ctx,
 		job.ID,
+		job.LeaseToken,
 		documentdomain.ProcessingFailure{
 			Message: "owner scheduling integration test cleanup",
 			Metrics: documentdomain.ProcessingExecutionMetrics{

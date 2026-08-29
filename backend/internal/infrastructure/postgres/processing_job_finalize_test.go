@@ -126,6 +126,7 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 		if err := jobRepository.MarkProcessingJobSucceeded(
 			ctx,
 			createdJob.ID,
+			createdJob.LeaseToken,
 			documentdomain.ProcessingCompletion{
 				DetectedTitle: &detectedTitle,
 				Metrics: documentdomain.ProcessingExecutionMetrics{
@@ -184,16 +185,17 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 		err = jobRepository.MarkProcessingJobSucceeded(
 			ctx,
 			createdJob.ID,
+			createdJob.LeaseToken,
 			documentdomain.ProcessingCompletion{
 				DetectedTitle: &detectedTitle,
 			},
 		)
 		if !errors.Is(
 			err,
-			documentdomain.ErrProcessingJobNotProcessing,
+			documentdomain.ErrProcessingJobLeaseLost,
 		) {
 			t.Fatalf(
-				"second success finalization error = %v, want ErrProcessingJobNotProcessing",
+				"second success finalization error = %v, want ErrProcessingJobLeaseLost",
 				err,
 			)
 		}
@@ -224,6 +226,7 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 		if err := jobRepository.MarkProcessingJobSucceeded(
 			ctx,
 			createdJob.ID,
+			createdJob.LeaseToken,
 			documentdomain.ProcessingCompletion{
 				DetectedTitle: &detectedTitle,
 			},
@@ -284,6 +287,7 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 		if err := jobRepository.MarkProcessingJobFailed(
 			ctx,
 			createdJob.ID,
+			createdJob.LeaseToken,
 			documentdomain.ProcessingFailure{
 				Message: safeErrorMessage,
 				Metrics: documentdomain.ProcessingExecutionMetrics{
@@ -340,16 +344,17 @@ func TestProcessingJobRepositoryFinalize(t *testing.T) {
 		err = jobRepository.MarkProcessingJobFailed(
 			ctx,
 			createdJob.ID,
+			createdJob.LeaseToken,
 			documentdomain.ProcessingFailure{
 				Message: safeErrorMessage,
 			},
 		)
 		if !errors.Is(
 			err,
-			documentdomain.ErrProcessingJobNotProcessing,
+			documentdomain.ErrProcessingJobLeaseLost,
 		) {
 			t.Fatalf(
-				"second failure finalization error = %v, want ErrProcessingJobNotProcessing",
+				"second failure finalization error = %v, want ErrProcessingJobLeaseLost",
 				err,
 			)
 		}
@@ -398,6 +403,7 @@ func createProcessingJobForFinalization(
 	if err != nil {
 		t.Fatalf("create finalize test job: %v", err)
 	}
+	createdJob.LeaseToken = fmt.Sprintf("finalize-test-%d", createdJob.ID)
 
 	transaction, err := pool.Begin(ctx)
 	if err != nil {
@@ -415,10 +421,15 @@ func createProcessingJobForFinalization(
 				status = 'processing',
 				attempt_count = 1,
 				started_at = CURRENT_TIMESTAMP,
-				updated_at = CURRENT_TIMESTAMP
+				updated_at = CURRENT_TIMESTAMP,
+				worker_id = 'finalize-test-worker',
+				lease_token = $2,
+				lease_expires_at = CURRENT_TIMESTAMP + INTERVAL '5 minutes',
+				heartbeat_at = CURRENT_TIMESTAMP
 			WHERE id = $1
 		`,
 		createdJob.ID,
+		createdJob.LeaseToken,
 	); err != nil {
 		t.Fatalf("prepare processing job: %v", err)
 	}

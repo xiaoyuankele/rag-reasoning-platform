@@ -3,6 +3,7 @@ package document
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
@@ -61,6 +62,19 @@ var ErrNoQueuedProcessingJob = errors.New(
 // 因此不能被标记为成功或失败。
 var ErrProcessingJobNotProcessing = errors.New(
 	"document processing job is not processing",
+)
+
+// ErrProcessingJobLeaseLost 表示当前 Worker 已不再拥有任务租约。
+//
+// 这通常意味着租约已经过期并被其他 Worker 重新领取。旧 Worker 必须停止
+// 写 chunks 和任务终态，避免陈旧结果覆盖新一次执行。
+var ErrProcessingJobLeaseLost = errors.New(
+	"document processing job lease lost",
+)
+
+// ErrInvalidProcessingJobLeasePolicy 表示 Worker 身份或租约时长无效。
+var ErrInvalidProcessingJobLeasePolicy = errors.New(
+	"document processing job lease policy is invalid",
 )
 
 // ProcessingJobStatus 是文档解析任务状态。
@@ -151,6 +165,21 @@ type ProcessingJob struct {
 	UpdatedAt    time.Time
 	StartedAt    *time.Time
 	CompletedAt  *time.Time
+	// LeaseToken 只供后台 Worker 执行 fencing，不属于前端任务查询契约。
+	// 非 processing 任务和普通查询结果可以为空。
+	LeaseToken string
+}
+
+// ProcessingJobLeasePolicy 定义一个 Worker 实例如何持有数据库任务。
+// WorkerID 用于排障和观测；LeaseDuration 决定失联多久后允许其他 Worker 接管。
+type ProcessingJobLeasePolicy struct {
+	WorkerID      string
+	LeaseDuration time.Duration
+}
+
+// IsValid 判断租约策略是否具备可持久化的 Worker 身份和正租约时长。
+func (p ProcessingJobLeasePolicy) IsValid() bool {
+	return strings.TrimSpace(p.WorkerID) != "" && p.LeaseDuration > 0
 }
 
 // ProcessingJobAdmissionLimits 是创建解析任务时必须原子执行的容量约束。
@@ -274,23 +303,31 @@ type ProcessingJobFinalizer interface {
 	MarkProcessingJobSucceeded(
 		ctx context.Context,
 		jobID int64,
+		leaseToken string,
 		completion ProcessingCompletion,
 	) error
 
 	MarkProcessingJobFailed(
 		ctx context.Context,
 		jobID int64,
+		leaseToken string,
 		failure ProcessingFailure,
 	) error
 }
 
-// InterruptedProcessingJobRecoverer 定义应用启动时恢复异常中断任务
-// 所需的持久化能力。
-//
-// 当前系统只运行一个 Worker 实例，因此服务启动时仍处于 processing
-// 的任务可以确定为上一次进程异常退出留下的中断任务。
-type InterruptedProcessingJobRecoverer interface {
-	MarkInterruptedProcessingJobsFailed(
+// ProcessingJobLeaseRenewer 定义 Worker 处理期间续租所需的能力。
+type ProcessingJobLeaseRenewer interface {
+	RenewProcessingJobLease(
+		ctx context.Context,
+		jobID int64,
+		leaseToken string,
+	) error
+}
+
+// ExpiredProcessingJobRecoverer 定义恢复真正过期 processing 任务的能力。
+// 仍有有效租约的其他实例任务绝不能被恢复。
+type ExpiredProcessingJobRecoverer interface {
+	RequeueExpiredProcessingJobs(
 		ctx context.Context,
 		errorMessage string,
 	) (recoveredCount int64, err error)

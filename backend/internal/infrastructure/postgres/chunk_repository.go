@@ -18,6 +18,7 @@ type ChunkRepository struct {
 }
 
 var _ document.ChunkRepository = (*ChunkRepository)(nil)
+var _ document.LeasedChunkReplacer = (*ChunkRepository)(nil)
 var _ document.ChunkPageLister = (*ChunkRepository)(nil)
 var _ document.ChunkSearcher = (*ChunkRepository)(nil)
 
@@ -31,6 +32,35 @@ func NewChunkRepository(pool *pgxpool.Pool) *ChunkRepository {
 // ReplaceForDocument 在同一事务中删除旧文本块并写入新文本块。
 func (r *ChunkRepository) ReplaceForDocument(
 	ctx context.Context,
+	documentID int64,
+	chunks []document.ChunkInput,
+) error {
+	return r.replaceForDocument(ctx, nil, "", documentID, chunks)
+}
+
+// ReplaceForProcessingJob 只允许仍持有有效任务租约的 Worker 替换 chunks。
+// 任务行和文档行在同一事务内锁定，使过期恢复、新 Worker 领取和旧 Worker
+// 写入之间形成明确顺序。
+func (r *ChunkRepository) ReplaceForProcessingJob(
+	ctx context.Context,
+	jobID int64,
+	leaseToken string,
+	documentID int64,
+	chunks []document.ChunkInput,
+) error {
+	return r.replaceForDocument(
+		ctx,
+		&jobID,
+		leaseToken,
+		documentID,
+		chunks,
+	)
+}
+
+func (r *ChunkRepository) replaceForDocument(
+	ctx context.Context,
+	jobID *int64,
+	leaseToken string,
 	documentID int64,
 	chunks []document.ChunkInput,
 ) error {
@@ -56,18 +86,44 @@ func (r *ChunkRepository) ReplaceForDocument(
 	}()
 
 	// 锁定文档可以同时完成存在性检查，并防止替换过程中被并发删除。
+	// Worker 路径额外锁定任务并校验 lease_token 和到期时间。
 	var lockedDocumentID int64
-	err = transaction.QueryRow(
-		ctx,
-		`
+	if jobID == nil {
+		err = transaction.QueryRow(
+			ctx,
+			`
 			SELECT id
 			FROM documents
 			WHERE id = $1
 			FOR UPDATE
 		`,
-		documentID,
-	).Scan(&lockedDocumentID)
+			documentID,
+		).Scan(&lockedDocumentID)
+	} else {
+		err = transaction.QueryRow(
+			ctx,
+			`
+			SELECT source_document.id
+			FROM document_jobs AS job
+			JOIN documents AS source_document
+			  ON source_document.id = job.document_id
+			WHERE job.id = $1
+			  AND job.lease_token = $2
+			  AND job.status = 'processing'
+			  AND job.lease_expires_at > CURRENT_TIMESTAMP
+			  AND source_document.id = $3
+			  AND source_document.status = 'processing'
+			FOR UPDATE OF job, source_document
+		`,
+			*jobID,
+			leaseToken,
+			documentID,
+		).Scan(&lockedDocumentID)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
+		if jobID != nil {
+			return document.ErrProcessingJobLeaseLost
+		}
 		return document.ErrNotFound
 	}
 	if err != nil {

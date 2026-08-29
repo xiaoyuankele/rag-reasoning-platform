@@ -231,7 +231,7 @@ Worker Application 已定义可替换的文档处理器端口，并实现单次�
 
 本地文件存储已经提供安全 `Open` 能力，能够校验存储路径、保留文件系统错误并在读取过程中响应 context 取消。Go 原生 `TextProcessor` 支持 `text/markdown` 和 `text/plain`，会流式读取 UTF-8 字符、折叠连续空白、去除 BOM，并按每块最多 1000 个 Unicode 字符生成从 0 开始的稳定文本块。自动化测试已覆盖格式拒绝、打开失败、空文本、非法 UTF-8、context 取消、成功与失败关闭，以及真实 LocalStorage 跨层组合。
 
-固定大小 Worker Pool 已经实现连续领取、空队列等待、错误上报和 context 取消；默认并发为 1，可通过 `DOCUMENT_WORKER_CONCURRENCY` 配置为 1～4。Python Process Pool 也已实现固定槽位租借、进程复用、单进程处理数量上限、超时杀进程、崩溃替换、输出边界和 shutdown；默认仍使用 `oneshot`，显式配置 `pool` 后才启用。两个不同任务的 PostgreSQL 收尾、两个一次性 Python 子进程以及两个常驻 Python 槽位均已完成并发验收。HTTP 服务使用标准库 `http.Server` 响应退出信号和执行限时优雅关闭；真实 HTTP、PostgreSQL 与本地文件链路已经验证 Markdown 文档能够自动处理为统一文本块。Worker 使用独立子 context 限制单份文档的处理时间，默认超时为 5 分钟，并在超时后使用仍有效的父 context 将任务安全标记为失败。
+固定大小 Worker Pool 已经实现连续领取、空队列等待、错误上报和 context 取消；默认并发为 1，可通过 `DOCUMENT_WORKER_CONCURRENCY` 配置为 1～4。Python Process Pool 也已实现固定槽位租借、进程复用、单进程处理数量上限、超时杀进程、崩溃替换、输出边界和 shutdown；默认仍使用 `oneshot`，显式配置 `pool` 后才启用。两个不同任务的 PostgreSQL 收尾、两个一次性 Python 子进程以及两个常驻 Python 槽位均已完成并发验收。HTTP 服务使用标准库 `http.Server` 响应退出信号和执行限时优雅关闭；真实 HTTP、PostgreSQL 与本地文件链路已经验证 Markdown 文档能够自动处理为统一文本块。Worker 使用独立子 context 限制单份文档的处理时间，默认超时为 5 分钟，并在超时后使用仍有效的父 context 将任务安全标记为失败。文档任务现已增加 PostgreSQL 持久化租约、周期心跳和 fencing token；只有当前租约持有者可以替换 chunks 或写入终态，失联任务到期后会自动重新排队。
 
 文档解析任务入队已经增加 PostgreSQL 原子背压：默认每个用户最多保留 5 条 `queued/processing` 任务，全系统最多 40 条；并发请求通过文档行锁和短事务 advisory lock 竞争容量，不会突破最后一个名额。用户满额返回 `429`，全局满额返回 `503`，成功或失败的历史任务不占用名额。
 
@@ -433,6 +433,9 @@ Go 后端当前支持以下环境变量：
 | `UPLOAD_MAX_CONCURRENCY_GLOBAL` | `16` | 单个后端实例同时执行的完整上传链路上限，不能小于单用户值 |
 | `UPLOAD_QUEUE_WAIT_TIMEOUT` | `2s` | 上传请求等待单用户和全局槽位的最长时间 |
 | `WORKER_POLL_INTERVAL` | `2s` | 文档 Worker 在空队列或单轮错误后的轮询间隔 |
+| `DOCUMENT_WORKER_ID` | 自动生成 | 文档 Worker 进程的观测身份；容器中建议保持默认主机名与 PID 组合 |
+| `DOCUMENT_JOB_LEASE_DURATION` | `60s` | 文档解析任务租约有效期；实例失联后到期任务才能被接管 |
+| `DOCUMENT_JOB_HEARTBEAT_INTERVAL` | `15s` | processing 任务续租周期，必须短于租约有效期 |
 | `WORKER_PROCESSING_TIMEOUT` | `5m` | 单份文档从处理器调用到任务收尾的最大时间 |
 | `DOCUMENT_WORKER_CONCURRENCY` | `1` | 同一实例的文档 Worker 数，允许 1～4；默认 1 可安全降级 |
 | `PROCESSING_MAX_ACTIVE_JOBS_PER_USER` | `5` | 单个用户允许的 queued/processing 文档解析任务总数 |

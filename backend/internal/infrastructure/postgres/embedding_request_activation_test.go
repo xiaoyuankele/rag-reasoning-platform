@@ -67,6 +67,7 @@ func TestEmbeddingRequestAndProcessingSuccessDoNotStrandWaitingJob(t *testing.T)
 				finalizeResult <- processingJobs.MarkProcessingJobSucceeded(
 					ctx,
 					processingJob.ID,
+					processingJob.LeaseToken,
 					documentdomain.ProcessingCompletion{},
 				)
 			}()

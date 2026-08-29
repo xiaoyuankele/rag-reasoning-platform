@@ -20,6 +20,8 @@ const (
 	defaultProcessingOwnerBorrowedLimit  = 2
 	maximumProcessingOwnerInFlightLimit  = 64
 	defaultProcessingStarvationThreshold = 2 * time.Minute
+	defaultDocumentJobLeaseDuration      = 60 * time.Second
+	defaultDocumentJobHeartbeatInterval  = 15 * time.Second
 )
 
 // ErrInvalidProcessingActiveJobLimits 表示全局容量小于单用户容量。
@@ -32,6 +34,11 @@ var ErrInvalidProcessingOwnerSchedulingLimits = errors.New(
 	"processing borrowed owner in-flight limit must not be smaller than the base owner limit",
 )
 
+// ErrInvalidDocumentJobLeaseTiming 表示心跳不可能在租约到期前完成续租。
+var ErrInvalidDocumentJobLeaseTiming = errors.New(
+	"document job heartbeat interval must be shorter than lease duration",
+)
+
 // WorkerConfig 保存后台 Worker 的运行配置。
 type WorkerConfig struct {
 	PollInterval           time.Duration
@@ -42,6 +49,9 @@ type WorkerConfig struct {
 	OwnerInFlightLimit     int
 	OwnerBorrowedLimit     int
 	StarvationThreshold    time.Duration
+	DocumentWorkerID       string
+	JobLeaseDuration       time.Duration
+	JobHeartbeatInterval   time.Duration
 }
 
 // LoadWorker 从环境变量读取并校验 Worker 配置。
@@ -145,6 +155,40 @@ func LoadWorker() (WorkerConfig, error) {
 		)
 	}
 
+	documentWorkerID := strings.TrimSpace(os.Getenv("DOCUMENT_WORKER_ID"))
+	if documentWorkerID == "" {
+		hostname, hostnameErr := os.Hostname()
+		if hostnameErr != nil || strings.TrimSpace(hostname) == "" {
+			hostname = "document-worker"
+		}
+		documentWorkerID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	}
+
+	jobLeaseDuration, err := loadPositiveDuration(
+		"DOCUMENT_JOB_LEASE_DURATION",
+		defaultDocumentJobLeaseDuration,
+	)
+	if err != nil {
+		return WorkerConfig{}, fmt.Errorf(
+			"load document job lease duration: %w",
+			err,
+		)
+	}
+
+	jobHeartbeatInterval, err := loadPositiveDuration(
+		"DOCUMENT_JOB_HEARTBEAT_INTERVAL",
+		defaultDocumentJobHeartbeatInterval,
+	)
+	if err != nil {
+		return WorkerConfig{}, fmt.Errorf(
+			"load document job heartbeat interval: %w",
+			err,
+		)
+	}
+	if jobHeartbeatInterval >= jobLeaseDuration {
+		return WorkerConfig{}, ErrInvalidDocumentJobLeaseTiming
+	}
+
 	return WorkerConfig{
 		PollInterval:           pollInterval,
 		ProcessingTimeout:      processingTimeout,
@@ -154,6 +198,9 @@ func LoadWorker() (WorkerConfig, error) {
 		OwnerInFlightLimit:     ownerInFlightLimit,
 		OwnerBorrowedLimit:     ownerBorrowedLimit,
 		StarvationThreshold:    starvationThreshold,
+		DocumentWorkerID:       documentWorkerID,
+		JobLeaseDuration:       jobLeaseDuration,
+		JobHeartbeatInterval:   jobHeartbeatInterval,
 	}, nil
 }
 

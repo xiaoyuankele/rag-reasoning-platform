@@ -52,16 +52,17 @@ Compose 和镜像使用三个配套设置：
 
 | 任务类型 | 启动前状态 | 恢复后状态 | 原因 |
 | --- | --- | --- | --- |
-| 文档解析 | `processing` | 任务和文档都变为 `failed` | 原文件解析和 chunks 写入属于一次处理结果；第一版要求用户明确重试，避免把旧 chunks 当作当前结果 |
+| 文档解析 | `processing` 且租约过期 | 任务回到 `queued`，文档暂时变为 `failed`，随后可重新领取 | chunks 与终态均受 fencing token 保护，旧 Worker 已不能覆盖新结果，因此可以自动接管 |
 | Embedding | `processing` | 任务回到 `queued`，文档仍为 `ready` | 文本 chunks 已经稳定存在；向量采用全部成功才提交的事务，可安全重新生成 |
 
 恢复错误信息使用稳定安全文本：
 
-- 文档解析：`document processing was interrupted`；
+- 文档解析：`document processing lease expired and was requeued`；
 - Embedding：`embedding generation was interrupted`。
 
-当前恢复算法建立在单后端实例约束上。如果未来同时运行多个实例，不能再把所有 `processing` 都视为失联，
-必须增加任务 lease、heartbeat 和实例标识后再判断任务归属。
+文档解析已经使用 PostgreSQL 持久化 lease、heartbeat、Worker 身份和随机 fencing token，只恢复真正过期的
+任务；这允许多个文档 Worker 进程共享同一队列。Embedding 与 Answer 仍保留各自原有恢复模型，在完成同类
+租约升级前不能仅凭文档任务已安全就任意增加这些 Worker 的多实例数量。
 
 ## 4. 可重复验收脚本
 
@@ -112,3 +113,11 @@ chatgpt/运行产物/日志/container-lifecycle-<UTC 时间>.log
 ```text
 chatgpt/运行产物/临时/container-lifecycle-20260815T075151Z.json
 ```
+
+## 6. 2026-08-29 租约升级说明
+
+第 5 节是旧版单进程恢复的历史证据；`verify-container-lifecycle.ps1` 仍冻结该历史断言，不能用它证明当前
+拆分角色和文档租约门禁。当前租约正确性由真实 PostgreSQL 集成测试
+`TestProcessingJobLeaseRecoveryAndFencing` 验证，覆盖有效续租、到期重领、新 fencing token、旧 Worker
+chunks 写入拒绝和旧 Worker 终态写入拒绝。容器级异常退出脚本需要在后续将 API 与 `document-worker`
+作为两个角色分别验收，更新前不得把旧脚本结果当作当前发布证据。
