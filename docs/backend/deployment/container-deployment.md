@@ -10,7 +10,7 @@ Python 子进程处理 PDF，因此运行镜像不是“纯 Go 镜像”，而�
 - 项目的 `rag_ai` 包、`pypdf` 和加密 PDF 所需依赖。
 
 PostgreSQL 继续作为独立 Compose 服务。角色拆分不是微服务：所有进程仍共享同一个数据库契约、任务表和
-镜像版本，不增加内部 HTTP 调用。
+镜像版本，不增加内部 HTTP 调用。远程模型执行槽位由独立 Redis 协调，查询/答案缓存继续使用另一套 Redis。
 
 ```text
 浏览器 ──> backend(api) ───────────────┐
@@ -20,6 +20,9 @@ PostgreSQL 继续作为独立 Compose 服务。角色拆分不是微服务：所
                                         │
 embedding-worker(Profile) ──────────────┤
 answer-worker(Profile) ─────────────────┘
+
+backend / embedding-worker / answer-worker
+        └──> redis-coordination（短期 Provider 执行租约）
 ```
 
 ## 2. 构建和启动前准备
@@ -63,7 +66,8 @@ docker compose --profile answer up -d answer-worker
 ```
 
 所有角色都会等待 PostgreSQL 健康后启动，并执行嵌入二进制的迁移；迁移通过 advisory lock 串行化，避免
-四个进程同时修改 schema。
+四个进程同时修改 schema。API、Embedding Worker 和 Answer Worker 还会等待 `redis-coordination` 健康；
+只有实际启用远程能力时，后端才创建容量客户端并执行启动 Ping。
 
 ## 4. 健康检查与排障
 
@@ -79,6 +83,7 @@ docker compose ps
 成功标准：
 
 - `rag_reasoning_postgres`、`rag_reasoning_backend` 和 `rag_reasoning_document_worker` 都显示 `healthy`；
+- `rag_reasoning_redis_coordination` 显示 `healthy`；
 - HTTP 返回 `200 OK` 和 `{"status":"ok"}`；
 - Document Worker 日志包含 `role=document-worker`、`ready_file_enabled=true`；
 - 后端日志没有启动失败或数据库连接错误。
@@ -135,6 +140,7 @@ Worker 会先删除就绪文件，再等待 goroutine，最后关闭数据库连
 - API、Document、Embedding、Answer 默认分别限制为 768/1024/512/512 MiB，CPU 分别为 2/2/1/1；
 - 四类角色默认数据库连接池分别为 5/3/3/5，合计 16，不能只看单进程配置；
 - PostgreSQL 本地默认限制为 256 MiB、1 CPU 和 20 个连接；云端配置需要单独测量；
+- 查询缓存 Redis 默认 128 MiB、允许 LFU 淘汰；容量 Redis 默认 32 MiB、使用 `noeviction`，二者不能混用；
 - 后端以固定 UID `10001` 的 `appuser` 运行，不使用 root；
 - Windows Docker Desktop 的目录绑定通常可以直接写入；Linux 部署时必须让 UID `10001` 对宿主机
   `storage/` 目录拥有读写权限；
@@ -163,3 +169,12 @@ Worker 会先删除就绪文件，再等待 goroutine，最后关闭数据库连
 - 五种角色均以退出码 0 完成清理；
 - 空测试数据库保证验收没有调用真实 Provider；
 - 默认 Compose 与全 Profile Compose 均通过 `docker compose config --quiet`。
+
+## 10. 跨进程容量协调验收（2026-08-29）
+
+- 两个独立 Redis 客户端共享同一全局槽位和不同 Owner 槽位；
+- 同一 Owner 的第二次申请在 Owner 上限处被拒绝，其他 Owner 可使用剩余全局槽位；
+- 全局槽位满后，第三个 Owner 也不能继续进入；
+- 未主动释放的短租约在 TTL 后自动回收；
+- Application 单元测试覆盖成功释放、容量等待超时、Redis 故障包装和上下文取消；
+- 验收使用本地隔离 Redis 与 Fake 下游，没有调用真实 Embedding 或 Generation Provider。

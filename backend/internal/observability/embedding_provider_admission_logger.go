@@ -46,7 +46,11 @@ func (l *EmbeddingProviderAdmissionLogger) ObserveEmbeddingProviderAdmissionEven
 			slog.String("outcome", string(event.Outcome)),
 		)
 	}
-	if event.Type == embeddingapplication.EmbeddingProviderAdmissionEventReleased {
+	if event.Err != nil {
+		attributes = append(attributes, slog.Any("error", event.Err))
+	}
+	if event.Type == embeddingapplication.EmbeddingProviderAdmissionEventReleased ||
+		event.Type == embeddingapplication.EmbeddingProviderDistributedAdmissionEventReleased {
 		attributes = append(
 			attributes,
 			slog.Int64(
@@ -70,8 +74,14 @@ func (l *EmbeddingProviderAdmissionLogger) ObserveEmbeddingProviderAdmissionEven
 func embeddingProviderAdmissionEventLevel(
 	event embeddingapplication.EmbeddingProviderAdmissionEvent,
 ) slog.Level {
-	if event.Type == embeddingapplication.EmbeddingProviderAdmissionEventRejected &&
-		event.Outcome == embeddingapplication.EmbeddingProviderAdmissionOutcomeCapacityTimeout {
+	if event.Type == embeddingapplication.EmbeddingProviderAdmissionEventRejected ||
+		event.Type == embeddingapplication.EmbeddingProviderDistributedAdmissionEventRejected {
+		if event.Outcome == embeddingapplication.EmbeddingProviderAdmissionOutcomeCapacityTimeout ||
+			event.Outcome == embeddingapplication.EmbeddingProviderAdmissionOutcomeCoordinationError {
+			return slog.LevelWarn
+		}
+	}
+	if event.Outcome == embeddingapplication.EmbeddingProviderAdmissionOutcomeCoordinationError {
 		return slog.LevelWarn
 	}
 	return slog.LevelInfo

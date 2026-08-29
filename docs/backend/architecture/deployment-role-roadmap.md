@@ -96,20 +96,48 @@ API 与 Document Worker 挂载完全相同的 `STORAGE_HOST_PATH`。Embedding/An
 本地 PostgreSQL `max_connections=20` 时，四类角色默认连接池分别为 5、3、3、5，总计 16；资源上限也按
 角色单独配置，不再把 Python 内存和 HTTP 内存混成一个容器预算。
 
-## 5. 多实例前置条件
+## 5. 第四阶段：跨进程远程模型容量协调（已完成）
+
+进程内闸门继续负责本进程的 Owner 公平、等待队列和快速保护；独立 Redis 容量协调器负责所有 API、
+Embedding Worker 和 Answer Worker 进程合计不能突破远程模型执行上限：
+
+```text
+本地进程内准入
+  ├─ Embedding：全局 + Worker/Online 分类
+  └─ Answer：全局 + Owner
+            │
+            ▼
+Redis 原子租约（跨进程）
+            │
+            ▼
+远程 Provider
+```
+
+一次申请通过 Lua 原子检查并写入多个维度。Embedding 同时占用“Provider 全局槽位”和
+“Worker/Online 分类槽位”；Answer 同时占用“生成全局槽位”和“当前 Owner 槽位”。不同进程使用相同键，
+因此新增角色进程不会把真实 Provider 并发按进程数放大。
+
+容量 Redis 与查询/答案缓存 Redis 分离，并使用 `noeviction`。协调不可用时拒绝新的远程调用：同步请求沿用
+稳定 503 与 `Retry-After`，异步任务沿用有限重试；不会像缓存故障那样直接回源。租约带 TTL，异常退出后会
+自动恢复容量；当前默认 3 分钟，并要求长于一次完整问答调用预算。
+
+该阶段没有改变 HTTP DTO、状态码或前端契约，也没有把任务状态放入 Redis。PostgreSQL 仍是任务和结果的
+唯一事实来源。
+
+## 6. 多实例前置条件
 
 部署角色拆分不等于已经可以任意增加实例。跨主机或多副本之前仍必须完成：
 
 1. 本地 `storage/` 迁移为共享对象存储；
 2. 任务 lease、heartbeat、条件收尾和过期恢复；
-3. Redis 跨实例 Provider 并发闸门与共享限流；
+3. Redis Provider 并发闸门已完成；验证码、认证、上传等待区等共享频率/排队限制仍需按实测逐项迁移；
 4. 数据库迁移的单一执行者或受控 migration job；
 5. 各角色独立资源、队列和故障注入压测。
 
 `FOR UPDATE SKIP LOCKED` 可以避免两个 Worker 同时领取同一数据库任务，但不能自动解决本地文件不可见、
 远程 Provider 总并发被实例数放大或异常实例长期占用任务的问题。
 
-## 6. 已完成验收标准
+## 7. 已完成验收标准
 
 - 未设置 `APP_ROLE` 时返回 `all`；
 - 五个稳定角色值均能被配置层解析；
@@ -123,6 +151,10 @@ API 与 Document Worker 挂载完全相同的 `STORAGE_HOST_PATH`。Embedding/An
 - Worker 就绪文件必须使用绝对路径，并在退出时清理；
 - 远程 Worker 由显式 Profile 控制，默认不会启动；
 - HTTP、数据库和前端契约均未改变。
+- 两个独立 Redis 客户端不能同时突破全局或 Owner/来源分类上限；
+- 进程异常遗留的容量租约会按 TTL 自动回收；
+- Redis 协调故障不会绕过闸门直接调用远程 Provider；
+- 容量协调关闭时，原有单进程开发模式保持兼容。
 
 本地隔离验收使用同一个临时镜像和空 pgvector/PostgreSQL，依次启动五种角色并发送 SIGTERM；五个进程均以
 退出码 0 完成清理。API 日志未出现 Python/Worker 组装事件，三个 Worker 日志均显示

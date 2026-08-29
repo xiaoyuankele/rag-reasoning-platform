@@ -53,21 +53,25 @@ func (l AnswerAdmissionLimits) IsValid() bool {
 type AnswerAdmissionEventType string
 
 const (
-	AnswerAdmissionEventAdmitted AnswerAdmissionEventType = "answer_request_admitted"
-	AnswerAdmissionEventRejected AnswerAdmissionEventType = "answer_request_rejected"
-	AnswerAdmissionEventReleased AnswerAdmissionEventType = "answer_request_released"
+	AnswerAdmissionEventAdmitted            AnswerAdmissionEventType = "answer_request_admitted"
+	AnswerAdmissionEventRejected            AnswerAdmissionEventType = "answer_request_rejected"
+	AnswerAdmissionEventReleased            AnswerAdmissionEventType = "answer_request_released"
+	AnswerDistributedAdmissionEventAdmitted AnswerAdmissionEventType = "answer_distributed_request_admitted"
+	AnswerDistributedAdmissionEventRejected AnswerAdmissionEventType = "answer_distributed_request_rejected"
+	AnswerDistributedAdmissionEventReleased AnswerAdmissionEventType = "answer_distributed_request_released"
 )
 
 // AnswerAdmissionOutcome 描述请求被拒绝或释放时的稳定结果分类。
 type AnswerAdmissionOutcome string
 
 const (
-	AnswerAdmissionOutcomeSucceeded       AnswerAdmissionOutcome = "succeeded"
-	AnswerAdmissionOutcomeDownstreamError AnswerAdmissionOutcome = "downstream_error"
-	AnswerAdmissionOutcomeCapacityTimeout AnswerAdmissionOutcome = "capacity_timeout"
-	AnswerAdmissionOutcomeOwnerCapacity   AnswerAdmissionOutcome = "owner_capacity_exhausted"
-	AnswerAdmissionOutcomeGlobalCapacity  AnswerAdmissionOutcome = "global_capacity_exhausted"
-	AnswerAdmissionOutcomeCanceled        AnswerAdmissionOutcome = "canceled"
+	AnswerAdmissionOutcomeSucceeded         AnswerAdmissionOutcome = "succeeded"
+	AnswerAdmissionOutcomeDownstreamError   AnswerAdmissionOutcome = "downstream_error"
+	AnswerAdmissionOutcomeCapacityTimeout   AnswerAdmissionOutcome = "capacity_timeout"
+	AnswerAdmissionOutcomeOwnerCapacity     AnswerAdmissionOutcome = "owner_capacity_exhausted"
+	AnswerAdmissionOutcomeGlobalCapacity    AnswerAdmissionOutcome = "global_capacity_exhausted"
+	AnswerAdmissionOutcomeCanceled          AnswerAdmissionOutcome = "canceled"
+	AnswerAdmissionOutcomeCoordinationError AnswerAdmissionOutcome = "coordination_error"
 )
 
 // AnswerAdmissionEvent 是并发闸门交给 Observability 的安全事件。
@@ -86,6 +90,7 @@ type AnswerAdmissionEvent struct {
 	MaxWaiting          int
 	OwnerWaiting        int
 	OwnerMaxWaiting     int
+	Err                 error
 }
 
 // AnswerAdmissionEventObserver 是 Application 输出并发观测事件的端口。
@@ -147,6 +152,7 @@ func (s *ConcurrentService) Answer(
 	input Input,
 ) (output Output, err error) {
 	waitStartedAt := time.Now()
+	admissionDeadline := waitStartedAt.Add(s.scheduler.limits.WaitTimeout)
 	decision := s.scheduler.acquire(ctx, scope)
 	waitDuration := time.Since(waitStartedAt)
 
@@ -193,7 +199,18 @@ func (s *ConcurrentService) Answer(
 		)
 	}()
 
-	return s.next.Answer(ctx, scope, input)
+	return s.next.Answer(
+		context.WithValue(ctx, answerAdmissionDeadlineContextKey{}, admissionDeadline),
+		scope,
+		input,
+	)
+}
+
+type answerAdmissionDeadlineContextKey struct{}
+
+func answerAdmissionDeadlineFromContext(ctx context.Context) (time.Time, bool) {
+	deadline, ok := ctx.Value(answerAdmissionDeadlineContextKey{}).(time.Time)
+	return deadline, ok && !deadline.IsZero()
 }
 
 func (s *ConcurrentService) observe(

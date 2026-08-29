@@ -43,19 +43,23 @@ const (
 type EmbeddingProviderAdmissionEventType string
 
 const (
-	EmbeddingProviderAdmissionEventAdmitted EmbeddingProviderAdmissionEventType = "embedding_provider_request_admitted"
-	EmbeddingProviderAdmissionEventRejected EmbeddingProviderAdmissionEventType = "embedding_provider_request_rejected"
-	EmbeddingProviderAdmissionEventReleased EmbeddingProviderAdmissionEventType = "embedding_provider_request_released"
+	EmbeddingProviderAdmissionEventAdmitted            EmbeddingProviderAdmissionEventType = "embedding_provider_request_admitted"
+	EmbeddingProviderAdmissionEventRejected            EmbeddingProviderAdmissionEventType = "embedding_provider_request_rejected"
+	EmbeddingProviderAdmissionEventReleased            EmbeddingProviderAdmissionEventType = "embedding_provider_request_released"
+	EmbeddingProviderDistributedAdmissionEventAdmitted EmbeddingProviderAdmissionEventType = "embedding_provider_distributed_request_admitted"
+	EmbeddingProviderDistributedAdmissionEventRejected EmbeddingProviderAdmissionEventType = "embedding_provider_distributed_request_rejected"
+	EmbeddingProviderDistributedAdmissionEventReleased EmbeddingProviderAdmissionEventType = "embedding_provider_distributed_request_released"
 )
 
 // EmbeddingProviderAdmissionOutcome 是拒绝或释放事件的稳定结果分类。
 type EmbeddingProviderAdmissionOutcome string
 
 const (
-	EmbeddingProviderAdmissionOutcomeSucceeded       EmbeddingProviderAdmissionOutcome = "succeeded"
-	EmbeddingProviderAdmissionOutcomeDownstreamError EmbeddingProviderAdmissionOutcome = "downstream_error"
-	EmbeddingProviderAdmissionOutcomeCapacityTimeout EmbeddingProviderAdmissionOutcome = "capacity_timeout"
-	EmbeddingProviderAdmissionOutcomeCanceled        EmbeddingProviderAdmissionOutcome = "canceled"
+	EmbeddingProviderAdmissionOutcomeSucceeded         EmbeddingProviderAdmissionOutcome = "succeeded"
+	EmbeddingProviderAdmissionOutcomeDownstreamError   EmbeddingProviderAdmissionOutcome = "downstream_error"
+	EmbeddingProviderAdmissionOutcomeCapacityTimeout   EmbeddingProviderAdmissionOutcome = "capacity_timeout"
+	EmbeddingProviderAdmissionOutcomeCanceled          EmbeddingProviderAdmissionOutcome = "canceled"
+	EmbeddingProviderAdmissionOutcomeCoordinationError EmbeddingProviderAdmissionOutcome = "coordination_error"
 )
 
 // EmbeddingProviderAdmissionEvent 是 Application 交给 Observability 的安全事件。
@@ -70,6 +74,7 @@ type EmbeddingProviderAdmissionEvent struct {
 	OriginMaxConcurrency int
 	InFlight             int
 	MaxConcurrency       int
+	Err                  error
 }
 
 // EmbeddingProviderAdmissionObserver 是容量闸门向外输出观测事件的端口。

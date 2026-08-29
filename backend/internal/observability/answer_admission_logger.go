@@ -45,7 +45,11 @@ func (l *AnswerAdmissionLogger) ObserveAnswerAdmissionEvent(
 			slog.String("outcome", string(event.Outcome)),
 		)
 	}
-	if event.Type == answerapplication.AnswerAdmissionEventReleased {
+	if event.Err != nil {
+		attributes = append(attributes, slog.Any("error", event.Err))
+	}
+	if event.Type == answerapplication.AnswerAdmissionEventReleased ||
+		event.Type == answerapplication.AnswerDistributedAdmissionEventReleased {
 		attributes = append(
 			attributes,
 			slog.Int64(
@@ -69,13 +73,18 @@ func (l *AnswerAdmissionLogger) ObserveAnswerAdmissionEvent(
 func answerAdmissionEventLevel(
 	event answerapplication.AnswerAdmissionEvent,
 ) slog.Level {
-	if event.Type == answerapplication.AnswerAdmissionEventRejected {
+	if event.Type == answerapplication.AnswerAdmissionEventRejected ||
+		event.Type == answerapplication.AnswerDistributedAdmissionEventRejected {
 		switch event.Outcome {
 		case answerapplication.AnswerAdmissionOutcomeCapacityTimeout,
 			answerapplication.AnswerAdmissionOutcomeOwnerCapacity,
-			answerapplication.AnswerAdmissionOutcomeGlobalCapacity:
+			answerapplication.AnswerAdmissionOutcomeGlobalCapacity,
+			answerapplication.AnswerAdmissionOutcomeCoordinationError:
 			return slog.LevelWarn
 		}
+	}
+	if event.Outcome == answerapplication.AnswerAdmissionOutcomeCoordinationError {
+		return slog.LevelWarn
 	}
 	return slog.LevelInfo
 }

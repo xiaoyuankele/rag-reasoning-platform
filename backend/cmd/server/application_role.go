@@ -74,6 +74,10 @@ func (p applicationRolePlan) needsCacheConfig() bool {
 	return p.serveHTTP || p.runAnswerWorker
 }
 
+func (p applicationRolePlan) needsCapacityCoordinationConfig() bool {
+	return p.serveHTTP || p.runEmbeddingWorker || p.runAnswerWorker
+}
+
 // validateApplicationRoleFeatures 拒绝“角色已启动但核心循环被功能开关关闭”的
 // 空壳进程。all/api 仍允许按原有功能开关选择能力；专用 Worker 角色必须明确
 // 打开对应功能。

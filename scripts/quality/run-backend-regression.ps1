@@ -144,6 +144,7 @@ $reportPath = Join-Path $ReportDirectory "backend-default-$timestamp.json"
 $isolatedEnvironment = @(
     "APP_ROLE",
     "APP_READY_FILE",
+	"CAPACITY_COORDINATION_ENABLED",
     "RUN_DATABASE_TESTS",
     "RUN_PYTHON_TESTS",
     "EMBEDDING_WORKER_ENABLED",
@@ -176,6 +177,7 @@ try {
     # 把零费用测试意外变成专用 Worker 生命周期测试。
     $env:APP_ROLE = "all"
     $env:APP_READY_FILE = ""
+	$env:CAPACITY_COORDINATION_ENABLED = "false"
     $env:RUN_DATABASE_TESTS = "0"
     $env:RUN_PYTHON_TESTS = "0"
     $env:EMBEDDING_WORKER_ENABLED = "false"

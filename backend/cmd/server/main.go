@@ -201,6 +201,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 	}
 
+	var capacityConfig config.CapacityCoordinationConfig
+	if rolePlan.needsCapacityCoordinationConfig() {
+		capacityConfig, err = config.LoadCapacityCoordination()
+		if err != nil {
+			return fmt.Errorf("load capacity coordination configuration: %w", err)
+		}
+	}
+
 	// Redis 只保存可丢弃的加速副本。即使启动时 Ping 失败，服务仍会启动，
 	// 后续每次缓存读写失败都由 Application 自动回源远程模型。
 	var ragCache *infrastructure.RedisCache
@@ -248,6 +256,65 @@ func run(ctx context.Context, logger *slog.Logger) error {
 				"answer_result_ttl_ms", cacheConfig.AnswerResultTTL.Milliseconds(),
 			)
 		}
+	}
+
+	needsWorkerEmbedder := rolePlan.runEmbeddingWorker &&
+		embeddingConfig.WorkerEnabled
+	needsOnlineEmbedder := (rolePlan.serveHTTP || rolePlan.runAnswerWorker) &&
+		(embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled)
+	needsRemoteCapacity := needsWorkerEmbedder ||
+		needsOnlineEmbedder ||
+		((rolePlan.serveHTTP || rolePlan.runAnswerWorker) && generationConfig.Enabled)
+
+	// 容量协调不是可丢弃缓存：显式启用后必须在启动时可用，否则不同进程会
+	// 各自放行完整并发上限。运行期故障会拒绝新的远程调用，并由同步 503 或
+	// 异步任务重试承接，不会无保护地绕过 Redis。
+	var capacityStore *infrastructure.RedisCapacityStore
+	if capacityConfig.Enabled && needsRemoteCapacity {
+		minimumLeaseTTL := embeddingConfig.HTTPTimeout
+		if generationConfig.Enabled {
+			minimumLeaseTTL += generationConfig.HTTPTimeout + 30*time.Second
+		}
+		if capacityConfig.LeaseTTL <= minimumLeaseTTL {
+			return fmt.Errorf(
+				"CAPACITY_LEASE_TTL must exceed the longest coordinated call budget %s",
+				minimumLeaseTTL,
+			)
+		}
+
+		capacityStore, err = infrastructure.NewRedisCapacityStore(
+			infrastructure.RedisCapacityOptions{
+				Address:          capacityConfig.RedisAddress,
+				Password:         capacityConfig.RedisPassword,
+				Database:         capacityConfig.RedisDatabase,
+				OperationTimeout: capacityConfig.OperationTimeout,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create Redis capacity coordinator: %w", err)
+		}
+		defer func() {
+			if closeErr := capacityStore.Close(); closeErr != nil {
+				logger.Warn(
+					"Close Redis capacity coordinator",
+					"event", "redis_capacity_close_failed",
+					"error", closeErr,
+				)
+			}
+		}()
+		if pingErr := capacityStore.Ping(ctx); pingErr != nil {
+			return fmt.Errorf(
+				"ping required Redis capacity coordinator: %w",
+				pingErr,
+			)
+		}
+		logger.Info(
+			"Redis provider capacity coordination configured",
+			"event", "redis_capacity_coordination_configured",
+			"namespace", capacityConfig.Namespace,
+			"lease_ttl_ms", capacityConfig.LeaseTTL.Milliseconds(),
+			"retry_interval_ms", capacityConfig.RetryInterval.Milliseconds(),
+		)
 	}
 
 	// ConnectionString 包含密码，只传给数据库层，不写入日志。
@@ -560,10 +627,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// 等待策略包装成两个 Embedder；这样两条执行链竞争的是同一组槽位。
 	var workerEmbedder embeddingdomain.Embedder
 	var onlineEmbedder embeddingdomain.Embedder
-	needsWorkerEmbedder := rolePlan.runEmbeddingWorker &&
-		embeddingConfig.WorkerEnabled
-	needsOnlineEmbedder := (rolePlan.serveHTTP || rolePlan.runAnswerWorker) &&
-		(embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled)
 	if needsWorkerEmbedder || needsOnlineEmbedder {
 		rawEmbedder, err := newEmbeddingClient(embeddingConfig)
 		if err != nil {
@@ -582,8 +645,31 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			observability.NewEmbeddingProviderAdmissionLogger(logger)
 
 		if needsWorkerEmbedder {
+			workerProvider := rawEmbedder
+			if capacityStore != nil {
+				workerProvider, err = embeddingapplication.NewDistributedGatedEmbedder(
+					rawEmbedder,
+					capacityStore,
+					providerAdmissionObserver,
+					embeddingapplication.DistributedEmbeddingProviderGateConfig{
+						Namespace:              capacityConfig.Namespace,
+						Provider:               string(embeddingConfig.Provider),
+						Model:                  embeddingConfig.ModelName,
+						Dimensions:             embeddingConfig.Dimensions,
+						Origin:                 embeddingapplication.EmbeddingProviderCallOriginWorker,
+						ProviderMaxConcurrency: embeddingConfig.ProviderMaxConcurrency,
+						OriginMaxConcurrency:   embeddingConfig.WorkerProviderConcurrency,
+						LeaseTTL:               capacityConfig.LeaseTTL,
+						RetryInterval:          capacityConfig.RetryInterval,
+						WaitTimeout:            0,
+					},
+				)
+				if err != nil {
+					return fmt.Errorf("create distributed worker embedding gate: %w", err)
+				}
+			}
 			workerEmbedder, err = embeddingapplication.NewGatedEmbedder(
-				rawEmbedder,
+				workerProvider,
 				providerGate,
 				providerAdmissionObserver,
 				embeddingapplication.EmbeddingProviderCallOriginWorker,
@@ -594,8 +680,31 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			}
 		}
 		if needsOnlineEmbedder {
+			onlineProvider := rawEmbedder
+			if capacityStore != nil {
+				onlineProvider, err = embeddingapplication.NewDistributedGatedEmbedder(
+					rawEmbedder,
+					capacityStore,
+					providerAdmissionObserver,
+					embeddingapplication.DistributedEmbeddingProviderGateConfig{
+						Namespace:              capacityConfig.Namespace,
+						Provider:               string(embeddingConfig.Provider),
+						Model:                  embeddingConfig.ModelName,
+						Dimensions:             embeddingConfig.Dimensions,
+						Origin:                 embeddingapplication.EmbeddingProviderCallOriginOnline,
+						ProviderMaxConcurrency: embeddingConfig.ProviderMaxConcurrency,
+						OriginMaxConcurrency:   embeddingConfig.OnlineProviderConcurrency,
+						LeaseTTL:               capacityConfig.LeaseTTL,
+						RetryInterval:          capacityConfig.RetryInterval,
+						WaitTimeout:            embeddingConfig.OnlineQueueWaitTimeout,
+					},
+				)
+				if err != nil {
+					return fmt.Errorf("create distributed online embedding gate: %w", err)
+				}
+			}
 			onlineEmbedder, err = embeddingapplication.NewGatedEmbedder(
-				rawEmbedder,
+				onlineProvider,
 				providerGate,
 				providerAdmissionObserver,
 				embeddingapplication.EmbeddingProviderCallOriginOnline,
@@ -679,9 +788,32 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			return fmt.Errorf("create answer service: %w", err)
 		}
 
+		answerAdmissionObserver := observability.NewAnswerAdmissionLogger(logger)
+		var capacityAwareAnswerService answerapplication.Answerer = baseAnswerService
+		if capacityStore != nil {
+			capacityAwareAnswerService, err = answerapplication.NewDistributedService(
+				baseAnswerService,
+				capacityStore,
+				answerAdmissionObserver,
+				answerapplication.DistributedAnswerConfig{
+					Namespace:              capacityConfig.Namespace,
+					Provider:               "dashscope",
+					Model:                  generationConfig.ModelName,
+					MaxConcurrencyGlobal:   generationConfig.MaxConcurrency,
+					MaxConcurrencyPerOwner: generationConfig.MaxConcurrencyPerUser,
+					LeaseTTL:               capacityConfig.LeaseTTL,
+					RetryInterval:          capacityConfig.RetryInterval,
+					WaitTimeout:            generationConfig.QueueWaitTimeout,
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("create distributed answer capacity service: %w", err)
+			}
+		}
+
 		concurrentAnswerService, err := answerapplication.NewConcurrentService(
-			baseAnswerService,
-			observability.NewAnswerAdmissionLogger(logger),
+			capacityAwareAnswerService,
+			answerAdmissionObserver,
 			answerapplication.AnswerAdmissionLimits{
 				MaxConcurrencyGlobal:   generationConfig.MaxConcurrency,
 				MaxConcurrencyPerOwner: generationConfig.MaxConcurrencyPerUser,
