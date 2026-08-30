@@ -46,6 +46,12 @@ ANSWER_ENABLED=false
 正常运行保持 `STORAGE_HOST_PATH=./storage`。它只决定哪个宿主机目录绑定到容器 `/app/storage`；
 隔离恢复验证成功后，可以把它切换到新的恢复目录，而不覆盖旧文件。
 
+需要跨主机共享原始文件时可以把 `FILE_STORAGE_DRIVER` 切换为 `oss`。此时 `/app/storage` 只作为上传校验和
+Python 处理的受控暂存目录，正式对象保存在私有 OSS Bucket；API 与 Document Worker 必须使用相同 Bucket、
+Region 和对象键规则。ECS 推荐使用 RAM Role 和同地域内网 Endpoint，不在容器环境中保存长期 AccessKey。
+完整配置、权限边界和切换前置条件见
+[阿里云 OSS 文件存储](aliyun-oss-storage.md)。
+
 ## 3. 构建与启动
 
 所有命令都从项目根目录执行：
@@ -78,8 +84,8 @@ docker compose --profile answer up -d --scale answer-worker=2 answer-worker
 `*_WORKER_ID` 时，程序会使用容器 hostname 与进程 ID 生成身份；如果自行设置，必须保证每个副本唯一。
 数据库连接池也是“每进程一份”，扩容前要按“单进程连接数 × 副本数”核算 PostgreSQL 上限。
 
-同机 Document Worker 共享相同的 `STORAGE_HOST_PATH`，所以能读取 API 保存的原始文件；这不代表已经支持
-跨主机扩容，跨主机前仍需把原始文件迁移到共享对象存储。
+local 模式下，同机 Document Worker 共享相同的 `STORAGE_HOST_PATH`，所以能读取 API 保存的原始文件；
+oss 模式下，各进程通过统一对象键读取同一私有 Bucket，本地目录不再是正式文件事实来源。
 
 所有角色都会等待 PostgreSQL 健康后启动，并执行嵌入二进制的迁移；迁移通过 advisory lock 串行化，避免
 四个进程同时修改 schema。API、Embedding Worker 和 Answer Worker 还会等待 `redis-coordination` 健康；

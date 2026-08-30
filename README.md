@@ -426,9 +426,18 @@ Go 后端当前支持以下环境变量：
 | `AUTH_PER_CLIENT_LIMIT` | `10` | 同一远端 IP 在窗口内允许的认证请求数 |
 | `AUTH_GLOBAL_LIMIT` | `200` | 整个后端进程在窗口内允许的认证请求数 |
 | `APP_ROOT` | 开发环境自动发现 | 应用运行时资源的共同根目录；显式配置时必须是已经存在的绝对目录 |
-| `STORAGE_ROOT` | `storage` | 本地文档存储根目录；相对路径固定以 `APP_ROOT` 为基准 |
+| `FILE_STORAGE_DRIVER` | `local` | 正式文件存储驱动；允许 `local` 或 `oss` |
+| `STORAGE_ROOT` | `storage` | local 模式的正式文件根目录；oss 模式的本机受控暂存目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `STORAGE_HOST_PATH` | `./storage` | Compose 挂载的宿主机文件目录；恢复验收后可无覆盖切换到新目录 |
 | `STORAGE_MAX_FILE_SIZE_BYTES` | `209715200` | 单个上传文件允许的最大字节数，即 200 MiB |
+| `OSS_BUCKET` | 空 | `oss` 模式使用的私有 Bucket 名称 |
+| `OSS_REGION` | `cn-shanghai` | Bucket 所在阿里云 Region |
+| `OSS_ENDPOINT` | `https://oss-cn-shanghai.aliyuncs.com` | 本机使用公网 Endpoint；同地域 ECS 应改为内网 Endpoint |
+| `OSS_CREDENTIAL_MODE` | `environment` | `environment` 读取 SDK 标准环境凭证；`ecs_ram_role` 使用 ECS 临时凭证 |
+| `OSS_ECS_RAM_ROLE` | 空 | `ecs_ram_role` 模式必须填写的 ECS RAM Role 名称 |
+| `OSS_ACCESS_KEY_ID` | 空 | 仅 environment 模式使用；不得提交真实值 |
+| `OSS_ACCESS_KEY_SECRET` | 空 | 仅 environment 模式使用；不得提交真实值 |
+| `OSS_SESSION_TOKEN` | 空 | environment 模式使用临时 STS 凭证时的可选 Token |
 | `UPLOAD_MAX_CONCURRENCY_PER_USER` | `2` | 单个用户同时执行的完整上传链路上限 |
 | `UPLOAD_MAX_CONCURRENCY_GLOBAL` | `16` | 单个后端实例同时执行的完整上传链路上限，不能小于单用户值 |
 | `UPLOAD_QUEUE_WAIT_TIMEOUT` | `2s` | 上传请求等待单用户和全局槽位的最长时间 |

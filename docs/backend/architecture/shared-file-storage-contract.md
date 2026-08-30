@@ -2,12 +2,12 @@
 
 ## 1. 核心目的
 
-本阶段先冻结本地文件存储与未来对象存储共同遵守的代码边界，不直接接入 COS、S3 或任何收费云服务。
+第一阶段先冻结本地文件存储与对象存储共同遵守的代码边界，不直接调用收费云服务。
 完成后，Application 与 Domain 只认识“不透明存储键”和最小读写能力，不再假设原始文件一定在当前进程的
 本地磁盘上。
 
-这一步解决的是“以后如何安全替换存储实现”，还没有解决“不同主机现在已经能够共享文件”。真正的跨主机
-能力仍要等对象存储实现、配置和部署验收完成后才能成立。
+后续已经实现零云依赖 `ObjectStorage`，并接入官方阿里云 OSS Go SDK 和按配置组装。代码现在具备跨主机共享
+正式对象的路径，但真实 Bucket 纵向验收、历史文件迁移和故障恢复尚未完成；这些门禁通过前仍不能宣称生产可用。
 
 ## 2. 当前四条文件调用链
 
@@ -122,18 +122,18 @@ Process Pool 先取得一个有界 Worker 槽位，再物化源文件。对象�
 
 ### 当前 ObjectStorage 边界
 
-`ObjectStorage` 已经是可工作的生产侧适配器骨架，但当前只通过测试 Fake 驱动。`ObjectClient` 规定
-`PutObject/GetObject/DeleteObject` 和稳定 `ErrObjectNotFound`；未来腾讯 COS 或 S3 SDK 只在这个端口后实现。
+`ObjectStorage` 是云厂商无关的生产侧适配器，`ObjectClient` 规定
+`PutObject/GetObject/DeleteObject` 和稳定 `ErrObjectNotFound`。官方阿里云 OSS SDK 已在这个端口后实现，
+并通过 Fake API 验证请求映射与错误归一化；未来增加 COS 或 S3 仍只需新增另一个 Infrastructure 实现。
 正式对象使用 128 位随机标识生成 `documents/document-<id>.<ext>` 键，不包含用户原始文件名。Owner 权限仍由
 PostgreSQL 文档归属和 Application OwnerScope 保证，对象键本身不是授权凭据，也不返回给浏览器使用。
 
 ## 7. 下一阶段
 
-1. 选择并实现一个具体对象客户端，第一候选为腾讯 COS；
-2. 增加显式存储类型、endpoint、bucket、region、凭据来源和暂存目录配置，缺失配置必须 fail-fast；
-3. 先用本地兼容服务或显式授权的测试 bucket 验证 SDK 错误映射、超时和大文件流式行为；
-4. 明确 Local/Object 历史键的识别、迁移和回滚策略；
-5. 通过不同进程、不同文件根目录的验收证明 Worker 不再依赖 API 本地磁盘；
-6. 最后再讨论浏览器预签名直传、分片上传和真实 COS 成本。
+1. 在显式授权的私有测试 Bucket 上验证上传、跨进程物化、解析、删除和最小权限拒绝；
+2. 明确 Local/OSS 历史键的迁移、数量与 SHA-256 验收以及回滚策略；
+3. 验证 ECS RAM Role 临时凭证刷新、OSS 超时、权限拒绝和对象缺失时的任务状态与日志；
+4. 通过不同进程、不同本地暂存目录的验收证明 Worker 不再依赖 API 本地磁盘；
+5. 最后再讨论浏览器预签名直传、分片上传和真实流量成本。
 
 本阶段不修改 HTTP DTO、状态码、前端上传方式、数据库表结构或文档 OwnerScope 规则。

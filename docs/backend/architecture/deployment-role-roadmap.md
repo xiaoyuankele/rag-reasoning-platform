@@ -44,7 +44,7 @@ Domain/Application。当前实现按角色控制配置、Repository、远程客�
 ```text
                     all   api   document   embedding   answer
 HTTP                 ✓     ✓        -          -          -
-LocalStorage         ✓     ✓        ✓          -          -
+FileStorage          ✓     ✓        ✓          -          -
 Python Pool          ✓     -        ✓          -          -
 Document Worker      ✓     -        ✓          -          -
 Embedding Worker     按开关 -        -         必须启用       -
@@ -128,8 +128,9 @@ Redis 原子租约（跨进程）
 
 部署角色拆分不等于已经可以任意增加实例。跨主机或多副本之前仍必须完成：
 
-1. 本地 `storage/` 迁移为共享对象存储；稳定端口、`StoragePath` 不透明键、Python 物化生命周期和零云依赖
-   `ObjectStorage` 适配器已经完成，具体 COS/S3 客户端、配置、历史数据迁移与跨主机验收尚未完成；
+1. 本地 `storage/` 迁移为共享对象存储；稳定端口、`StoragePath` 不透明键、Python 物化生命周期、零云依赖
+   `ObjectStorage` 适配器、阿里云 OSS SDK 客户端和按配置组装已经完成；历史数据迁移、真实 Bucket 纵向验收与
+   跨主机故障恢复尚未完成；
 2. 文档、Embedding 与 Answer 任务的 lease、heartbeat、fencing 条件收尾和过期恢复已经完成；
 3. Redis Provider 并发闸门已完成；验证码、认证、上传等待区等共享频率/排队限制仍需按实测逐项迁移；
 4. 数据库迁移通过 PostgreSQL advisory lock 串行执行；生产升级仍需采用“停止旧 Worker、迁移、启动同版本
@@ -147,8 +148,9 @@ Python 处理器不再要求 LocalStorage 专有的路径解析方法，而是�
 Python CLI 契约。
 
 第二阶段又完成了零云依赖 `ObjectStorage`：Local/Object 共用流式暂存校验，通过 Fake 验证对象上传、读取、
-幂等删除、Python 临时下载、失败补偿和清理。当前仍没有接入真实 COS/S3 客户端，不代表跨主机文件共享已经
-可用。完整约束见
+幂等删除、Python 临时下载、失败补偿和清理。第三阶段接入官方阿里云 OSS Go SDK，并允许 API 与 Document
+Worker 通过同一配置选择 `local` 或 `oss`。当前仍未执行真实 Bucket 纵向验收，也未迁移历史本地文件，因此
+不能仅凭代码完成就宣称跨主机文件共享已经通过。完整约束见
 [共享文件存储契约](shared-file-storage-contract.md)。
 
 ### 文档任务租约（已完成）

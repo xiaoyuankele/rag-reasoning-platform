@@ -31,6 +31,7 @@
 - [后端本地集成回归](development/local-integration-regression.md)
 - [后端发布验收与 P5 收尾](development/release-acceptance.md)
 - [后端容器部署指南](deployment/container-deployment.md)
+- [阿里云 OSS 文件存储](deployment/aliyun-oss-storage.md)
 - [数据配套备份与恢复指南](deployment/data-backup-and-restore.md)
 - [容器优雅关闭与异常恢复](deployment/container-lifecycle-and-recovery.md)
 - [Embedding 与 Generation 调用成本基线](performance/model-call-cost-baseline.md)

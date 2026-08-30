@@ -24,7 +24,6 @@ import (
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	infrastructure "rag-reasoning-platform/backend/internal/infrastructure"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
-	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
 	passwordinfrastructure "rag-reasoning-platform/backend/internal/infrastructure/password"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
 	"rag-reasoning-platform/backend/internal/infrastructure/pythonprocessor"
@@ -511,18 +510,20 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 	}
 
-	var localFileStorage *filestorage.LocalStorage
+	var fileStorage runtimeFileStorage
 	if rolePlan.needsStorage() {
-		localFileStorage, err = filestorage.NewLocalStorage(
-			storageConfig.RootDir,
-			storageConfig.MaxFileSizeBytes,
-		)
+		fileStorage, err = newRuntimeFileStorage(storageConfig)
 		if err != nil {
-			return fmt.Errorf("create local file storage: %w", err)
+			return err
 		}
+		logger.Info(
+			"Configured document file storage",
+			"event", "document_file_storage_configured",
+			"driver", storageConfig.Driver,
+		)
 	}
 
-	// 必须先确认 LocalStorage 创建成功，再组装 Python 文档处理器。
+	// 必须先确认统一文件存储创建成功，再组装 Python 文档处理器。
 	// oneshot 和 pool 都满足同一个 Application 端口，模式差异只留在组合根
 	// 与 Infrastructure；业务服务和 Worker 不感知子进程是否被复用。
 	closePythonDocumentProcessor := func() error { return nil }
@@ -532,7 +533,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		switch pythonConfig.ProcessMode {
 		case config.PythonProcessModeOneShot:
 			processor, err := pythonprocessor.NewProcessor(
-				localFileStorage,
+				fileStorage,
 				pythonConfig.Executable,
 				pythonConfig.SourceRoot,
 				pythonConfig.PDFMaxFileSizeBytes,
@@ -554,7 +555,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 				)
 			}
 			processPool, err := pythonprocessor.NewProcessPool(
-				localFileStorage,
+				fileStorage,
 				pythonConfig.Executable,
 				pythonConfig.SourceRoot,
 				pythonConfig.PDFMaxFileSizeBytes,
@@ -575,7 +576,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			"pool_size", pythonConfig.ProcessPoolSize,
 			"max_documents_per_process", pythonConfig.ProcessMaxDocuments,
 		)
-		textProcessor := documentapplication.NewTextProcessor(localFileStorage)
+		textProcessor := documentapplication.NewTextProcessor(fileStorage)
 		processorDispatcher, err = documentapplication.NewProcessorDispatcher(
 			map[string]documentapplication.DocumentProcessor{
 				"text/markdown":   textProcessor,
@@ -1280,7 +1281,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentService := documentapplication.NewService(scopedDocumentRepository)
 	baseDocumentUploadService := documentapplication.NewUploadService(
 		scopedDocumentRepository,
-		localFileStorage,
+		fileStorage,
 	)
 	documentUploadService, err := documentapplication.NewConcurrentUploadService(
 		baseDocumentUploadService,
@@ -1318,7 +1319,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	)
 	documentDeleteService := documentapplication.NewDeleteService(
 		scopedDocumentRepository,
-		localFileStorage,
+		fileStorage,
 	)
 	documentProcessingService := documentapplication.NewQueueProcessingService(
 		scopedDocumentRepository,
