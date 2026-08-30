@@ -87,3 +87,6 @@ OSS_SESSION_TOKEN=
 4. 非 `documents/*` 操作被 RAM Policy 拒绝；
 5. ECS RAM Role 临时凭证刷新后仍可继续处理任务；
 6. OSS 超时、权限拒绝和对象缺失具有可排查日志且不会留下错误成功状态。
+
+2026-08-30 已完成真实 ECS RAM Role、私有 Bucket、项目 Go 适配器和 Python PDF 解析衔接验收。证据、限制和
+尚未覆盖的完整产品链路见 [阿里云 OSS 真实验收记录](aliyun-oss-acceptance-2026-08-30.md)。
