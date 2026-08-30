@@ -41,9 +41,9 @@ Document.StoragePath
 → 无论成功、失败或取消都调用 release
 ```
 
-LocalStorage 的文件已经在本机，因而直接返回受控绝对路径，`release` 是非空的空操作。未来对象存储实现需要
-把对象下载到受控临时目录，返回临时文件绝对路径，并在 `release` 中删除临时文件。Python 不直接认识 COS SDK
-或对象键。
+LocalStorage 的文件已经在本机，因而直接返回受控绝对路径，`release` 是非空的空操作。ObjectStorage 会把对象
+下载到受控临时目录，返回保留原扩展名的临时文件绝对路径，并在 `release` 中删除临时文件。Python 不直接认识
+COS SDK 或对象键。
 
 ### 删除
 
@@ -108,19 +108,32 @@ Process Pool 先取得一个有界 Worker 槽位，再物化源文件。对象�
 ## 6. 已完成的零费用验证
 
 - LocalStorage 通过统一 Save/Open/Delete 行为契约；
+- ObjectStorage 通过同一套 Save/Open/Delete 行为契约，具体 SDK 被 `ObjectClient` 隔离；
+- Local 与 Object 共用 `stageDocumentUpload`，PDF、UTF-8、大小和 SHA-256 规则不会分叉；
 - 同一原始文件名多次保存会生成不同键；
 - Delete 保持幂等，删除后 Open 失败；
 - LocalStorage 物化结果是绝对路径，release 不删除正式文件；
+- ObjectStorage 物化会下载受控临时副本，release 幂等删除本地副本但保留正式对象；
+- Fake 客户端模拟远端部分写入后失败，适配器会补偿删除可能存在的孤立对象；
+- 远端对象异常超限、对象不存在、非法键和上下文取消均不会留下本地暂存文件；
 - 取消上下文和非法存储键不能绕过路径安全；
 - Python 一次性进程和常驻 Process Pool 都会在每次处理后调用 release；
 - 无效物化路径、缺失 release、处理失败与清理失败组合均有单元测试。
 
+### 当前 ObjectStorage 边界
+
+`ObjectStorage` 已经是可工作的生产侧适配器骨架，但当前只通过测试 Fake 驱动。`ObjectClient` 规定
+`PutObject/GetObject/DeleteObject` 和稳定 `ErrObjectNotFound`；未来腾讯 COS 或 S3 SDK 只在这个端口后实现。
+正式对象使用 128 位随机标识生成 `documents/document-<id>.<ext>` 键，不包含用户原始文件名。Owner 权限仍由
+PostgreSQL 文档归属和 Application OwnerScope 保证，对象键本身不是授权凭据，也不返回给浏览器使用。
+
 ## 7. 下一阶段
 
-1. 设计对象存储配置与实现，但保持上述端口不变；
-2. 用 Fake 或本地兼容服务验证 Save/Open/Delete、临时下载、重试和故障降级，不调用真实收费资源；
-3. 明确 Local/Object 历史键的迁移和回滚策略；
-4. 通过不同进程、不同文件根目录的验收证明 Worker 不再依赖 API 本地磁盘；
-5. 最后再讨论浏览器预签名直传、分片上传和真实 COS 成本。
+1. 选择并实现一个具体对象客户端，第一候选为腾讯 COS；
+2. 增加显式存储类型、endpoint、bucket、region、凭据来源和暂存目录配置，缺失配置必须 fail-fast；
+3. 先用本地兼容服务或显式授权的测试 bucket 验证 SDK 错误映射、超时和大文件流式行为；
+4. 明确 Local/Object 历史键的识别、迁移和回滚策略；
+5. 通过不同进程、不同文件根目录的验收证明 Worker 不再依赖 API 本地磁盘；
+6. 最后再讨论浏览器预签名直传、分片上传和真实 COS 成本。
 
 本阶段不修改 HTTP DTO、状态码、前端上传方式、数据库表结构或文档 OwnerScope 规则。

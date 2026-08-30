@@ -66,6 +66,7 @@ func (f *fakeWorkerChunkReplacer) ReplaceForProcessingJob(
 }
 
 func TestWorkerRunOnceRenewsLeaseWhileProcessorIsRunning(t *testing.T) {
+	renewed := make(chan struct{}, 2)
 	job := documentdomain.ProcessingJob{
 		ID:           91,
 		DocumentID:   41,
@@ -79,7 +80,11 @@ func TestWorkerRunOnceRenewsLeaseWhileProcessorIsRunning(t *testing.T) {
 		},
 		renewLeaseFunc: func(_ context.Context, jobID int64, token string) error {
 			if jobID != job.ID || token != job.LeaseToken {
-				t.Fatalf("renew lease received job=%d token=%q", jobID, token)
+				return errors.New("renew lease received unexpected job or token")
+			}
+			select {
+			case renewed <- struct{}{}:
+			default:
 			}
 			return nil
 		},
@@ -90,8 +95,20 @@ func TestWorkerRunOnceRenewsLeaseWhileProcessorIsRunning(t *testing.T) {
 		},
 	}
 	processor := &fakeDocumentProcessor{
-		processFunc: func(context.Context, documentdomain.Document) (ProcessingResult, error) {
-			time.Sleep(25 * time.Millisecond)
+		processFunc: func(ctx context.Context, _ documentdomain.Document) (ProcessingResult, error) {
+			// 不使用 Sleep 猜测调度次数。处理器等待两个真实续租信号后再返回，
+			// 直接建立“处理仍在运行 → 心跳持续执行”的因果关系。
+			for renewal := 0; renewal < 2; renewal++ {
+				select {
+				case <-renewed:
+				case <-ctx.Done():
+					return ProcessingResult{}, ctx.Err()
+				case <-time.After(time.Second):
+					return ProcessingResult{}, errors.New(
+						"timed out waiting for processing job lease renewal",
+					)
+				}
+			}
 			return ProcessingResult{}, nil
 		},
 	}
