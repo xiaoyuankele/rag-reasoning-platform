@@ -146,7 +146,7 @@ func TestPythonProcessPoolReusesRealCLI(t *testing.T) {
 		t.Fatalf("write invalid PDF: %v", err)
 	}
 
-	resolver := &fakeStoredFilePathResolver{absolutePath: sourcePath}
+	resolver := &fakeStoredFileMaterializer{absolutePath: sourcePath}
 	pool, err := NewProcessPool(
 		resolver,
 		pythonExecutable,

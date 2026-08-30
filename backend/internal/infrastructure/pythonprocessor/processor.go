@@ -23,11 +23,6 @@ const (
 )
 
 var (
-	// ErrSourcePathResolverRequired 表示没有提供可信存储路径解析器。
-	ErrSourcePathResolverRequired = errors.New(
-		"Python processor source path resolver is required",
-	)
-
 	// ErrPythonExecutableRequired 表示没有配置 Python 可执行程序。
 	ErrPythonExecutableRequired = errors.New(
 		"Python executable is required",
@@ -56,14 +51,6 @@ var (
 	errLimitedBufferFull = errors.New("limited buffer is full")
 	requestSequence      atomic.Uint64
 )
-
-// StoredFilePathResolver 定义 PythonProcessor 获取可信绝对路径所需的最小能力。
-//
-// 接口定义在使用方包中。LocalStorage 只要提供同名方法即可自动满足它，
-// PythonProcessor 不需要依赖具体的本地存储结构。
-type StoredFilePathResolver interface {
-	ResolveAbsolutePath(storagePath string) (string, error)
-}
 
 // commandFactory 是测试接缝。生产环境创建真实 Python 命令，单元测试则可以
 // 替换成当前 Go 测试进程，稳定模拟成功、崩溃、超时和超限等情况。
@@ -159,7 +146,7 @@ func (r pythonRuntime) newStreamCommand() *exec.Cmd {
 
 // Processor 通过一次性 Python 子进程处理 PDF、DOCX 等复杂文档。
 type Processor struct {
-	paths              StoredFilePathResolver
+	files              StoredFileMaterializer
 	newCommand         commandFactory
 	maxChunkCharacters int
 	maxPDFFileBytes    int64
@@ -175,14 +162,14 @@ var _ documentapplication.DocumentProcessor = (*Processor)(nil)
 // pythonSourceRoot 应指向包含 rag_ai 包的目录，例如项目中的 ../ai/src。
 // 构造时转换为绝对路径，使子进程行为不受后续工作目录变化影响。
 func NewProcessor(
-	paths StoredFilePathResolver,
+	files StoredFileMaterializer,
 	pythonExecutable string,
 	pythonSourceRoot string,
 	maxPDFFileBytes int64,
 	maxPDFPages int,
 ) (*Processor, error) {
-	if paths == nil {
-		return nil, ErrSourcePathResolverRequired
+	if files == nil {
+		return nil, ErrSourceMaterializerRequired
 	}
 
 	runtime, err := newPythonRuntime(pythonExecutable, pythonSourceRoot)
@@ -205,7 +192,7 @@ func NewProcessor(
 	}
 
 	return &Processor{
-		paths:              paths,
+		files:              files,
 		newCommand:         runtime.newOneShotCommand,
 		maxChunkCharacters: defaultMaxChunkCharacters,
 		maxPDFFileBytes:    maxPDFFileBytes,
@@ -222,15 +209,25 @@ func NewProcessor(
 func (p *Processor) Process(
 	ctx context.Context,
 	document documentdomain.Document,
-) (documentapplication.ProcessingResult, error) {
+) (result documentapplication.ProcessingResult, processingErr error) {
 	if err := ctx.Err(); err != nil {
 		return documentapplication.ProcessingResult{}, err
 	}
 
+	sourcePath, release, err := materializeSourceFile(
+		ctx,
+		p.files,
+		document.StoragePath,
+	)
+	if err != nil {
+		return documentapplication.ProcessingResult{}, err
+	}
+	defer releaseMaterializedSource(&result, &processingErr, release)
+
 	request, err := prepareProcessRequest(
 		ctx,
-		p.paths,
 		document,
+		sourcePath,
 		p.maxChunkCharacters,
 		p.maxPDFFileBytes,
 		p.maxPDFPages,
@@ -290,7 +287,7 @@ func (p *Processor) Process(
 		)
 	}
 
-	result, err := decodeProcessResponse(
+	result, err = decodeProcessResponse(
 		ctx,
 		stdout.Reader(),
 		request.RequestID,
@@ -308,22 +305,14 @@ func (p *Processor) Process(
 
 func prepareProcessRequest(
 	ctx context.Context,
-	paths StoredFilePathResolver,
 	document documentdomain.Document,
+	sourcePath string,
 	maxChunkCharacters int,
 	maxPDFFileBytes int64,
 	maxPDFPages int,
 ) (processRequest, error) {
 	if err := ctx.Err(); err != nil {
 		return processRequest{}, err
-	}
-
-	sourcePath, err := paths.ResolveAbsolutePath(document.StoragePath)
-	if err != nil {
-		return processRequest{}, fmt.Errorf(
-			"resolve Python processing source path: %w",
-			err,
-		)
 	}
 
 	return newProcessRequest(

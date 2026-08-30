@@ -15,19 +15,17 @@ type documentDeleteRepository interface {
 	documentdomain.ScopedDeleter
 }
 
-// fileDeleter 定义删除用例需要的最小文件存储能力。
-type fileDeleter interface {
-	Delete(ctx context.Context, storagePath string) error
-}
-
 // DeleteService 编排文档文件和数据库记录的删除流程。
 type DeleteService struct {
 	repository documentDeleteRepository
-	storage    fileDeleter
+	storage    StoredFileDeleter
 }
 
 // NewDeleteService 创建文档删除应用服务。
-func NewDeleteService(repository documentDeleteRepository, storage fileDeleter) *DeleteService {
+func NewDeleteService(
+	repository documentDeleteRepository,
+	storage StoredFileDeleter,
+) *DeleteService {
 	return &DeleteService{
 		repository: repository,
 		storage:    storage,

@@ -21,17 +21,6 @@ type UploadInput struct {
 	Content      io.Reader
 }
 
-// StoredFile 表示文件存储成功后得到的结果。
-//
-// 文件大小和 SHA-256 由文件存储实现根据实际读取到的内容计算，
-// 不能直接相信浏览器传来的文件大小和哈希值。
-type StoredFile struct {
-	StoragePath string
-	MIMEType    string
-	SizeBytes   int64
-	SHA256      string
-}
-
 // UploadResult 表示上传用例的最终结果。
 //
 // Duplicate 为 true 时，Document 是该用户之前上传的相同内容；本次临时保存的
@@ -42,24 +31,6 @@ type UploadResult struct {
 }
 
 const uploadCleanupTimeout = 5 * time.Second
-
-// FileStorage 定义应用层保存文件时需要的最小能力。
-//
-// 应用层只依赖这个接口，不关心文件最终保存在本地磁盘、
-// 对象存储还是其他位置。
-type FileStorage interface {
-	// Save 流式保存文件，并返回最终存储路径、可信 MIME、文件大小和 SHA-256。
-	//
-	// 文件超限时返回 ErrFileTooLarge；扩展名不受支持时返回
-	// ErrUnsupportedFileType；文件内容不符合对应格式时返回相应内容错误。
-	Save(ctx context.Context, originalName string, content io.Reader) (StoredFile, error)
-
-	// Delete 删除已经保存的文件。
-	//
-	// 如果文件保存成功、但数据库记录创建失败，
-	// UploadService 将调用 Delete，避免留下没有数据库记录的孤立文件。
-	Delete(ctx context.Context, storagePath string) error
-}
 
 var (
 	// ErrOriginalNameRequired 表示上传时没有提供有效的原始文件名。
@@ -88,7 +59,7 @@ var (
 // UploadService 编排文件保存和文档元数据入库流程。
 type UploadService struct {
 	repository documentdomain.ScopedCreateOrGetter
-	storage    FileStorage
+	storage    UploadFileStorage
 }
 
 // NewUploadService 创建文档上传应用服务。
@@ -97,7 +68,7 @@ type UploadService struct {
 // 两个依赖都通过构造函数传入。
 func NewUploadService(
 	repository documentdomain.ScopedCreateOrGetter,
-	storage FileStorage,
+	storage UploadFileStorage,
 ) *UploadService {
 	return &UploadService{
 		repository: repository,

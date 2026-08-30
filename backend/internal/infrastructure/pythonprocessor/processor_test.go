@@ -18,21 +18,30 @@ import (
 
 const helperProcessEnvironment = "GO_WANT_PYTHON_PROCESSOR_HELPER"
 
-type fakeStoredFilePathResolver struct {
+type fakeStoredFileMaterializer struct {
 	absolutePath string
 	err          error
+	releaseErr   error
 	storagePath  string
+	releaseCount int
 }
 
-func (r *fakeStoredFilePathResolver) ResolveAbsolutePath(
+func (r *fakeStoredFileMaterializer) Materialize(
+	ctx context.Context,
 	storagePath string,
-) (string, error) {
+) (string, func() error, error) {
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
 	r.storagePath = storagePath
 	if r.err != nil {
-		return "", r.err
+		return "", nil, r.err
 	}
 
-	return r.absolutePath, nil
+	return r.absolutePath, func() error {
+		r.releaseCount++
+		return r.releaseErr
+	}, nil
 }
 
 // TestPythonProcessorHelperProcess 不是普通业务测试，而是由下面的测试作为
@@ -159,11 +168,11 @@ func writeHelperResponse(response processResponse) {
 func newTestProcessor(
 	t *testing.T,
 	mode string,
-) (*Processor, *fakeStoredFilePathResolver) {
+) (*Processor, *fakeStoredFileMaterializer) {
 	t.Helper()
 
 	sourcePath := filepath.Join(t.TempDir(), "document.pdf")
-	resolver := &fakeStoredFilePathResolver{absolutePath: sourcePath}
+	resolver := &fakeStoredFileMaterializer{absolutePath: sourcePath}
 	processor, err := NewProcessor(
 		resolver,
 		os.Args[0],
@@ -197,11 +206,11 @@ func newTestProcessPool(
 	mode string,
 	poolSize int,
 	maxDocuments int,
-) (*ProcessPool, *fakeStoredFilePathResolver) {
+) (*ProcessPool, *fakeStoredFileMaterializer) {
 	t.Helper()
 
 	sourcePath := filepath.Join(t.TempDir(), "document.pdf")
-	resolver := &fakeStoredFilePathResolver{absolutePath: sourcePath}
+	resolver := &fakeStoredFileMaterializer{absolutePath: sourcePath}
 	pool, err := NewProcessPool(
 		resolver,
 		os.Args[0],
@@ -246,22 +255,22 @@ func testDocument() documentdomain.Document {
 }
 
 func TestNewProcessorValidatesDependencies(t *testing.T) {
-	validResolver := &fakeStoredFilePathResolver{}
+	validResolver := &fakeStoredFileMaterializer{}
 	validExecutable := os.Args[0]
 	validSourceRoot := t.TempDir()
 
 	tests := []struct {
 		name       string
-		resolver   StoredFilePathResolver
+		resolver   StoredFileMaterializer
 		executable string
 		sourceRoot string
 		wantErr    error
 	}{
 		{
-			name:       "path resolver is required",
+			name:       "source materializer is required",
 			executable: validExecutable,
 			sourceRoot: validSourceRoot,
-			wantErr:    ErrSourcePathResolverRequired,
+			wantErr:    ErrSourceMaterializerRequired,
 		},
 		{
 			name:       "executable is required",
@@ -328,6 +337,9 @@ func TestProcessorProcessReturnsChunks(t *testing.T) {
 			resolver.storagePath,
 			testDocument().StoragePath,
 		)
+	}
+	if resolver.releaseCount != 1 {
+		t.Fatalf("materialized source release count = %d, want 1", resolver.releaseCount)
 	}
 	if len(result.Chunks) != 2 {
 		t.Fatalf("chunk count = %d, want 2", len(result.Chunks))
@@ -420,14 +432,34 @@ func TestProcessorProcessRejectsOversizedOutput(t *testing.T) {
 	}
 }
 
-func TestProcessorProcessPreservesPathResolutionError(t *testing.T) {
-	expectedError := errors.New("path resolution failed")
+func TestProcessorProcessPreservesMaterializationError(t *testing.T) {
+	expectedError := errors.New("materialization failed")
 	processor, resolver := newTestProcessor(t, "success")
 	resolver.err = expectedError
 
 	_, err := processor.Process(context.Background(), testDocument())
 	if !errors.Is(err, expectedError) {
 		t.Fatalf("Process() error = %v, want %v", err, expectedError)
+	}
+	if resolver.releaseCount != 0 {
+		t.Fatalf("release count = %d, want 0", resolver.releaseCount)
+	}
+}
+
+func TestProcessorProcessReturnsMaterializedSourceCleanupError(t *testing.T) {
+	expectedError := errors.New("remove temporary source failed")
+	processor, materializer := newTestProcessor(t, "success")
+	materializer.releaseErr = expectedError
+
+	result, err := processor.Process(context.Background(), testDocument())
+	if !errors.Is(err, expectedError) {
+		t.Fatalf("Process() error = %v, want %v", err, expectedError)
+	}
+	if len(result.Chunks) != 0 {
+		t.Fatalf("Process() chunks = %+v, want empty", result.Chunks)
+	}
+	if materializer.releaseCount != 1 {
+		t.Fatalf("release count = %d, want 1", materializer.releaseCount)
 	}
 }
 

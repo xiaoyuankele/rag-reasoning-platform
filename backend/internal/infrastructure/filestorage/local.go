@@ -84,7 +84,6 @@ type LocalStorage struct {
 }
 
 var _ applicationdocument.FileStorage = (*LocalStorage)(nil)
-var _ applicationdocument.StoredFileOpener = (*LocalStorage)(nil)
 
 // NewLocalStorage 创建本地文件存储，并准备文档目录。
 func NewLocalStorage(rootDir string, maxSizeBytes int64) (*LocalStorage, error) {
@@ -428,6 +427,29 @@ func (s *LocalStorage) ResolveAbsolutePath(storagePath string) (string, error) {
 	}
 
 	return absolutePath, nil
+}
+
+// Materialize 把不透明存储键准备成 Python 子进程可读取的本地绝对路径。
+//
+// LocalStorage 的文件原本就在本机，因此不需要复制；返回的 release 是空清理
+// 函数。未来对象存储实现可以使用同一契约下载临时文件，并在 release 中删除。
+func (s *LocalStorage) Materialize(
+	ctx context.Context,
+	storagePath string,
+) (localPath string, release func() error, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", nil, fmt.Errorf(
+			"materialize stored document file: %w",
+			err,
+		)
+	}
+
+	absolutePath, err := s.ResolveAbsolutePath(storagePath)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return absolutePath, func() error { return nil }, nil
 }
 
 // Open 根据相对存储路径安全地打开文档文件。

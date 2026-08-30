@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewProcessPoolRejectsInvalidConfiguration(t *testing.T) {
-	validResolver := &fakeStoredFilePathResolver{}
+	validResolver := &fakeStoredFileMaterializer{}
 	tests := []struct {
 		name         string
 		poolSize     int
@@ -60,7 +60,7 @@ func TestNewProcessPoolRejectsInvalidConfiguration(t *testing.T) {
 }
 
 func TestProcessPoolReusesAndRecyclesProcess(t *testing.T) {
-	pool, _ := newTestProcessPool(t, "stream_success", 1, 2)
+	pool, materializer := newTestProcessPool(t, "stream_success", 1, 2)
 	t.Cleanup(func() {
 		if err := pool.Close(); err != nil {
 			t.Errorf("Close() error = %v, want nil", err)
@@ -94,6 +94,12 @@ func TestProcessPoolReusesAndRecyclesProcess(t *testing.T) {
 	}
 	if worker.starts != 2 {
 		t.Fatalf("process starts after recycle = %d, want 2", worker.starts)
+	}
+	if materializer.releaseCount != 3 {
+		t.Fatalf(
+			"materialized source release count = %d, want 3",
+			materializer.releaseCount,
+		)
 	}
 }
 

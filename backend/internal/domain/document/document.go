@@ -72,11 +72,14 @@ type Document struct {
 	// nil 表示尚未获得标题，展示层应回退到 OriginalName。
 	Title        *string
 	OriginalName string
-	StoragePath  string
-	MIMEType     string
-	SizeBytes    int64
-	SHA256       string
-	Status       Status
+
+	// StoragePath 是文件存储实现生成的不透明键，不保证是操作系统路径。
+	// Domain 只保存和传递它；路径校验、对象下载和本地物化属于 Infrastructure。
+	StoragePath string
+	MIMEType    string
+	SizeBytes   int64
+	SHA256      string
+	Status      Status
 
 	// ErrorMessage 使用指针表示数据库中的可空字段：
 	// nil 表示没有错误信息，非 nil 表示存在错误内容。

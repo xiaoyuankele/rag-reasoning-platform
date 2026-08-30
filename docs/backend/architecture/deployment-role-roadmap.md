@@ -128,7 +128,9 @@ Redis 原子租约（跨进程）
 
 部署角色拆分不等于已经可以任意增加实例。跨主机或多副本之前仍必须完成：
 
-1. 本地 `storage/` 迁移为共享对象存储；
+1. 本地 `storage/` 迁移为共享对象存储；稳定的 Save/Open/Delete 端口、`StoragePath` 不透明键语义和
+   Python `Materialize → process → release` 生命周期已经冻结，对象存储实现、配置、历史数据迁移与跨主机验收
+   尚未完成；
 2. 文档、Embedding 与 Answer 任务的 lease、heartbeat、fencing 条件收尾和过期恢复已经完成；
 3. Redis Provider 并发闸门已完成；验证码、认证、上传等待区等共享频率/排队限制仍需按实测逐项迁移；
 4. 数据库迁移通过 PostgreSQL advisory lock 串行执行；生产升级仍需采用“停止旧 Worker、迁移、启动同版本
@@ -137,6 +139,16 @@ Redis 原子租约（跨进程）
 
 `FOR UPDATE SKIP LOCKED` 可以避免两个 Worker 同时领取同一数据库任务，但不能自动解决本地文件不可见、
 远程 Provider 总并发被实例数放大或异常实例长期占用任务的问题。
+
+### 共享文件存储契约（第一阶段已完成）
+
+Application 已把上传、流式读取和删除拆成最小存储端口，`documents.storage_path` 被收紧为实现生成的不透明键。
+Python 处理器不再要求 LocalStorage 专有的路径解析方法，而是通过 Infrastructure Materializer 获得一次调用所需
+的本地绝对路径和强制清理函数。因此未来对象存储可以下载到临时文件，而不改变 Domain、上传用例、文档任务或
+Python CLI 契约。
+
+本阶段只完成可替换边界和 LocalStorage 零费用契约测试，不代表跨主机文件共享已经可用。完整约束见
+[共享文件存储契约](shared-file-storage-contract.md)。
 
 ### 文档任务租约（已完成）
 

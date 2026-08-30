@@ -44,7 +44,7 @@ type streamCommandFactory func() *exec.Cmd
 // available 是一个有界租借队列：每个 streamProcess 同一时刻只会交给一个
 // Go Worker，因此单个 Python 进程仍然串行处理文档；多个槽位之间可以并发。
 type ProcessPool struct {
-	paths              StoredFilePathResolver
+	files              StoredFileMaterializer
 	maxChunkCharacters int
 	maxPDFFileBytes    int64
 	maxPDFPages        int
@@ -68,7 +68,7 @@ var _ io.Closer = (*ProcessPool)(nil)
 // 进程采用惰性启动：构造池时只创建槽位，第一份文档借用某个槽位时才真正
 // 启动 Python。这样关闭但没有处理任务的服务不会产生无用子进程。
 func NewProcessPool(
-	paths StoredFilePathResolver,
+	files StoredFileMaterializer,
 	pythonExecutable string,
 	pythonSourceRoot string,
 	maxPDFFileBytes int64,
@@ -76,8 +76,8 @@ func NewProcessPool(
 	poolSize int,
 	maxDocumentsPerProcess int,
 ) (*ProcessPool, error) {
-	if paths == nil {
-		return nil, ErrSourcePathResolverRequired
+	if files == nil {
+		return nil, ErrSourceMaterializerRequired
 	}
 	if poolSize < minimumPythonProcessPoolSize ||
 		poolSize > maximumPythonProcessPoolSize {
@@ -118,7 +118,7 @@ func NewProcessPool(
 	}
 
 	pool := &ProcessPool{
-		paths:              paths,
+		files:              files,
 		maxChunkCharacters: defaultMaxChunkCharacters,
 		maxPDFFileBytes:    maxPDFFileBytes,
 		maxPDFPages:        maxPDFPages,
@@ -149,11 +149,27 @@ func NewProcessPool(
 func (p *ProcessPool) Process(
 	ctx context.Context,
 	document documentdomain.Document,
-) (documentapplication.ProcessingResult, error) {
+) (result documentapplication.ProcessingResult, processingErr error) {
+	worker, err := p.acquire(ctx)
+	if err != nil {
+		return documentapplication.ProcessingResult{}, err
+	}
+	defer p.release(worker)
+
+	sourcePath, release, err := materializeSourceFile(
+		ctx,
+		p.files,
+		document.StoragePath,
+	)
+	if err != nil {
+		return documentapplication.ProcessingResult{}, err
+	}
+	defer releaseMaterializedSource(&result, &processingErr, release)
+
 	request, err := prepareProcessRequest(
 		ctx,
-		p.paths,
 		document,
+		sourcePath,
 		p.maxChunkCharacters,
 		p.maxPDFFileBytes,
 		p.maxPDFPages,
@@ -162,13 +178,8 @@ func (p *ProcessPool) Process(
 		return documentapplication.ProcessingResult{}, err
 	}
 
-	worker, err := p.acquire(ctx)
-	if err != nil {
-		return documentapplication.ProcessingResult{}, err
-	}
-	defer p.release(worker)
-
-	return worker.process(ctx, request)
+	result, processingErr = worker.process(ctx, request)
+	return result, processingErr
 }
 
 func (p *ProcessPool) acquire(ctx context.Context) (*streamProcess, error) {
