@@ -76,8 +76,10 @@ OSS_SESSION_TOKEN=
 
 ## 6. 当前测试边界
 
-当前自动化测试使用 Fake OSS API 验证请求映射、内容流、SHA-256 元数据、读取器生命周期、404 归一化、幂等
-删除和 main 组装，不调用真实 Bucket、不消耗 OSS 请求费用。真实纵向验收必须单独获得授权，并至少覆盖：
+默认自动化测试使用 Fake OSS API 验证请求映射、内容流、SHA-256 元数据、读取器生命周期、404 归一化、幂等
+删除和 main 组装，不调用真实 Bucket、不消耗 OSS 请求费用。显式设置 `RUN_OSS_INTEGRATION_TESTS=1` 后，
+`aliyun_oss_client_integration_test.go` 才会使用当前环境配置验证真实 Bucket，并在失败时兜底删除随机测试对象。
+真实纵向验收必须单独获得授权，并至少覆盖：
 
 1. 上传 PDF/Markdown/Text 后对象位于 `documents/*`；
 2. Document Worker 能从另一进程物化并完成解析；
