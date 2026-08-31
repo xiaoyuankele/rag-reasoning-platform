@@ -3,6 +3,9 @@ param(
     # 默认使用当前命令行中的 Python 3.11。
     [string]$PythonExecutable = "python",
 
+    # 显式加入真实 OSS 文档纵向门禁。默认关闭，避免普通回归产生云请求。
+    [switch]$IncludeOSSVertical,
+
     # 默认报告写入 Git 已忽略的 chatgpt/运行产物。
     [string]$ReportDirectory
 )
@@ -210,6 +213,8 @@ $reportPath = Join-Path $ReportDirectory "backend-local-integration-$timestamp.j
 $isolatedEnvironment = @(
     "RUN_DATABASE_TESTS",
     "RUN_PYTHON_TESTS",
+    "RUN_OSS_INTEGRATION_TESTS",
+    "RUN_OSS_VERTICAL_INTEGRATION_TESTS",
     "DB_HOST",
     "DB_PORT",
     "DB_NAME",
@@ -217,6 +222,8 @@ $isolatedEnvironment = @(
     "DB_PASSWORD",
     "DB_SSLMODE",
     "PYTHON_EXECUTABLE",
+    "FILE_STORAGE_DRIVER",
+    "OSS_VERTICAL_REPOSITORY_ROOT",
     "EMBEDDING_WORKER_ENABLED",
     "SEMANTIC_SEARCH_ENABLED",
     "ANSWER_ENABLED",
@@ -232,6 +239,48 @@ try {
     foreach ($requiredCommand in @("go", $PythonExecutable, "docker")) {
         if (-not (Get-Command $requiredCommand -ErrorAction SilentlyContinue)) {
             throw "required command '$requiredCommand' was not found"
+        }
+    }
+
+    if ($IncludeOSSVertical) {
+        foreach ($requiredOSSVariable in @(
+            "OSS_BUCKET",
+            "OSS_REGION",
+            "OSS_ENDPOINT",
+            "OSS_CREDENTIAL_MODE"
+        )) {
+            $requiredOSSValue = Get-Item `
+                -LiteralPath "Env:$requiredOSSVariable" `
+                -ErrorAction SilentlyContinue
+            if ($null -eq $requiredOSSValue -or
+                [string]::IsNullOrWhiteSpace([string]$requiredOSSValue.Value)) {
+                throw "$requiredOSSVariable must be configured when -IncludeOSSVertical is used"
+            }
+        }
+
+        switch ([string]$env:OSS_CREDENTIAL_MODE) {
+            "environment" {
+                foreach ($credentialVariable in @(
+                    "OSS_ACCESS_KEY_ID",
+                    "OSS_ACCESS_KEY_SECRET"
+                )) {
+                    $credentialValue = Get-Item `
+                        -LiteralPath "Env:$credentialVariable" `
+                        -ErrorAction SilentlyContinue
+                    if ($null -eq $credentialValue -or
+                        [string]::IsNullOrWhiteSpace([string]$credentialValue.Value)) {
+                        throw "$credentialVariable must be configured for OSS environment credentials"
+                    }
+                }
+            }
+            "ecs_ram_role" {
+                if ([string]::IsNullOrWhiteSpace([string]$env:OSS_ECS_RAM_ROLE)) {
+                    throw "OSS_ECS_RAM_ROLE must be configured for ECS RAM Role credentials"
+                }
+            }
+            default {
+                throw "OSS_CREDENTIAL_MODE must be environment or ecs_ram_role"
+            }
         }
     }
 
@@ -293,6 +342,8 @@ try {
 
     $env:RUN_DATABASE_TESTS = "1"
     $env:RUN_PYTHON_TESTS = "1"
+    Remove-Item Env:RUN_OSS_INTEGRATION_TESTS -ErrorAction SilentlyContinue
+    Remove-Item Env:RUN_OSS_VERTICAL_INTEGRATION_TESTS -ErrorAction SilentlyContinue
     $env:DB_HOST = "127.0.0.1"
     $env:DB_PORT = [string]$publishedPort
     $env:DB_NAME = $testDatabaseName
@@ -300,6 +351,7 @@ try {
     $env:DB_PASSWORD = $databasePassword
     $env:DB_SSLMODE = "disable"
     $env:PYTHON_EXECUTABLE = $PythonExecutable
+    $env:FILE_STORAGE_DRIVER = "local"
 
     # 本地集成只验证数据库和 Python 进程，不调用任何模型供应商。
     $env:EMBEDDING_WORKER_ENABLED = "false"
@@ -361,6 +413,26 @@ try {
                 -BackendDirectory $backendDirectory `
                 -Packages @("./internal/integration")
         }
+
+    if ($IncludeOSSVertical) {
+        # 只有进入这个独立步骤时才打开真实 OSS 门禁。一次性数据库名称已经
+        # 由脚本生成，测试还会再次校验 rag_integration_* 前缀。
+        $env:FILE_STORAGE_DRIVER = "oss"
+        $env:RUN_OSS_INTEGRATION_TESTS = "1"
+        $env:RUN_OSS_VERTICAL_INTEGRATION_TESTS = "1"
+        $env:OSS_VERTICAL_REPOSITORY_ROOT = $projectRoot
+
+        Invoke-RegressionStep `
+            -Name "oss_document_vertical" `
+            -Description "verify HTTP, PostgreSQL, Document Worker, Python and real OSS lifecycle" `
+            -Results $stepResults `
+            -Action {
+                Invoke-GoTest `
+                    -BackendDirectory $backendDirectory `
+                    -Packages @("./internal/integration") `
+                    -RunPattern "^TestOSSDocumentLifecycleWithPostgreSQLAndPython$"
+            }
+    }
 }
 catch {
     $operationError = $_
@@ -422,6 +494,7 @@ finally {
         temporary_database          = $testDatabaseName
         temporary_database_cleanup  = $cleanupStatus
         go_python_integration_tests = $true
+        oss_vertical_included       = [bool]$IncludeOSSVertical
         remote_ai_enabled            = $false
         steps                        = $stepResults
     }
@@ -447,6 +520,7 @@ Write-Host ""
 Write-Host "Backend local integration regression passed."
 Write-Host "Database isolation: temporary database (removed)"
 Write-Host "Go/Python process integration: enabled"
+Write-Host "Real OSS document vertical: $([bool]$IncludeOSSVertical)"
 Write-Host "Remote AI calls: disabled"
 Write-Host "Report: $reportPath"
 Write-Output $reportPath

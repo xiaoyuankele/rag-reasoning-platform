@@ -18,7 +18,8 @@ P5 收尾不再增加业务接口，而是回答三个工程问题：
 | L1 本地集成 | `run-backend-local-integration.ps1` | migrations、Repository、Worker、Go/Python、HTTP/PDF/chunks | 创建并删除一次性数据库 | 无 | 修改 SQL、Worker 或进程契约后 |
 | L2 发布候选 | `run-backend-release-acceptance.ps1` | 顺序执行 L0 与 L1，形成聚合报告 | 与 L1 相同 | 无 | 合并发布候选前 |
 | L3 容器生命周期 | 发布候选命令增加 `-IncludeContainerLifecycle` | 镜像构建、健康检查、SIGTERM、SIGKILL 和任务恢复 | 短暂创建后端容器及测试记录，结束后清理 | 无 | 修改 Dockerfile、Compose、启动或关闭逻辑后 |
-| L4 真实质量/供应商 | 人工选择样本和已有专项计划 | 复杂 PDF 视觉质量、真实 Embedding/Generation 供应商 | 可能写入业务库或调用第三方 | 可能收费 | 需求明确且获得授权后 |
+| L4 OSS 纵向门禁 | 本地集成命令增加 `-IncludeOSSVertical` | HTTP、一次性数据库、Document Worker、Python 与真实 OSS | 创建并删除测试对象和一次性数据库 | 少量 OSS 请求费 | 对象存储改动且获得授权后 |
+| L5 真实质量/供应商 | 人工选择样本和已有专项计划 | 复杂 PDF 视觉质量、真实 Embedding/Generation 供应商 | 可能写入业务库或调用第三方 | 可能收费 | 需求明确且获得授权后 |
 
 前端拥有独立 F 阶段，本验收矩阵不读取、修改或构建前端源码。
 
@@ -76,6 +77,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 继续依据 [语义检索路线图](../architecture/semantic-search-roadmap.md)、
 [RAG 问答路线图](../architecture/rag-answer-roadmap.md) 和
 [回答质量评估计划](../evaluation/rag-answer-quality-evaluation-plan.md) 单独验收，必须获得明确授权。
+
+真实 OSS 同样不是默认步骤。`-IncludeOSSVertical` 会对配置的私有 Bucket 产生测试对象和少量 Put/Get/Delete
+请求，因此必须由操作者显式开启。它只使用程序生成的小 PDF、一次性 `rag_integration_*` 数据库，并在成功或
+失败时兜底清理；Embedding、Generation、语义检索和问答保持关闭。
 
 ## 6. P5 完成边界
 

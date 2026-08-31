@@ -90,3 +90,41 @@ OSS_SESSION_TOKEN=
 
 2026-08-30 已完成真实 ECS RAM Role、私有 Bucket、项目 Go 适配器和 Python PDF 解析衔接验收。证据、限制和
 尚未覆盖的完整产品链路见 [阿里云 OSS 真实验收记录](aliyun-oss-acceptance-2026-08-30.md)。
+
+## 7. 产品组件纵向门禁
+
+`TestOSSDocumentLifecycleWithPostgreSQLAndPython` 把以下现有组件串成同一条测试链路：
+
+```text
+Session Cookie
+→ HTTP Upload Handler
+→ ObjectStorage / 真实 OSS
+→ PostgreSQL documents
+→ HTTP Processing Queue
+→ Document Worker
+→ OSS Materialize
+→ Python
+→ text_chunks
+→ HTTP Delete
+→ PostgreSQL 与 OSS 清理核对
+```
+
+默认回归不会运行它。获得真实 OSS 授权并准备好环境变量后，从项目根目录显式执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\scripts\quality\run-backend-local-integration.ps1 `
+    -PythonExecutable python `
+    -IncludeOSSVertical
+```
+
+脚本会把 `OSS_VERTICAL_REPOSITORY_ROOT` 设置为当前项目根目录。若把预编译的
+Go 测试二进制复制到 Linux/ECS 执行，则必须显式把该变量设置为目标机器上的
+项目根目录，供测试定位 `ai/src` 与 Python 处理入口。
+
+脚本会创建并删除独立的 `rag_integration_*` PostgreSQL 数据库；测试本身也会再次检查数据库名前缀。只有进入
+独立 OSS 步骤时才设置 `RUN_OSS_INTEGRATION_TESTS=1` 和 `RUN_OSS_VERTICAL_INTEGRATION_TESTS=1`，避免普通
+回归或误设环境产生云请求。报告不保存 Bucket 凭证、Session Token 或文档正文。
+
+该门禁验证真实组件在同一个 Go 测试进程内的纵向组合，仍不能替代 API 与 Document Worker 独立容器/主机的
+最终部署验收。后者还要额外证明两类进程使用相同 Bucket、不同本地暂存目录并正确完成任务领取与关闭。
