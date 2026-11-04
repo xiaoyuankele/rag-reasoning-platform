@@ -243,8 +243,61 @@ HTTP DTO：
 - [ ] 用户明确启用 `ANSWER_ENABLED=true` 后完成真实 Generation、引用和 Token 纵向验收；
 - [ ] 当前 revision AI-ready、流式输出、问答历史、多轮上下文和来源正文展开等待后续契约与需求。
 
-当前 Docker 后端保持 `ANSWER_ENABLED=false`。真实浏览器已经验证 94 篇文档范围加载、页面布局和功能关闭提示，未擅自开启
-远程生成。详细边界见 [F4 带来源问答前端交接](f4-grounded-answer-handoff.md)。
+Compose 模板默认保持 `ANSWER_ENABLED=false`。真实浏览器已经验证 94 篇文档范围加载、页面布局和功能关闭提示；
+真实远程生成仍需单独纵向验收。详细边界见 [F4 带来源问答前端交接](f4-grounded-answer-handoff.md)。
+
+### 7.5.1 多轮会话 M1（消息持久化工作区候选已接入）
+
+前端已经接入受 Session 保护的 `/conversations` 与 `/conversations/:id/messages`：
+
+- [x] 会话列表、新建会话、用户消息保存、会话加载更多和从最新 50 条向前展开的消息历史；
+- [x] 使用 `client_message_id` 发送幂等标识，重复提交由后端决定是否为重放；
+- [x] 刷新页面后从 PostgreSQL 恢复会话和消息，不把消息正文写入 URL 或浏览器本地缓存；
+- [x] 明示“仅保存消息”模式不调用远程 Embedding/Generation；
+- [x] 助手消息状态、异步问答、queued 取消和失败收尾已进入 M2 第一片；
+- [x] 按会话恢复随会话保留的 latest linked Answer Job：活动任务恢复轮询，终态任务恢复结果或重试；
+- [ ] SSE 和真正的多轮上下文属于后续阶段。
+
+### 7.5.2 多轮会话 M2 第一片（异步回答交互已接入，真实模型待显式开启）
+
+后端已增加受 Session 保护的 `POST /conversations/:id/answer-jobs`：一次请求原子创建用户消息和助手
+`generating` 占位，并关联现有异步 Answer Job；Answer Worker 完成或失败时会收尾助手消息。前端已增加显式的
+“提交 RAG 回答”开关，开启后调用该接口、轮询 `GET /answer-jobs/:id`，并刷新助手消息终态；默认仍使用只保存消息模式。
+
+- [x] 后端会话 turn、助手占位和 Answer Job 关联契约；
+- [x] 后端成功、失败、取消和 OwnerScope 数据边界；
+- [x] 前端发送后创建 Answer Job 并轮询状态；
+- [x] 前端展示问答队列容量错误、Retry-After 冷却、queued 任务取消和失败/取消后的再次提交；
+- [x] 按会话发现活动 Answer Job，刷新或重新进入页面后恢复轮询和 queued 取消；
+- [x] 使用会话选择代次和 Job ID 隔离发送、重试、取消与轮询的迟到响应；
+- [x] 校验回答启动响应中的会话、消息角色和 Job 关联 ID；
+- [x] 会话列表加载更多、消息最新页和更早历史加载；
+- [x] 会话与消息切换到版本化 opaque cursor；旧 page API 仅作为滚动部署 fallback，列表实例内不混用；
+- [x] 消息头刷新检测超过一页的 sequence 缺口，并用新头 cursor 向下桥接后接回原历史窗口；
+- [x] 全部/单篇文档范围、完整 `top_k=1..20` 和 `auto/zh/en` 回答语言；
+- [x] latest succeeded Job 的来源、页码、相似度和 Token 展示；
+- [x] retry 使用原 Job 的问题、范围、`top_k` 和请求语言，并创建新 turn；
+- [x] 会话内联重命名、归档/恢复和删除二次确认；
+- [x] archived 会话保持历史与结果可读，禁用新消息、回答参数、提交和 retry；
+- [x] 管理 mutation 的迟到响应按目标 ID 收敛侧栏，不会抢回当前选择或复活已删除会话；
+- [ ] SSE 流式输出、摘要、来源快照和多轮上下文属于后续阶段。
+
+本片的“再次提交”会创建新的会话 turn，并使用新的 `client_message_id`，不会把已经失败或取消的任务偷偷改回
+`queued`。前端只在 `queued` 状态显示取消操作；Worker 已领取后，页面保留轮询并提示当前任务不能取消。问答队列
+容量错误沿用后端稳定 code 和 `Retry-After`，冷却期间禁止重复提交，到期后仍需要用户手动再次提交。
+
+截至 2026-11-04，这一片已经提交为 `e1977e5`。前端优先按会话 ID 恢复 latest Job，
+并兼容仅提供 active 路由的旧后端；快速切换、加载更多、发送、重试、取消和轮询都使用代次隔离迟到响应。
+迁移 29～37、真实 PostgreSQL、本地 HTTP 分页/latest 冒烟及三轮真实 `qwen3.6-flash` Generation 已通过；SSE 和多轮历史上下文仍待后续阶段。
+
+会话管理同样以 PostgreSQL 为事实源：活动 Job 阻止归档和删除；无 Job 的孤立 generating 占位会在归档事务中
+收尾为 interrupted；恢复 active 后重新开放写入；删除依赖外键级联清理消息和关联 Job。完整管理 HTTP 冒烟和
+并发锁序测试已经通过。
+
+消息 cursor 基于不可变 `sequence_no`，提供稳定历史遍历。会话 cursor 基于可变 `updated_at,id`，属于动态 feed：
+更新后的会话可能跳到旧 cursor 前方，前端通过刷新头批次、ID 去重和稳定排序收敛，不把它描述成跨请求快照。
+latest linked Job 随会话生命周期恢复，succeeded 的来源与 Token 可以长期显示；当前前端只展示 latest，尚未提供
+按任意历史消息打开对应 Job 结果，也没有文档 revision、内容 hash 或证据正文组成的独立历史快照。
 
 ### 7.6 高性能与高并发目标的前端对齐
 

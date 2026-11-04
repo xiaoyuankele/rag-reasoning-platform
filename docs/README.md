@@ -21,6 +21,10 @@ docs/
 - 高性能与高并发工程目标：[高性能与高并发工程目标](shared/architecture/performance-engineering-goal.md)
 - 100 人在线架构与阶段计划：
   [100 人在线并发架构与交付计划](shared/architecture/100-user-concurrency-plan.md)
+- 多轮对话记忆工作区候选的数据边界与演进：
+  [多轮对话记忆：数据边界与演进路线](shared/architecture/conversation-memory-roadmap.md)
+- 多轮会话 M2 第一片工作区候选前端验收：
+  [前端回答任务交互验收](shared/architecture/conversation-memory-m2-frontend-acceptance-20261101.md)
 - 100 人在线后端交接：
   [后端并发演进交接](backend/architecture/100-user-concurrency-handoff.md)
 - 100 人在线前端交接：

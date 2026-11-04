@@ -17,9 +17,14 @@
 > 语义结果支持当前标签页刷新恢复，缓存按公开用户 ID 与文档范围隔离并做运行时校验；正文只标记实际存在的较长文字片段，
 > 不用碎片化双字铺满结果，也不伪造纯语义对应区间。
 > 结果保留默认关闭，用户开启时页面明确说明包含文本片段；缓存最长 30 分钟，并在关闭选项、退出、401 或密码重置时清除。
-> 当前 `SEMANTIC_SEARCH_ENABLED=false`，真实远程 Embedding 纵向联调等待用户显式启用。
+> `SEMANTIC_SEARCH_ENABLED` 模板默认关闭，部署环境可以覆盖；真实远程 Embedding 纵向联调尚未完成。
 > F4 带来源问答基础页已经按正式 `/answers` 契约接入全部/单篇范围、语言、top_k、来源、Token、重试和安全错误状态。
-> 当前 `ANSWER_ENABLED=false`，真实 Generation 与费用链路等待用户显式启用。
+> `ANSWER_ENABLED` 与 `ANSWER_JOBS_ENABLED` 模板默认关闭，部署环境可以覆盖；真实 Generation 与费用链路尚未完成纵向验收。
+> 当前工作区候选已接入多轮会话 M1 会话/消息持久化，以及 M2 第一片异步助手占位、Answer Job 轮询、
+> latest 恢复、版本化 opaque cursor、回答参数、来源与 Token、queued 取消、再次提交和 Retry-After 冷却。
+> 会话重命名、归档/恢复和删除二次确认也已接入，归档后内容只读。候选实现尚未提交或发布；SSE、长期来源
+> 快照和真正的多轮上下文仍待后续阶段。
+> linked Answer Job 随会话保留，删除会话会同时删除关联回答、来源和 Token；standalone Job 仍按独立 TTL 清理。
 > F100-1 第一批容量交互已经接入：向量化页面识别 owner/global 容量拒绝和批量逐项暂缓，问答页面识别 Answer/在线
 > Embedding 容量拒绝；两侧均按 `Retry-After` 使用单一可取消倒计时，等待期间禁止重复提交，到期后仅开放手动重试。
 > P6 前端第一批认证基础、公共页面和受保护应用外壳已经实现，并通过真实 Go 后端、PostgreSQL、Mailpit、

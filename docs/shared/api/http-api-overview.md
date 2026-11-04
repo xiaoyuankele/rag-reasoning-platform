@@ -1,6 +1,6 @@
 # HTTP API 总览
 
-> 更新时间：2026-08-24。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
+> 更新时间：2026-11-01。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
 > Handler 测试和后续 OpenAPI 文件为最终校验依据。
 
 ## 1. 当前访问边界
@@ -10,6 +10,9 @@
 Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成显式认领，数据库也已通过 `NOT NULL`
 禁止再次产生无主文档；后端双用户数据隔离发布验收已经通过。公开互联网部署仍需配套 HTTPS、真实邮件渠道、
 反向代理与生产环境安全配置。
+
+当前工作区候选已经增加会话 M1 持久化接口，以及 M2 第一片助手占位与异步 Answer Job 关联。候选实现尚未形成
+提交或发布版本；历史消息尚未进入 Generation Prompt，SSE、刷新后的活动任务恢复、摘要和历史证据快照仍按路线分阶段实现。
 
 身份只来自后端验证的 Session，不能依赖前端传入 `user_id`。团队工作区和成员权限属于 P7。
 
@@ -29,6 +32,18 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `POST` | `/processing-jobs/latest` | Session Cookie；JSON：`document_ids`，最多100项 | `200` | 按文档批量恢复当前用户可见的最新解析任务 | 用户功能；已隔离/状态恢复 |
 | `POST` | `/processing-jobs/:id/cancel` | Session Cookie；路径参数 `id` | `200` | 取消 queued 解析任务 | 用户功能；processing/终态返回 `409` |
 | `GET` | `/search` | Session Cookie；完整短语 `q`，或重复 `term` + 可选 `operator`、`within`；另可选 `document_id`、`page`、`page_size` | `200` | 在当前用户文档的同一文本块内执行短语或多关键词检索 | 用户功能；已隔离 |
+| `POST` | `/conversations` | Session Cookie；JSON：可选 `title` | `201` | 创建当前用户的空会话 | 工作区候选；M1/已隔离 |
+| `GET` | `/conversations` | Session Cookie；可选 `page`、`page_size` | `200` | 分页获取当前用户会话 | 工作区候选；M1/已隔离 |
+| `GET` | `/conversations/cursor` | Session Cookie；可选 `page_size`、opaque `cursor` | `200` | 按 `updated_at,id` 动态游标加载会话 | 工作区候选；M2/OwnerScope/keyset |
+| `GET` | `/conversations/:id` | Session Cookie；路径参数 `id` | `200` | 获取当前用户会话详情 | 工作区候选；M1/已隔离 |
+| `PATCH` | `/conversations/:id` | Session Cookie；JSON：可选 `title`、`status=active\|archived`，至少一项 | `200`；活动回答冲突 `409` | 重命名、归档或恢复会话 | 工作区候选；M2/严格 JSON/已隔离 |
+| `DELETE` | `/conversations/:id` | Session Cookie；路径参数 `id` | `204`；活动回答冲突 `409` | 级联删除会话、消息和关联 Answer Job | 工作区候选；M2/已隔离/需二次确认 |
+| `GET` | `/conversations/:id/messages` | Session Cookie；路径参数 `id`，可选 `page`、`page_size`、`order=asc\|desc` | `200` | 分页读取消息；`desc` 的第 1 页是最新窗口，页内仍升序 | 工作区候选；M1/已隔离 |
+| `GET` | `/conversations/:id/messages/cursor` | Session Cookie；路径参数 `id`，可选 `page_size`、opaque `cursor` | `200` | 从最新窗口按不可变 sequence 游标加载更早消息 | 工作区候选；M2/OwnerScope/keyset |
+| `POST` | `/conversations/:id/messages` | Session Cookie；JSON：`content`、可选 `client_message_id` | 新消息 `201`；幂等重放 `200` | 保存当前用户消息；暂不触发模型生成 | 工作区候选；M1/幂等/已隔离 |
+| `POST` | `/conversations/:id/answer-jobs` | Session Cookie；JSON：`content`、可选 `client_message_id`、`document_id`、`top_k`、`response_language` | 新任务 `202`；幂等重放 `200` | 原子保存用户消息和助手 `generating` 占位，再接入异步 Answer Job | 工作区候选；M2/双开关控制 |
+| `GET` | `/conversations/:id/answer-jobs/active` | Session Cookie；路径参数 `id` | 活动任务 `200`；无活动任务 `204` | 按会话恢复唯一的 queued/processing Answer Job | 工作区候选；M2/OwnerScope/双开关控制 |
+| `GET` | `/conversations/:id/answer-jobs/latest` | Session Cookie；路径参数 `id` | 最新任务 `200`；无关联任务 `204` | 恢复随会话保留的最新 Job、参数、来源和 Token | 工作区候选；M2/OwnerScope/双开关控制 |
 | `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | 新建 `202`；活动任务已存在 `200`；用户满额 `429`；全局满额 `503` | 保存当前用户的向量化意图 | 用户功能；已隔离/幂等/背压 |
 | `POST` | `/embedding-jobs/batch` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 对多份文档逐项创建或复用向量任务 | 用户功能；已隔离/逐项结果/背压 |
 | `POST` | `/embedding-jobs/latest` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 按文档批量发现当前用户可见的最新向量任务 | 用户功能；已隔离/状态恢复 |
@@ -37,7 +52,7 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `POST` | `/semantic-search` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k` | `200`；远程 Embedding 容量等待超时 `503` | 在当前用户文档中进行语义检索 | 用户功能；已隔离，受功能开关和共享闸门控制 |
 | `POST` | `/answers` | Session Cookie；JSON：`query`、可选 `document_id`、`top_k`、`response_language` | `200`；问答或远程 Embedding 容量等待超时 `503` | 基于当前用户来源生成回答 | 用户功能；已隔离，受功能开关和并发闸门控制 |
 | `POST` | `/answer-jobs` | Session Cookie；JSON 同 `/answers` | `202`；用户排队满额 `429`；全局排队满额 `503` | 创建可跨请求恢复的异步问答任务 | 用户功能；默认关闭/已隔离/持久化背压 |
-| `GET` | `/answer-jobs` | Session Cookie；查询参数 `page`、`page_size` | `200` | 分页列出当前用户仍在保留期内的异步问答任务 | 用户功能；已隔离/不调用远程模型 |
+| `GET` | `/answer-jobs` | Session Cookie；查询参数 `page`、`page_size` | `200` | 分页列出当前用户的 standalone 异步问答任务 | 用户功能；已隔离/不含会话 Job |
 | `GET` | `/answer-jobs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户异步问答状态和可选结果 | 用户功能；已隔离/轮询 |
 | `POST` | `/answer-jobs/:id/cancel` | Session Cookie；路径参数 `id` | `200` | 幂等取消 queued 问答任务 | 用户功能；processing/成功/失败返回 `409` |
 | `POST` | `/auth/verification-codes` | JSON：`channel`、`destination`、`purpose` | `202` | 申请注册或密码重置验证码挑战 | 认证功能；`purpose` 为 `register` 或 `password_reset` |
@@ -159,6 +174,89 @@ GET /search?term=磁悬浮&term=振动&operator=all&within=chunk&page=1&page_siz
 - `document_id`、OwnerScope、`ready` 状态和分页规则继续沿用原接口。
 
 当前 chunk 不等于自然句或自然段。`within=sentence/paragraph` 尚未实现，不能由前端在分页结果上二次过滤冒充。
+
+### 2.3.1 多轮会话 M1
+
+会话 M1 只负责当前用户的会话和用户消息持久化，不调用 Embedding 或 Generation，也不修改原始文件存储。
+会话标题、消息正文和消息状态保存在 PostgreSQL；PDF、Markdown、TXT 等文档正文继续由现有文件存储抽象管理。
+
+`POST /conversations` 的请求体可以为空，空标题由服务端设置为 `New conversation`。标题最多 200 个 Unicode
+字符。会话列表和详情始终通过 Session 与 `OwnerScope` 限定当前用户。
+
+`PATCH /conversations/:id` 使用严格 JSON，只允许可选 `title` 和 `status`，且至少提供一项。标题 trim 后必须为
+1～200 个 Unicode 字符；状态只接受精确的 `active` 或 `archived`。归档表示内容只读：历史消息、latest Job、
+来源和 Token 仍可读取，但追加消息、创建回答和业务 retry 返回 `409 conversation_archived`；恢复 `active` 后重新
+开放写入。存在 queued/processing Answer Job 时归档返回 `409 conversation_answer_active`。如果进程崩溃留下无
+Job 的 `assistant/generating` 占位，归档事务会把它原子收尾为 `interrupted`，再完成归档。
+
+`DELETE /conversations/:id` 在同一个 OwnerScope 事务中锁定会话并检查活动 Job：存在 queued/processing 时返回
+`409 conversation_answer_active`；否则返回 `204`，依赖外键级联删除消息和会话关联 Answer Job，不影响文档、
+chunks 或其他会话。不存在和跨用户访问统一返回 `404 conversation_not_found`。
+
+`POST /conversations/:id/messages` 的 `content` 允许 1～100000 字节，`client_message_id` 最多 128 个字符。
+同一会话内重复提交相同 `client_message_id` 和相同正文时返回原消息并使用 `200`；相同 ID 搭配不同正文返回
+`409 conversation_duplicate_message`。消息顺序由 PostgreSQL 会话行锁和 `sequence_no` 唯一约束保证。
+
+消息列表的 `order` 省略时为 `asc`，保持原有从最早消息开始的分页；`order=desc` 表示第 1 页选择最新消息，
+第 2 页继续向更早历史移动，但每一页响应内部仍按 `sequence_no ASC` 返回。`order` 只接受精确的 `asc` 或
+`desc`；空值、大写、未知值或重复参数返回 `400 invalid_conversation_message_order`。该旧接口仍是 page/offset，
+活跃会话新增消息可能推动页边界；需要稳定历史遍历的客户端应使用下面的 cursor 接口。
+
+新的 cursor 接口保留旧 page 接口用于滚动部署兼容。响应中的 cursor 结构固定为：
+
+```json
+{
+  "next": "后端生成的不透明字符串，末页为 null",
+  "has_more": true
+}
+```
+
+`GET /conversations/cursor` 按 `(updated_at DESC, id DESC)` 扫描动态会话列表；`GET
+/conversations/:id/messages/cursor` 首次返回最新窗口，后续按 `sequence_no < cursor` 向更早历史移动，每批内部仍按
+sequence 升序。cursor 是 canonical Base64 URL 的版本化严格 JSON，区分会话/消息类型；消息 cursor 还绑定路径中的
+conversation ID。前端只能保存和原样回传，不能解码后用 JavaScript Date 重建时间边界。
+
+空、重复、超长、坏 Base64、错误版本/类型、未知字段、尾随 JSON、非法时间/ID/sequence 或跨会话消息 cursor
+均返回稳定 `400`：会话使用 `invalid_conversation_cursor`，消息使用
+`invalid_conversation_message_cursor`。消息排序键不可变，因此旧 cursor 在插入新消息后仍能稳定遍历历史；会话
+排序键 `updated_at` 可变，因此会话 cursor 表达动态 feed 的向后扫描，需要刷新头批次和按 ID 合并来收敛。
+
+M1 单独不负责助手回答、SSE、取消、摘要或历史证据快照。当前工作区的 M2 第一片已经增加异步助手回答、
+queued 取消和失败收尾；SSE、摘要和历史证据快照仍属于后续阶段。
+
+### 2.3.2 多轮会话 M2 第一片：异步助手回答
+
+`POST /conversations/:id/answer-jobs` 会在当前用户的会话范围内创建一轮回答：后端先在一个事务中写入
+`user` 消息和 `generating` 状态的 `assistant` 占位消息，然后把三者关联到现有 `answer_jobs`。同一会话
+同时最多保留一条 `queued/processing` 回答任务。迁移 31 进一步保证每个非空 `user_message_id` 最多关联一个
+Answer Job。相同 `client_message_id` 只用于同一轮网络重放；失败或取消后的业务重试必须创建新 ID。终态任务重放、
+8 路并发重放和队列清理/创建竞态均已通过真实 PostgreSQL 测试。
+
+Answer Worker 沿用既有的租约、心跳、fencing token、重试和容量闸门。成功时在同一数据库事务中保存回答快照并把
+助手消息改为 `completed`；永久失败改为 `failed`；queued 任务取消改为 `interrupted`。重试期间助手消息保持
+`generating`，不会写入半成品正文。
+
+这一片使用 answer-job 轮询接口，不包含 SSE 流式输出、摘要、随会话生命周期保存的历史来源快照或远程模型默认开启。前端在
+`queued` 状态提供取消，在 `failed/canceled` 状态允许使用新的 `client_message_id` 再次提交为新的会话 turn；
+问答队列容量错误通过稳定 code 和 `Retry-After` 展示退避，冷却期间不自动重放。`ANSWER_ENABLED` 和
+`ANSWER_JOBS_ENABLED` 仍由部署配置控制；只有两个开关同时为 `true` 时才注册会话回答任务入口。
+
+`GET /conversations/:id/answer-jobs/active` 通过 Session、`conversation_id` 和 `owner_user_id` 查询唯一的
+`queued/processing` 任务：会话不存在或越权返回 `404 conversation_not_found`，会话存在但没有活动任务返回
+`204 No Content`，存在活动任务返回 `200` 和标准 `answerJobResponse`。前端重新进入会话时先查询活动任务，
+再读取消息并恢复轮询；默认未注册 Answer Jobs 路由时，消息读取成功且活动端点返回 `404` 会安全退化为 M1 页面。
+
+`GET /conversations/:id/answer-jobs/latest` 按 Job `id DESC` 返回当前会话长期保留的最新 linked 任务。它与 active
+端点使用相同的 `404/204/200` 归属语义；queued/processing 用于恢复轮询，failed/canceled 用于恢复重试参数，
+succeeded 返回回答、来源和 Token。迁移 32 提供 `(conversation_id, id DESC)` 部分索引。前端优先调用 latest，
+遇到旧后端路由 `404` 时回退 active。linked Job 不受 standalone TTL 清理，随会话存在；删除会话时级联删除。
+当前页面只展示 latest，更早 turn 尚无按消息打开 Job 的入口。长期保留的 Job sources 仍没有冻结证据正文、文档
+revision 或内容 hash，因此不能替代 M3 的独立历史证据快照。
+
+指定单篇文档时，Job 同时保存 live `document_id` 和无外键的 `requested_document_id` 参数快照。删除文档会立即删除
+对应 standalone Job；conversation-linked Job 的 live 引用置空，但 HTTP `document_id` 继续返回原请求 ID，答案、
+来源和 Token 保留。对该终态 Job 的同轮重放仍幂等；使用已删除文档创建新 turn 返回 `404 document_not_found`，
+不会静默扩大为全部文档范围。
 
 ### 2.4 文档解析任务入队背压
 
@@ -366,8 +464,8 @@ Content-Type: application/json
 }
 ```
 
-没有任务时 `jobs` 固定为 `[]`，不会返回 `null`。列表只统计当前 Session 对应 OwnerScope 的任务；已超过
-保留期并被清理的任务自然不再出现。
+没有任务时 `jobs` 固定为 `[]`，不会返回 `null`。列表只统计当前 Session 对应 OwnerScope 且
+`conversation_id IS NULL` 的 standalone 任务；conversation-linked Job 由会话 active/latest 接口恢复。
 
 状态机是 `queued → processing → succeeded|failed`，另有 `queued → canceled`。只有 `queued` 可取消；
 对已经 `canceled` 的任务重复取消仍返回 `200`，`processing` 或成功/失败终态返回 `409`。成功后 `result`
@@ -391,10 +489,10 @@ Content-Type: application/json
 `queued`。Worker 按 Owner 公平领取：多用户竞争时每个用户先获得 1 个执行机会，无其他用户等待时最多借用到
 2 个。同步和异步入口最终复用同一个 Answer 并发闸门，所以不会各自占满 10 个远程调用槽位。
 
-成功、失败和取消任务默认保留 7 天，随后由后端有界批量删除；问题、答案、来源和 Token 快照会随任务行一并
-删除。到期后继续查询该 ID 返回与不存在相同的 `404 answer_job_not_found`。`queued/processing` 不受保留期
-清理影响。任务列表只提供分页发现，第一版尚未提供状态筛选或全文搜索；多后端副本的全局生成容量仍需要
-Redis/数据库分布式准入。
+standalone 成功、失败和取消任务默认保留 7 天，随后由后端有界批量删除；问题、答案、来源和 Token 随行删除，
+到期后查询返回 `404 answer_job_not_found`。conversation-linked 终态任务不参加该清理，随会话保留并在删除
+会话时级联删除。归档不会删除会话任务。`queued/processing` 不受终态保留期清理。配置变量
+`ANSWER_STANDALONE_JOB_RETENTION` 只控制 standalone；旧 `ANSWER_JOB_RETENTION` 仅作为兼容 fallback。
 
 ## 3. P6 认证接口状态
 
