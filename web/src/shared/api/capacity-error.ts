@@ -5,6 +5,8 @@ export type CapacityErrorCode =
   | 'embedding_queue_capacity_exhausted'
   | 'embedding_provider_capacity_exhausted'
   | 'answer_capacity_exhausted'
+  | 'answer_job_owner_queue_capacity'
+  | 'answer_job_queue_capacity'
 
 export interface CapacityFailure {
   code: CapacityErrorCode
@@ -35,6 +37,14 @@ const presentations: Record<CapacityErrorCode, CapacityPresentation> = {
   answer_capacity_exhausted: {
     title: '问答服务暂时繁忙',
     message: '当前问答生成槽位已满，你的问题和检索范围已经保留。',
+  },
+  answer_job_owner_queue_capacity: {
+    title: '当前账户的问答队列已满',
+    message: '请等待已有回答任务推进后，再提交这个问题。',
+  },
+  answer_job_queue_capacity: {
+    title: '系统问答队列暂时已满',
+    message: '系统正在处理其他回答任务，请稍后重新提交这个问题。',
   },
 }
 

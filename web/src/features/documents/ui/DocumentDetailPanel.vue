@@ -288,7 +288,14 @@ async function handleDelete(): Promise<void> {
       <section class="danger-section" aria-labelledby="delete-title">
         <div>
           <h3 id="delete-title">删除文档</h3>
-          <p>删除会同时移除服务器文件、解析任务和文本块，无法从页面恢复。</p>
+          <p>
+            删除会永久移除原文件、解析结果、向量数据，以及与该文档直接关联或引用它的
+            standalone（非会话）回答任务，无法从页面撤销。
+          </p>
+          <p>
+            会话中已保存的历史回答、来源元数据和 Token
+            仍随会话保留，需删除对应会话才会清除；历史备份有独立保留周期。
+          </p>
         </div>
         <button
           v-if="!showDeleteConfirmation"

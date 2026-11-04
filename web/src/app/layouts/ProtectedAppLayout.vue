@@ -10,6 +10,7 @@ const navigationItems = [
   { label: '向量化', to: '/embeddings' },
   { label: '检索', to: '/search' },
   { label: '问答', to: '/answer' },
+  { label: '对话', to: '/conversations' },
 ]
 
 const authStore = useAuthStore()

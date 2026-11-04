@@ -116,6 +116,11 @@ describe('DocumentDetailPanel', () => {
     await wrapper.get('.danger-button').trigger('click')
     expect(deleteDocumentMock).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('确认删除“Maglev control study”吗？')
+    expect(wrapper.text()).toContain(
+      '原文件、解析结果、向量数据，以及与该文档直接关联或引用它的 standalone（非会话）回答任务',
+    )
+    expect(wrapper.text()).toContain('历史回答、来源元数据和 Token 仍随会话保留')
+    expect(wrapper.text()).toContain('历史备份有独立保留周期')
 
     await wrapper.get('.danger-button--solid').trigger('click')
     await flushPromises()
