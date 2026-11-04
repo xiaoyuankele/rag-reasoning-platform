@@ -16,6 +16,14 @@ type fakeScopedAnswerJobRepository struct {
 	createErr    error
 	getResult    Job
 	getErr       error
+	activeScope  accessdomain.OwnerScope
+	activeID     int64
+	activeResult Job
+	activeErr    error
+	latestScope  accessdomain.OwnerScope
+	latestID     int64
+	latestResult Job
+	latestErr    error
 	listScope    accessdomain.OwnerScope
 	listOptions  JobListOptions
 	listResult   JobListResult
@@ -54,6 +62,37 @@ func (f *fakeScopedAnswerJobRepository) GetAnswerJobByID(
 ) (Job, error) {
 	f.callCount++
 	return f.getResult, f.getErr
+}
+
+func (f *fakeScopedAnswerJobRepository) GetAnswerJobByUserMessageID(
+	context.Context,
+	accessdomain.OwnerScope,
+	int64,
+) (Job, error) {
+	f.callCount++
+	return f.getResult, f.getErr
+}
+
+func (f *fakeScopedAnswerJobRepository) GetActiveAnswerJobByConversationID(
+	_ context.Context,
+	scope accessdomain.OwnerScope,
+	conversationID int64,
+) (Job, error) {
+	f.callCount++
+	f.activeScope = scope
+	f.activeID = conversationID
+	return f.activeResult, f.activeErr
+}
+
+func (f *fakeScopedAnswerJobRepository) GetLatestAnswerJobByConversationID(
+	_ context.Context,
+	scope accessdomain.OwnerScope,
+	conversationID int64,
+) (Job, error) {
+	f.callCount++
+	f.latestScope = scope
+	f.latestID = conversationID
+	return f.latestResult, f.latestErr
 }
 
 func (f *fakeScopedAnswerJobRepository) CancelAnswerJob(
@@ -119,6 +158,46 @@ func TestJobServiceQueueRejectsInvalidInputBeforePersistence(t *testing.T) {
 	}
 }
 
+func TestJobServiceQueueConversationReturnsExistingTerminalJob(t *testing.T) {
+	repository := &fakeScopedAnswerJobRepository{
+		getResult: Job{ID: 19, Status: JobStatusFailed},
+	}
+	service, _ := NewJobService(repository)
+
+	job, err := service.QueueConversation(t.Context(), testAnswerOwnerScope(t), ConversationQueueInput{
+		ConversationID: 7, UserMessageID: 8, AssistantMessageID: 9,
+		Input: Input{Query: "question", TopK: 5},
+	})
+	if err != nil || job.ID != 19 || job.Status != JobStatusFailed {
+		t.Fatalf("QueueConversation() = %+v, %v", job, err)
+	}
+	if repository.callCount != 1 || repository.createdInput.Query != "" {
+		t.Fatalf("repository calls/input = %d / %+v, want existing lookup only", repository.callCount, repository.createdInput)
+	}
+}
+
+func TestJobServiceQueueConversationCreatesWhenNoJobExists(t *testing.T) {
+	repository := &fakeScopedAnswerJobRepository{
+		getErr:       ErrAnswerJobNotFound,
+		createResult: Job{ID: 20, Status: JobStatusQueued},
+	}
+	service, _ := NewJobService(repository)
+
+	job, err := service.QueueConversation(t.Context(), testAnswerOwnerScope(t), ConversationQueueInput{
+		ConversationID: 7, UserMessageID: 8, AssistantMessageID: 9,
+		Input: Input{Query: "question", TopK: 5},
+	})
+	if err != nil || job.ID != 20 {
+		t.Fatalf("QueueConversation() = %+v, %v", job, err)
+	}
+	if repository.callCount != 2 || repository.createdInput.ConversationID == nil ||
+		*repository.createdInput.ConversationID != 7 || repository.createdInput.UserMessageID == nil ||
+		*repository.createdInput.UserMessageID != 8 || repository.createdInput.AssistantMessageID == nil ||
+		*repository.createdInput.AssistantMessageID != 9 {
+		t.Fatalf("repository calls/input = %d / %+v", repository.callCount, repository.createdInput)
+	}
+}
+
 func TestJobServiceGetAndCancelValidateJobID(t *testing.T) {
 	repository := &fakeScopedAnswerJobRepository{}
 	service, _ := NewJobService(repository)
@@ -129,8 +208,48 @@ func TestJobServiceGetAndCancelValidateJobID(t *testing.T) {
 	if _, err := service.Cancel(t.Context(), testAnswerOwnerScope(t), -1); !errors.Is(err, ErrInvalidAnswerJobID) {
 		t.Fatalf("Cancel() error = %v", err)
 	}
+	if _, err := service.GetActiveConversationJob(t.Context(), testAnswerOwnerScope(t), 0); !errors.Is(err, ErrInvalidAnswerJobID) {
+		t.Fatalf("GetActiveConversationJob() error = %v", err)
+	}
+	if _, err := service.GetLatestConversationJob(t.Context(), testAnswerOwnerScope(t), 0); !errors.Is(err, ErrInvalidAnswerJobID) {
+		t.Fatalf("GetLatestConversationJob() error = %v", err)
+	}
 	if repository.callCount != 0 {
 		t.Fatalf("repository calls = %d, want 0", repository.callCount)
+	}
+}
+
+func TestJobServiceGetsLatestConversationJobWithinScope(t *testing.T) {
+	repository := &fakeScopedAnswerJobRepository{
+		latestResult: Job{ID: 18, Status: JobStatusSucceeded},
+	}
+	service, _ := NewJobService(repository)
+	scope := testAnswerOwnerScope(t)
+
+	job, err := service.GetLatestConversationJob(t.Context(), scope, 24)
+	if err != nil {
+		t.Fatalf("GetLatestConversationJob() error = %v", err)
+	}
+	if job.ID != 18 || repository.latestID != 24 ||
+		repository.latestScope.OwnerUserID() != scope.OwnerUserID() {
+		t.Fatalf("latest job/scope = %+v / %+v, want job 18, conversation 24", job, repository.latestScope)
+	}
+}
+
+func TestJobServiceGetsActiveConversationJobWithinScope(t *testing.T) {
+	repository := &fakeScopedAnswerJobRepository{
+		activeResult: Job{ID: 17, Status: JobStatusProcessing},
+	}
+	service, _ := NewJobService(repository)
+	scope := testAnswerOwnerScope(t)
+
+	job, err := service.GetActiveConversationJob(t.Context(), scope, 23)
+	if err != nil {
+		t.Fatalf("GetActiveConversationJob() error = %v", err)
+	}
+	if job.ID != 17 || repository.activeID != 23 ||
+		repository.activeScope.OwnerUserID() != scope.OwnerUserID() {
+		t.Fatalf("active job/scope = %+v / %+v, want job 17, conversation 23", job, repository.activeScope)
 	}
 }
 

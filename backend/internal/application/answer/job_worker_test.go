@@ -18,6 +18,7 @@ type fakeAnswerJobWorkerRepository struct {
 	queueStatsErr   error
 	succeededOutput Output
 	succeededID     int64
+	succeedErr      error
 	requeuedID      int64
 	requeuedAt      time.Time
 	requeueCode     JobErrorCode
@@ -46,7 +47,7 @@ func (f *fakeAnswerJobWorkerRepository) MarkAnswerJobSucceeded(
 ) error {
 	f.succeededID = jobID
 	f.succeededOutput = output
-	return nil
+	return f.succeedErr
 }
 func (f *fakeAnswerJobWorkerRepository) RequeueAnswerJob(
 	_ context.Context,
@@ -141,6 +142,39 @@ func TestAnswerJobWorkerSucceedsWithExistingAnswerService(t *testing.T) {
 	}
 	if repository.succeededID != 11 || repository.succeededOutput.Answer != "answer" {
 		t.Fatalf("success = id %d output %+v", repository.succeededID, repository.succeededOutput)
+	}
+}
+
+func TestAnswerJobWorkerFailsPermanentSourceValidationError(t *testing.T) {
+	repository := &fakeAnswerJobWorkerRepository{
+		job:        testClaimedAnswerJob(111, 1),
+		succeedErr: ErrAnswerJobSourceDocumentsUnavailable,
+	}
+	answerer := &fakeAnswerer{answer: func(
+		context.Context,
+		accessdomain.OwnerScope,
+		Input,
+	) (Output, error) {
+		return Output{
+			Answer: "answer", ResponseLanguage: ResponseLanguageEnglish,
+			Sources: []Source{{DocumentID: 9}},
+		}, nil
+	}}
+	worker := newAnswerJobWorkerForTest(t, repository, answerer)
+
+	handled, err := worker.RunOnce(t.Context())
+	if !handled || !errors.Is(err, ErrAnswerJobSourceDocumentsUnavailable) {
+		t.Fatalf("RunOnce() = %t, %v", handled, err)
+	}
+	if repository.succeededID != 111 || repository.failedID != 111 ||
+		repository.failureCode != JobErrorCodeExecutionFailed || repository.requeuedID != 0 {
+		t.Fatalf(
+			"finalization = success:%d failed:%d code:%q requeued:%d",
+			repository.succeededID,
+			repository.failedID,
+			repository.failureCode,
+			repository.requeuedID,
+		)
 	}
 }
 

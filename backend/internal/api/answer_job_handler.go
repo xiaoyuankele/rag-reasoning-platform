@@ -75,6 +75,9 @@ type answerJobResultResponse struct {
 type answerJobResponse struct {
 	ID                        int64                          `json:"id"`
 	DocumentID                *int64                         `json:"document_id"`
+	ConversationID            *int64                         `json:"conversation_id"`
+	UserMessageID             *int64                         `json:"user_message_id"`
+	AssistantMessageID        *int64                         `json:"assistant_message_id"`
 	Query                     string                         `json:"query"`
 	TopK                      int                            `json:"top_k"`
 	RequestedResponseLanguage string                         `json:"requested_response_language"`
@@ -100,6 +103,9 @@ func newAnswerJobResponse(job answerapplication.Job) answerJobResponse {
 	response := answerJobResponse{
 		ID:                        job.ID,
 		DocumentID:                job.DocumentID,
+		ConversationID:            job.ConversationID,
+		UserMessageID:             job.UserMessageID,
+		AssistantMessageID:        job.AssistantMessageID,
 		Query:                     job.Query,
 		TopK:                      job.TopK,
 		RequestedResponseLanguage: string(job.RequestedResponseLanguage),
@@ -172,7 +178,7 @@ func (h *AnswerJobHandler) Queue(c *gin.Context) {
 	c.JSON(http.StatusAccepted, newAnswerJobResponse(job))
 }
 
-// List 返回当前用户仍在保留期内的异步问答任务。
+// List 只返回当前用户仍在保留期内的 standalone 异步问答任务。
 func (h *AnswerJobHandler) List(c *gin.Context) {
 	scope, authenticated := ownerScopeFromContext(c)
 	if !authenticated {

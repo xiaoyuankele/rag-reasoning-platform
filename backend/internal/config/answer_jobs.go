@@ -9,29 +9,29 @@ import (
 )
 
 const (
-	defaultAnswerJobsWorkerConcurrency = 10
-	maximumAnswerJobsWorkerConcurrency = 32
-	defaultAnswerJobsPollInterval      = time.Second
-	defaultAnswerJobsProcessingTimeout = 90 * time.Second
-	defaultAnswerJobsMaxQueuedPerUser  = 5
-	maximumAnswerJobsMaxQueuedPerUser  = 100
-	defaultAnswerJobsMaxQueuedGlobal   = 500
-	maximumAnswerJobsMaxQueuedGlobal   = 10000
-	defaultAnswerJobsOwnerInFlight     = 1
-	maximumAnswerJobsOwnerInFlight     = 16
-	defaultAnswerJobsOwnerBorrowed     = 2
-	maximumAnswerJobsOwnerBorrowed     = 32
-	defaultAnswerJobsStarvation        = 30 * time.Second
-	defaultAnswerJobsMaxAttempts       = 3
-	maximumAnswerJobsMaxAttempts       = 10
-	defaultAnswerJobsRetryBaseDelay    = 2 * time.Second
-	defaultAnswerJobsRetryMaxDelay     = 30 * time.Second
-	defaultAnswerJobsRetention         = 7 * 24 * time.Hour
-	defaultAnswerJobsCleanupInterval   = time.Hour
-	defaultAnswerJobsCleanupBatchSize  = 500
-	maximumAnswerJobsCleanupBatchSize  = 10000
-	defaultAnswerJobsLeaseDuration     = 60 * time.Second
-	defaultAnswerJobsHeartbeatInterval = 15 * time.Second
+	defaultAnswerJobsWorkerConcurrency   = 10
+	maximumAnswerJobsWorkerConcurrency   = 32
+	defaultAnswerJobsPollInterval        = time.Second
+	defaultAnswerJobsProcessingTimeout   = 90 * time.Second
+	defaultAnswerJobsMaxQueuedPerUser    = 5
+	maximumAnswerJobsMaxQueuedPerUser    = 100
+	defaultAnswerJobsMaxQueuedGlobal     = 500
+	maximumAnswerJobsMaxQueuedGlobal     = 10000
+	defaultAnswerJobsOwnerInFlight       = 1
+	maximumAnswerJobsOwnerInFlight       = 16
+	defaultAnswerJobsOwnerBorrowed       = 2
+	maximumAnswerJobsOwnerBorrowed       = 32
+	defaultAnswerJobsStarvation          = 30 * time.Second
+	defaultAnswerJobsMaxAttempts         = 3
+	maximumAnswerJobsMaxAttempts         = 10
+	defaultAnswerJobsRetryBaseDelay      = 2 * time.Second
+	defaultAnswerJobsRetryMaxDelay       = 30 * time.Second
+	defaultAnswerStandaloneJobsRetention = 7 * 24 * time.Hour
+	defaultAnswerJobsCleanupInterval     = time.Hour
+	defaultAnswerJobsCleanupBatchSize    = 500
+	maximumAnswerJobsCleanupBatchSize    = 10000
+	defaultAnswerJobsLeaseDuration       = 60 * time.Second
+	defaultAnswerJobsHeartbeatInterval   = 15 * time.Second
 )
 
 var (
@@ -66,12 +66,14 @@ type AnswerJobsConfig struct {
 	MaxAttempts                int
 	RetryBaseDelay             time.Duration
 	RetryMaxDelay              time.Duration
-	Retention                  time.Duration
-	CleanupInterval            time.Duration
-	CleanupBatchSize           int
-	WorkerID                   string
-	JobLeaseDuration           time.Duration
-	JobHeartbeatInterval       time.Duration
+	// StandaloneRetention 只约束 conversation_id IS NULL 的 standalone 终态任务。
+	// 会话关联任务随 conversation 保留，不受该时长影响。
+	StandaloneRetention  time.Duration
+	CleanupInterval      time.Duration
+	CleanupBatchSize     int
+	WorkerID             string
+	JobLeaseDuration     time.Duration
+	JobHeartbeatInterval time.Duration
 }
 
 // LoadAnswerJobs 从环境变量读取异步问答配置。
@@ -164,12 +166,16 @@ func LoadAnswerJobs() (AnswerJobsConfig, error) {
 	if err != nil {
 		return AnswerJobsConfig{}, fmt.Errorf("load answer job retry max delay: %w", err)
 	}
-	retention, err := loadPositiveDuration(
-		"ANSWER_JOB_RETENTION",
-		defaultAnswerJobsRetention,
+	retentionEnvironmentName := "ANSWER_STANDALONE_JOB_RETENTION"
+	if strings.TrimSpace(os.Getenv(retentionEnvironmentName)) == "" {
+		retentionEnvironmentName = "ANSWER_JOB_RETENTION"
+	}
+	standaloneRetention, err := loadPositiveDuration(
+		retentionEnvironmentName,
+		defaultAnswerStandaloneJobsRetention,
 	)
 	if err != nil {
-		return AnswerJobsConfig{}, fmt.Errorf("load answer job retention: %w", err)
+		return AnswerJobsConfig{}, fmt.Errorf("load standalone answer job retention: %w", err)
 	}
 	cleanupInterval, err := loadPositiveDuration(
 		"ANSWER_JOB_CLEANUP_INTERVAL",
@@ -234,7 +240,7 @@ func LoadAnswerJobs() (AnswerJobsConfig, error) {
 		MaxAttempts:                maxAttempts,
 		RetryBaseDelay:             retryBaseDelay,
 		RetryMaxDelay:              retryMaxDelay,
-		Retention:                  retention,
+		StandaloneRetention:        standaloneRetention,
 		CleanupInterval:            cleanupInterval,
 		CleanupBatchSize:           cleanupBatchSize,
 		WorkerID:                   workerID,

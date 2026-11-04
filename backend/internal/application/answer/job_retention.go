@@ -14,20 +14,20 @@ var (
 	)
 	// ErrInvalidAnswerJobRetention 表示保留期或单批删除数不是正数。
 	ErrInvalidAnswerJobRetention = errors.New(
-		"answer job retention and cleanup batch size must be positive",
+		"standalone answer job retention and cleanup batch size must be positive",
 	)
 )
 
-// JobRetentionRepository 定义清理终态异步问答所需的最小持久化能力。
+// JobRetentionRepository 定义清理 standalone 终态异步问答所需的最小持久化能力。
 type JobRetentionRepository interface {
-	DeleteExpiredAnswerJobs(
+	DeleteExpiredStandaloneAnswerJobs(
 		ctx context.Context,
 		completedBefore time.Time,
 		limit int,
 	) (int64, error)
 }
 
-// JobRetentionEvent 是不含问题、答案、来源和 Owner 的安全清理事件。
+// JobRetentionEvent 是不含问题、答案、来源和 Owner 的 standalone 清理事件。
 type JobRetentionEvent struct {
 	DeletedCount    int64
 	CompletedBefore time.Time
@@ -40,50 +40,51 @@ type JobRetentionObserver interface {
 	ObserveAnswerJobRetention(context.Context, JobRetentionEvent)
 }
 
-// JobRetentionService 按固定保留期分批删除已结束的异步问答任务。
+// JobRetentionService 按固定保留期分批删除已结束的 standalone 异步问答任务。
+// conversation_id 非空的任务不参与该策略，随 conversation 永久保留并级联删除。
 // 它实现 WorkerLoop 所需的 RunOnce 形状，但不执行远程模型调用。
 type JobRetentionService struct {
-	jobs      JobRetentionRepository
-	observer  JobRetentionObserver
-	retention time.Duration
-	batchSize int
-	now       func() time.Time
+	jobs                JobRetentionRepository
+	observer            JobRetentionObserver
+	standaloneRetention time.Duration
+	batchSize           int
+	now                 func() time.Time
 }
 
 // NewJobRetentionService 创建异步问答保留期清理服务。
 func NewJobRetentionService(
 	jobs JobRetentionRepository,
 	observer JobRetentionObserver,
-	retention time.Duration,
+	standaloneRetention time.Duration,
 	batchSize int,
 ) (*JobRetentionService, error) {
 	if jobs == nil || observer == nil {
 		return nil, ErrAnswerJobRetentionDependencies
 	}
-	if retention <= 0 || batchSize <= 0 {
+	if standaloneRetention <= 0 || batchSize <= 0 {
 		return nil, ErrInvalidAnswerJobRetention
 	}
 	return &JobRetentionService{
-		jobs:      jobs,
-		observer:  observer,
-		retention: retention,
-		batchSize: batchSize,
-		now:       time.Now,
+		jobs:                jobs,
+		observer:            observer,
+		standaloneRetention: standaloneRetention,
+		batchSize:           batchSize,
+		now:                 time.Now,
 	}, nil
 }
 
-// RunOnce 删除一批 completed_at 早于保留边界的 succeeded/failed/canceled 任务。
+// RunOnce 删除一批 completed_at 早于保留边界的 standalone succeeded/failed/canceled 任务。
 // 返回 handled=true 时，WorkerLoop 会立即继续下一批；清空后才进入轮询等待。
 func (s *JobRetentionService) RunOnce(ctx context.Context) (bool, error) {
 	startedAt := time.Now()
-	completedBefore := s.now().Add(-s.retention)
-	deletedCount, err := s.jobs.DeleteExpiredAnswerJobs(
+	completedBefore := s.now().Add(-s.standaloneRetention)
+	deletedCount, err := s.jobs.DeleteExpiredStandaloneAnswerJobs(
 		ctx,
 		completedBefore,
 		s.batchSize,
 	)
 	if err != nil {
-		return false, fmt.Errorf("delete expired answer jobs: %w", err)
+		return false, fmt.Errorf("delete expired standalone answer jobs: %w", err)
 	}
 	if deletedCount == 0 {
 		return false, nil

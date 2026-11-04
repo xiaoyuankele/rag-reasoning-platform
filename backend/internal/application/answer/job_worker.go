@@ -371,6 +371,13 @@ func (w *JobWorker) RunOnce(ctx context.Context) (handled bool, err error) {
 		job.LeaseToken,
 		output,
 	); finalizeErr != nil {
+		if errors.Is(finalizeErr, ErrAnswerJobSourceDocumentsUnavailable) {
+			err = w.failJob(workContext, job, finalizeErr)
+			finalEvent.Type = JobEventFailed
+			finalEvent.Status = JobStatusFailed
+			finalEvent.ErrorCode = JobErrorCodeExecutionFailed
+			return true, err
+		}
 		err = fmt.Errorf("mark answer job %d succeeded: %w", job.ID, finalizeErr)
 		return true, err
 	}
@@ -450,6 +457,7 @@ func isPermanentAnswerJobError(err error) bool {
 		errors.Is(err, embeddingapplication.ErrInvalidDocumentID) ||
 		errors.Is(err, embeddingapplication.ErrDocumentEmbeddingsNotReady) ||
 		errors.Is(err, ErrInvalidResponseLanguage) ||
+		errors.Is(err, ErrAnswerJobSourceDocumentsUnavailable) ||
 		errors.Is(err, documentdomain.ErrNotFound) ||
 		errors.Is(err, embeddingdomain.ErrEmbeddingAuthentication) ||
 		errors.Is(err, embeddingdomain.ErrEmbeddingQuotaExceeded) ||
@@ -477,6 +485,8 @@ func classifyAnswerJobError(err error) JobErrorCategory {
 	case errors.Is(err, embeddingapplication.ErrDocumentEmbeddingsNotReady):
 		return JobErrorCategoryEmbeddingsNotReady
 	case errors.Is(err, documentdomain.ErrNotFound):
+		return JobErrorCategoryDocumentNotFound
+	case errors.Is(err, ErrAnswerJobSourceDocumentsUnavailable):
 		return JobErrorCategoryDocumentNotFound
 	case errors.Is(err, embeddingapplication.ErrSemanticSearchQueryRequired),
 		errors.Is(err, embeddingapplication.ErrSemanticSearchQueryInvalidUTF8),

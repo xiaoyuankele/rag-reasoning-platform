@@ -106,7 +106,7 @@ func answerJobEventLevel(event answerapplication.JobEvent) slog.Level {
 	}
 }
 
-// ObserveAnswerJobRetention 记录不含用户内容的保留期清理结果。
+// ObserveAnswerJobRetention 记录不含用户内容的 standalone 保留期清理结果。
 func (l *AnswerJobLogger) ObserveAnswerJobRetention(
 	ctx context.Context,
 	event answerapplication.JobRetentionEvent,
@@ -114,8 +114,9 @@ func (l *AnswerJobLogger) ObserveAnswerJobRetention(
 	l.logger.LogAttrs(
 		ctx,
 		slog.LevelInfo,
-		"Expired answer jobs deleted",
-		slog.String("event", "answer_jobs_cleaned"),
+		"Expired standalone answer jobs deleted",
+		slog.String("event", "standalone_answer_jobs_cleaned"),
+		slog.String("retention_scope", "standalone"),
 		slog.Int64("deleted_count", event.DeletedCount),
 		slog.Time("completed_before", event.CompletedBefore),
 		slog.Int("batch_size", event.BatchSize),

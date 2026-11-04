@@ -16,6 +16,7 @@ import (
 	"rag-reasoning-platform/backend/internal/api"
 	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
 	authapplication "rag-reasoning-platform/backend/internal/application/auth"
+	conversationapplication "rag-reasoning-platform/backend/internal/application/conversation"
 	documentapplication "rag-reasoning-platform/backend/internal/application/document"
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
 	verificationapplication "rag-reasoning-platform/backend/internal/application/verification"
@@ -377,6 +378,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	var scopedDocumentRepository *postgres.ScopedDocumentRepository
 	var scopedProcessingJobRepository *postgres.ScopedProcessingJobRepository
 	var scopedEmbeddingJobRepository *postgres.ScopedEmbeddingJobRepository
+	var conversationRepository *postgres.ConversationRepository
 	if rolePlan.serveHTTP {
 		scopedDocumentRepository = postgres.NewScopedDocumentRepository(databasePool)
 		scopedProcessingJobRepository = postgres.NewScopedProcessingJobRepository(
@@ -393,6 +395,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 				MaxActiveJobsGlobal:   embeddingConfig.ActiveJobsGlobalLimit,
 			},
 		)
+		conversationRepository = postgres.NewConversationRepository(databasePool)
 	}
 
 	var embeddingJobRepository *postgres.EmbeddingJobRepository
@@ -971,7 +974,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			answerapplication.NewJobRetentionService(
 				answerJobRepository,
 				answerJobLogger,
-				answerJobsConfig.Retention,
+				answerJobsConfig.StandaloneRetention,
 				answerJobsConfig.CleanupBatchSize,
 			)
 		if err != nil {
@@ -982,8 +985,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			answerJobsConfig.CleanupInterval,
 			func(err error) {
 				logger.Error(
-					"Answer job retention iteration failed",
-					"event", "answer_job_retention_error",
+					"Standalone answer job retention iteration failed",
+					"event", "standalone_answer_job_retention_error",
 					"error", err,
 				)
 			},
@@ -1003,10 +1006,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			answerJobsConfig.OwnerBorrowedInFlightLimit,
 			"starvation_threshold_ms",
 			answerJobsConfig.StarvationThreshold.Milliseconds(),
-			"retention_ms", answerJobsConfig.Retention.Milliseconds(),
+			"retention_scope", "standalone",
+			"standalone_retention_ms", answerJobsConfig.StandaloneRetention.Milliseconds(),
 			"cleanup_interval_ms",
 			answerJobsConfig.CleanupInterval.Milliseconds(),
-			"cleanup_batch_size", answerJobsConfig.CleanupBatchSize,
+			"standalone_cleanup_batch_size", answerJobsConfig.CleanupBatchSize,
 			"worker_id", answerJobsConfig.WorkerID,
 			"lease_duration_ms",
 			answerJobsConfig.JobLeaseDuration.Milliseconds(),
@@ -1321,6 +1325,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		scopedDocumentRepository,
 		fileStorage,
 	)
+	conversationService := conversationapplication.NewService(conversationRepository)
 	documentProcessingService := documentapplication.NewQueueProcessingService(
 		scopedDocumentRepository,
 		scopedProcessingJobRepository,
@@ -1361,6 +1366,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	)
 	documentSearchHandler := api.NewDocumentSearchHandler(documentSearchService)
 	documentDeleteHandler := api.NewDocumentDeleteHandler(documentDeleteService)
+	conversationHandler := api.NewConversationHandler(conversationService, logger)
+	var conversationAnswerHandler *api.ConversationAnswerHandler
+	if answerJobService != nil {
+		conversationAnswerHandler = api.NewConversationAnswerHandler(
+			conversationService,
+			answerJobService,
+			logger,
+		)
+	}
 	documentProcessingHandler := api.NewDocumentProcessingHandler(
 		documentProcessingService,
 	)
@@ -1454,6 +1468,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	documentPreflightHandler.RegisterRoutes(protectedRoutes)
 	documentListHandler.RegisterRoutes(protectedRoutes)
 	documentDeleteHandler.RegisterRoutes(protectedRoutes)
+	conversationHandler.RegisterRoutes(protectedRoutes)
+	if conversationAnswerHandler != nil {
+		conversationAnswerHandler.RegisterRoutes(protectedRoutes)
+	}
 	documentChunkHandler.RegisterRoutes(protectedRoutes)
 	documentProcessingHandler.RegisterRoutes(protectedRoutes)
 	processingJobHandler.RegisterRoutes(protectedRoutes)

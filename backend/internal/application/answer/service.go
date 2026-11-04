@@ -47,10 +47,13 @@ type semanticSearcher interface {
 
 // Input 是 Handler 等上层入口交给问答用例的数据。
 type Input struct {
-	Query            string
-	DocumentID       *int64
-	TopK             int
-	ResponseLanguage ResponseLanguage
+	Query              string
+	DocumentID         *int64
+	TopK               int
+	ResponseLanguage   ResponseLanguage
+	ConversationID     *int64
+	UserMessageID      *int64
+	AssistantMessageID *int64
 }
 
 // Source 表示交给生成模型的一条编号证据及其来源。

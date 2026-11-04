@@ -59,6 +59,13 @@ type JobService struct {
 	jobs ScopedJobRepository
 }
 
+type ConversationQueueInput struct {
+	ConversationID     int64
+	UserMessageID      int64
+	AssistantMessageID int64
+	Input              Input
+}
+
 // NewJobService 创建异步问答任务应用服务。
 func NewJobService(jobs ScopedJobRepository) (*JobService, error) {
 	if jobs == nil {
@@ -97,6 +104,43 @@ func (s *JobService) Queue(
 	return job, nil
 }
 
+// QueueConversation 把一个已经持久化的会话 turn 接入异步回答队列。
+// 同一用户消息重复提交时直接返回已有任务，保持端到端幂等。
+func (s *JobService) QueueConversation(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	input ConversationQueueInput,
+) (Job, error) {
+	if input.ConversationID <= 0 || input.UserMessageID <= 0 || input.AssistantMessageID <= 0 {
+		return Job{}, ErrInvalidAnswerJobID
+	}
+
+	existing, err := s.jobs.GetAnswerJobByUserMessageID(ctx, scope, input.UserMessageID)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, ErrAnswerJobNotFound) {
+		return Job{}, fmt.Errorf("find conversation answer job: %w", err)
+	}
+
+	conversationID := input.ConversationID
+	userMessageID := input.UserMessageID
+	assistantMessageID := input.AssistantMessageID
+	input.Input.ConversationID = &conversationID
+	input.Input.UserMessageID = &userMessageID
+	input.Input.AssistantMessageID = &assistantMessageID
+	job, err := s.Queue(ctx, scope, input.Input)
+	if errors.Is(err, ErrConversationAnswerActive) {
+		// 并发请求可能在查询之后先创建任务；回读已存在任务即可。
+		job, lookupErr := s.jobs.GetAnswerJobByUserMessageID(ctx, scope, input.UserMessageID)
+		if lookupErr == nil {
+			return job, nil
+		}
+		return Job{}, fmt.Errorf("resolve concurrent conversation answer job: %w", lookupErr)
+	}
+	return job, err
+}
+
 // GetByID 查询当前用户可见的任务快照。
 func (s *JobService) GetByID(
 	ctx context.Context,
@@ -113,7 +157,39 @@ func (s *JobService) GetByID(
 	return job, nil
 }
 
-// List 查询当前用户仍在保留期内的异步问答任务。
+// GetActiveConversationJob 查询当前用户会话仍处于 queued 或 processing 的回答任务。
+func (s *JobService) GetActiveConversationJob(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	conversationID int64,
+) (Job, error) {
+	if conversationID <= 0 {
+		return Job{}, ErrInvalidAnswerJobID
+	}
+	job, err := s.jobs.GetActiveAnswerJobByConversationID(ctx, scope, conversationID)
+	if err != nil {
+		return Job{}, fmt.Errorf("get active conversation answer job: %w", err)
+	}
+	return job, nil
+}
+
+// GetLatestConversationJob 查询当前用户会话保留期内最新的回答任务。
+func (s *JobService) GetLatestConversationJob(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	conversationID int64,
+) (Job, error) {
+	if conversationID <= 0 {
+		return Job{}, ErrInvalidAnswerJobID
+	}
+	job, err := s.jobs.GetLatestAnswerJobByConversationID(ctx, scope, conversationID)
+	if err != nil {
+		return Job{}, fmt.Errorf("get latest conversation answer job: %w", err)
+	}
+	return job, nil
+}
+
+// List 查询当前用户仍在保留期内的 standalone 异步问答任务。
 func (s *JobService) List(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,

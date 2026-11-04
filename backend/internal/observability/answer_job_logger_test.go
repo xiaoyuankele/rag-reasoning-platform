@@ -87,7 +87,8 @@ func TestAnswerJobLoggerWritesSafeRetentionFields(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &entry); err != nil {
 		t.Fatalf("decode answer job retention log: %v", err)
 	}
-	assertStringLogField(t, entry, "event", "answer_jobs_cleaned")
+	assertStringLogField(t, entry, "event", "standalone_answer_jobs_cleaned")
+	assertStringLogField(t, entry, "retention_scope", "standalone")
 	assertNumericLogField(t, entry, "deleted_count", 250)
 	assertNumericLogField(t, entry, "batch_size", 500)
 	assertNumericLogField(t, entry, "duration_ms", 75)

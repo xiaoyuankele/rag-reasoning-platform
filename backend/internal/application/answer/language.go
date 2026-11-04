@@ -68,6 +68,12 @@ func normalizeResponseLanguagePreference(
 	}
 }
 
+// NormalizeResponseLanguagePreference 校验并规范化 HTTP/会话入口的语言偏好。
+// 它不会调用模型，也不会把 auto 提前解析成最终语言。
+func NormalizeResponseLanguagePreference(requested ResponseLanguage) (ResponseLanguage, error) {
+	return normalizeResponseLanguagePreference(requested)
+}
+
 // detectPrimaryResponseLanguage 使用 Unicode 脚本数量判断问题的主要语言。
 //
 // 这不是自然语言识别模型，只是 auto 模式的轻量默认机制。无法判断或

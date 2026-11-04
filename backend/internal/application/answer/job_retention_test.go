@@ -14,7 +14,7 @@ type fakeAnswerJobRetentionRepository struct {
 	err             error
 }
 
-func (f *fakeAnswerJobRetentionRepository) DeleteExpiredAnswerJobs(
+func (f *fakeAnswerJobRetentionRepository) DeleteExpiredStandaloneAnswerJobs(
 	_ context.Context,
 	completedBefore time.Time,
 	limit int,

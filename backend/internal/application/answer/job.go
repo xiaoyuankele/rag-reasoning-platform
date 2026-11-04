@@ -49,6 +49,13 @@ var (
 	// 旧 Worker 必须停止写答案或任务终态，避免覆盖接管任务的新 Worker。
 	ErrAnswerJobLeaseLost = errors.New("answer job lease lost")
 
+	// ErrConversationAnswerActive 表示当前会话已经存在 queued/processing 回答。
+	ErrConversationAnswerActive = errors.New("conversation already has an active answer job")
+
+	// ErrAnswerJobSourceDocumentsUnavailable 表示 standalone 回答的来源文档
+	// 在结果持久化前已删除或不再属于任务 Owner；该错误不可重试。
+	ErrAnswerJobSourceDocumentsUnavailable = errors.New("answer job source documents are unavailable")
+
 	// ErrInvalidAnswerJobLeasePolicy 表示 Worker 身份或租约时长无效。
 	ErrInvalidAnswerJobLeasePolicy = errors.New(
 		"answer job lease policy is invalid",
@@ -107,6 +114,9 @@ type Job struct {
 	ID                        int64
 	OwnerUserID               int64
 	DocumentID                *int64
+	ConversationID            *int64
+	UserMessageID             *int64
+	AssistantMessageID        *int64
 	Query                     string
 	TopK                      int
 	RequestedResponseLanguage ResponseLanguage
@@ -213,6 +223,21 @@ type ScopedJobRepository interface {
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
 		jobID int64,
+	) (Job, error)
+	GetAnswerJobByUserMessageID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		userMessageID int64,
+	) (Job, error)
+	GetActiveAnswerJobByConversationID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		conversationID int64,
+	) (Job, error)
+	GetLatestAnswerJobByConversationID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		conversationID int64,
 	) (Job, error)
 	ListAnswerJobs(
 		ctx context.Context,

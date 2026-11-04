@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
+	conversationdomain "rag-reasoning-platform/backend/internal/domain/conversation"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -92,12 +94,129 @@ func (r *AnswerJobRepository) CreateAnswerJob(
 	if !r.admissionLimits.IsValid() {
 		return answerapplication.Job{}, answerapplication.ErrInvalidAnswerJobAdmissionLimits
 	}
+	if (input.ConversationID == nil) != (input.UserMessageID == nil) ||
+		(input.ConversationID == nil) != (input.AssistantMessageID == nil) {
+		return answerapplication.Job{}, errors.New("conversation answer job links must be all present or all absent")
+	}
+	if input.ConversationID != nil {
+		if *input.ConversationID <= 0 || *input.UserMessageID <= 0 || *input.AssistantMessageID <= 0 {
+			return answerapplication.Job{}, errors.New("conversation answer job link IDs must be positive")
+		}
+	}
 
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return answerapplication.Job{}, fmt.Errorf("begin answer job creation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	const selectByUserMessageQuery = `
+		SELECT
+			id, owner_user_id, requested_document_id, query, top_k,
+			requested_response_language, status, attempt_count,
+			error_code, error_message, next_attempt_at,
+			answer_text, resolved_response_language, sources,
+			prompt_tokens, completion_tokens, total_tokens,
+			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id
+		FROM answer_jobs
+		WHERE user_message_id = $1 AND owner_user_id = $2
+		ORDER BY id DESC
+		LIMIT 1
+	`
+	if input.ConversationID != nil {
+		const conversationQuery = `
+			SELECT id, status
+			FROM conversations
+			WHERE id = $1 AND owner_user_id = $2
+			FOR UPDATE
+		`
+		var linkedConversationID int64
+		var conversationStatus string
+		if err := tx.QueryRow(
+			ctx,
+			conversationQuery,
+			*input.ConversationID,
+			scope.OwnerUserID(),
+		).Scan(&linkedConversationID, &conversationStatus); errors.Is(err, pgx.ErrNoRows) {
+			return answerapplication.Job{}, conversationdomain.ErrNotFound
+		} else if err != nil {
+			return answerapplication.Job{}, fmt.Errorf("lock scoped conversation before answer job creation: %w", err)
+		}
+		switch conversationdomain.Status(conversationStatus) {
+		case conversationdomain.StatusArchived:
+			return answerapplication.Job{}, conversationdomain.ErrArchived
+		case conversationdomain.StatusActive:
+			// 继续验证消息关联。
+		default:
+			return answerapplication.Job{}, fmt.Errorf("conversation %d has invalid status %q", linkedConversationID, conversationStatus)
+		}
+
+		const linkQuery = `
+			SELECT assistant_message.status
+			FROM conversation_messages AS user_message
+			JOIN conversation_messages AS assistant_message
+			  ON assistant_message.id = $3
+			 AND assistant_message.conversation_id = $1
+			 AND assistant_message.role = 'assistant'
+			WHERE user_message.id = $2
+			  AND user_message.conversation_id = $1
+			  AND user_message.role = 'user'
+			FOR UPDATE OF assistant_message
+		`
+		var assistantStatus string
+		if err := tx.QueryRow(
+			ctx,
+			linkQuery,
+			linkedConversationID,
+			*input.UserMessageID,
+			*input.AssistantMessageID,
+		).Scan(&assistantStatus); errors.Is(err, pgx.ErrNoRows) {
+			return answerapplication.Job{}, documentdomain.ErrNotFound
+		} else if err != nil {
+			return answerapplication.Job{}, fmt.Errorf("validate conversation answer links: %w", err)
+		}
+
+		existing, existingErr := scanAnswerJob(tx.QueryRow(
+			ctx,
+			selectByUserMessageQuery,
+			*input.UserMessageID,
+			scope.OwnerUserID(),
+		))
+		if existingErr == nil {
+			if err := tx.Commit(ctx); err != nil {
+				return answerapplication.Job{}, fmt.Errorf("commit idempotent answer job lookup: %w", err)
+			}
+			return existing, nil
+		}
+		if !errors.Is(existingErr, pgx.ErrNoRows) {
+			return answerapplication.Job{}, fmt.Errorf("find answer job before creation: %w", existingErr)
+		}
+
+		switch conversationdomain.MessageStatus(assistantStatus) {
+		case conversationdomain.MessageStatusGenerating:
+			// 新 turn 已经处于可入队状态。
+		case conversationdomain.MessageStatusFailed, conversationdomain.MessageStatusInterrupted:
+			commandTag, err := tx.Exec(
+				ctx,
+				`UPDATE conversation_messages
+				 SET content = $2, status = 'generating', updated_at = CURRENT_TIMESTAMP
+				 WHERE id = $1 AND status IN ('failed', 'interrupted')`,
+				*input.AssistantMessageID,
+				conversationdomain.AssistantGeneratingPlaceholder,
+			)
+			if err != nil {
+				return answerapplication.Job{}, fmt.Errorf("rearm assistant message before answer job creation: %w", err)
+			}
+			if commandTag.RowsAffected() != 1 {
+				return answerapplication.Job{}, fmt.Errorf("assistant message %d changed before answer job creation", *input.AssistantMessageID)
+			}
+		case conversationdomain.MessageStatusCompleted:
+			return answerapplication.Job{}, fmt.Errorf("completed assistant message %d has no answer job", *input.AssistantMessageID)
+		default:
+			return answerapplication.Job{}, fmt.Errorf("assistant message %d has invalid status %q", *input.AssistantMessageID, assistantStatus)
+		}
+	}
 
 	// 指定文档问答必须在写任务前证明文档属于当前用户。
 	// FOR SHARE 与删除事务协调，防止校验后到 INSERT 前文档被并发删除。
@@ -166,30 +285,64 @@ func (r *AnswerJobRepository) CreateAnswerJob(
 		INSERT INTO answer_jobs (
 			owner_user_id,
 			document_id,
+			requested_document_id,
+			conversation_id,
+			user_message_id,
+			assistant_message_id,
 			query,
 			top_k,
 			requested_response_language
 		)
-		VALUES ($1, $2, $3, $4, $5)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT DO NOTHING
 		RETURNING
-			id, owner_user_id, document_id, query, top_k,
+			id, owner_user_id, requested_document_id, query, top_k,
 			requested_response_language, status, attempt_count,
 			error_code, error_message, next_attempt_at,
 			answer_text, resolved_response_language, sources,
 			prompt_tokens, completion_tokens, total_tokens,
-			created_at, updated_at, started_at, completed_at
+			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id
 	`
 	job, err := scanAnswerJob(tx.QueryRow(
 		ctx,
 		insertQuery,
 		scope.OwnerUserID(),
 		input.DocumentID,
+		input.DocumentID,
+		input.ConversationID,
+		input.UserMessageID,
+		input.AssistantMessageID,
 		input.Query,
 		input.TopK,
 		input.ResponseLanguage,
 	))
+	if errors.Is(err, pgx.ErrNoRows) && input.UserMessageID != nil {
+		existing, existingErr := scanAnswerJob(tx.QueryRow(
+			ctx,
+			selectByUserMessageQuery,
+			*input.UserMessageID,
+			scope.OwnerUserID(),
+		))
+		if existingErr == nil {
+			if err := tx.Commit(ctx); err != nil {
+				return answerapplication.Job{}, fmt.Errorf("commit concurrent answer job lookup: %w", err)
+			}
+			return existing, nil
+		}
+		if !errors.Is(existingErr, pgx.ErrNoRows) {
+			return answerapplication.Job{}, fmt.Errorf("resolve concurrent answer job creation: %w", existingErr)
+		}
+		return answerapplication.Job{}, answerapplication.ErrConversationAnswerActive
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return answerapplication.Job{}, fmt.Errorf("answer job insert conflicted without a conversation link")
+	}
 	if isForeignKeyViolation(err) {
 		return answerapplication.Job{}, documentdomain.ErrNotFound
+	}
+	if isConstraintViolation(err, "uq_answer_jobs_active_conversation") {
+		return answerapplication.Job{}, answerapplication.ErrConversationAnswerActive
 	}
 	if err != nil {
 		return answerapplication.Job{}, fmt.Errorf("insert answer job: %w", err)
@@ -212,12 +365,13 @@ func (r *AnswerJobRepository) GetAnswerJobByID(
 
 	const query = `
 		SELECT
-			id, owner_user_id, document_id, query, top_k,
+			id, owner_user_id, requested_document_id, query, top_k,
 			requested_response_language, status, attempt_count,
 			error_code, error_message, next_attempt_at,
 			answer_text, resolved_response_language, sources,
 			prompt_tokens, completion_tokens, total_tokens,
-			created_at, updated_at, started_at, completed_at
+			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id
 		FROM answer_jobs
 		WHERE id = $1 AND owner_user_id = $2
 	`
@@ -231,7 +385,177 @@ func (r *AnswerJobRepository) GetAnswerJobByID(
 	return job, nil
 }
 
-// ListAnswerJobs 按创建时间倒序返回当前 OwnerScope 的任务。
+// GetAnswerJobByUserMessageID 返回和会话用户消息关联的回答任务。
+func (r *AnswerJobRepository) GetAnswerJobByUserMessageID(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	userMessageID int64,
+) (answerapplication.Job, error) {
+	if !scope.IsValid() {
+		return answerapplication.Job{}, accessdomain.ErrInvalidOwnerScope
+	}
+	if userMessageID <= 0 {
+		return answerapplication.Job{}, answerapplication.ErrAnswerJobNotFound
+	}
+
+	const query = `
+		SELECT
+			id, owner_user_id, requested_document_id, query, top_k,
+			requested_response_language, status, attempt_count,
+			error_code, error_message, next_attempt_at,
+			answer_text, resolved_response_language, sources,
+			prompt_tokens, completion_tokens, total_tokens,
+			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id
+		FROM answer_jobs
+		WHERE user_message_id = $1 AND owner_user_id = $2
+		ORDER BY id DESC
+		LIMIT 1
+	`
+	job, err := scanAnswerJob(r.pool.QueryRow(ctx, query, userMessageID, scope.OwnerUserID()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return answerapplication.Job{}, answerapplication.ErrAnswerJobNotFound
+	}
+	if err != nil {
+		return answerapplication.Job{}, fmt.Errorf("get answer job by user message: %w", err)
+	}
+	return job, nil
+}
+
+// GetActiveAnswerJobByConversationID 返回当前 OwnerScope 会话唯一的活跃回答任务。
+// 会话行的 KEY SHARE 锁让“会话存在”与后续任务查询共享同一事务快照边界，
+// 同时允许普通会话更新继续进行。
+func (r *AnswerJobRepository) GetActiveAnswerJobByConversationID(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	conversationID int64,
+) (answerapplication.Job, error) {
+	if !scope.IsValid() {
+		return answerapplication.Job{}, accessdomain.ErrInvalidOwnerScope
+	}
+	if conversationID <= 0 {
+		return answerapplication.Job{}, conversationdomain.ErrNotFound
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return answerapplication.Job{}, fmt.Errorf("begin active conversation answer lookup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var scopedConversationID int64
+	if err := tx.QueryRow(
+		ctx,
+		`SELECT id
+		 FROM conversations
+		 WHERE id = $1 AND owner_user_id = $2
+		 FOR KEY SHARE`,
+		conversationID,
+		scope.OwnerUserID(),
+	).Scan(&scopedConversationID); errors.Is(err, pgx.ErrNoRows) {
+		return answerapplication.Job{}, conversationdomain.ErrNotFound
+	} else if err != nil {
+		return answerapplication.Job{}, fmt.Errorf("lock scoped conversation for active answer lookup: %w", err)
+	}
+
+	const query = `
+		SELECT
+			id, owner_user_id, requested_document_id, query, top_k,
+			requested_response_language, status, attempt_count,
+			error_code, error_message, next_attempt_at,
+			answer_text, resolved_response_language, sources,
+			prompt_tokens, completion_tokens, total_tokens,
+			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id
+		FROM answer_jobs
+		WHERE conversation_id = $1
+		  AND owner_user_id = $2
+		  AND status IN ('queued', 'processing')
+		ORDER BY id DESC
+		LIMIT 1
+	`
+	job, err := scanAnswerJob(tx.QueryRow(ctx, query, scopedConversationID, scope.OwnerUserID()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return answerapplication.Job{}, fmt.Errorf("commit empty active conversation answer lookup: %w", commitErr)
+		}
+		return answerapplication.Job{}, answerapplication.ErrAnswerJobNotFound
+	}
+	if err != nil {
+		return answerapplication.Job{}, fmt.Errorf("get active scoped conversation answer job: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return answerapplication.Job{}, fmt.Errorf("commit active conversation answer lookup: %w", err)
+	}
+	return job, nil
+}
+
+// GetLatestAnswerJobByConversationID 返回当前 OwnerScope 会话保留期内最新的任务。
+func (r *AnswerJobRepository) GetLatestAnswerJobByConversationID(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	conversationID int64,
+) (answerapplication.Job, error) {
+	if !scope.IsValid() {
+		return answerapplication.Job{}, accessdomain.ErrInvalidOwnerScope
+	}
+	if conversationID <= 0 {
+		return answerapplication.Job{}, conversationdomain.ErrNotFound
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return answerapplication.Job{}, fmt.Errorf("begin latest conversation answer lookup: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var scopedConversationID int64
+	if err := tx.QueryRow(
+		ctx,
+		`SELECT id
+		 FROM conversations
+		 WHERE id = $1 AND owner_user_id = $2
+		 FOR KEY SHARE`,
+		conversationID,
+		scope.OwnerUserID(),
+	).Scan(&scopedConversationID); errors.Is(err, pgx.ErrNoRows) {
+		return answerapplication.Job{}, conversationdomain.ErrNotFound
+	} else if err != nil {
+		return answerapplication.Job{}, fmt.Errorf("lock scoped conversation for latest answer lookup: %w", err)
+	}
+
+	const query = `
+		SELECT
+			id, owner_user_id, requested_document_id, query, top_k,
+			requested_response_language, status, attempt_count,
+			error_code, error_message, next_attempt_at,
+			answer_text, resolved_response_language, sources,
+			prompt_tokens, completion_tokens, total_tokens,
+			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id
+		FROM answer_jobs
+		WHERE conversation_id = $1
+		  AND owner_user_id = $2
+		ORDER BY id DESC
+		LIMIT 1
+	`
+	job, err := scanAnswerJob(tx.QueryRow(ctx, query, scopedConversationID, scope.OwnerUserID()))
+	if errors.Is(err, pgx.ErrNoRows) {
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			return answerapplication.Job{}, fmt.Errorf("commit empty latest conversation answer lookup: %w", commitErr)
+		}
+		return answerapplication.Job{}, answerapplication.ErrAnswerJobNotFound
+	}
+	if err != nil {
+		return answerapplication.Job{}, fmt.Errorf("get latest scoped conversation answer job: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return answerapplication.Job{}, fmt.Errorf("commit latest conversation answer lookup: %w", err)
+	}
+	return job, nil
+}
+
+// ListAnswerJobs 按创建时间倒序返回当前 OwnerScope 的 standalone 任务。
 func (r *AnswerJobRepository) ListAnswerJobs(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
@@ -245,6 +569,7 @@ func (r *AnswerJobRepository) ListAnswerJobs(
 		SELECT COUNT(*)
 		FROM answer_jobs
 		WHERE owner_user_id = $1
+		  AND conversation_id IS NULL
 	`
 	var total int64
 	if err := r.pool.QueryRow(ctx, countQuery, scope.OwnerUserID()).Scan(&total); err != nil {
@@ -253,14 +578,16 @@ func (r *AnswerJobRepository) ListAnswerJobs(
 
 	const listQuery = `
 		SELECT
-			id, owner_user_id, document_id, query, top_k,
+			id, owner_user_id, requested_document_id, query, top_k,
 			requested_response_language, status, attempt_count,
 			error_code, error_message, next_attempt_at,
 			answer_text, resolved_response_language, sources,
 			prompt_tokens, completion_tokens, total_tokens,
-			created_at, updated_at, started_at, completed_at
+			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id
 		FROM answer_jobs
 		WHERE owner_user_id = $1
+		  AND conversation_id IS NULL
 		ORDER BY created_at DESC, id DESC
 		LIMIT $2 OFFSET $3
 	`
@@ -308,12 +635,13 @@ func (r *AnswerJobRepository) CancelAnswerJob(
 
 	const lockQuery = `
 		SELECT
-			id, owner_user_id, document_id, query, top_k,
+			id, owner_user_id, requested_document_id, query, top_k,
 			requested_response_language, status, attempt_count,
 			error_code, error_message, next_attempt_at,
 			answer_text, resolved_response_language, sources,
 			prompt_tokens, completion_tokens, total_tokens,
-			created_at, updated_at, started_at, completed_at
+			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id
 		FROM answer_jobs
 		WHERE id = $1 AND owner_user_id = $2
 		FOR UPDATE
@@ -353,12 +681,13 @@ func (r *AnswerJobRepository) CancelAnswerJob(
 			completed_at = CURRENT_TIMESTAMP
 		WHERE id = $1 AND status = 'queued'
 		RETURNING
-			id, owner_user_id, document_id, query, top_k,
+			id, owner_user_id, requested_document_id, query, top_k,
 			requested_response_language, status, attempt_count,
 			error_code, error_message, next_attempt_at,
 			answer_text, resolved_response_language, sources,
 			prompt_tokens, completion_tokens, total_tokens,
-			created_at, updated_at, started_at, completed_at
+			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id
 	`
 	canceled, err := scanAnswerJob(tx.QueryRow(ctx, cancelQuery, job.ID))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -366,6 +695,17 @@ func (r *AnswerJobRepository) CancelAnswerJob(
 	}
 	if err != nil {
 		return answerapplication.Job{}, fmt.Errorf("cancel answer job: %w", err)
+	}
+	if job.AssistantMessageID != nil {
+		if err := updateAssistantMessage(
+			ctx,
+			tx,
+			*job.AssistantMessageID,
+			"回答已取消。",
+			conversationdomain.MessageStatusInterrupted,
+		); err != nil {
+			return answerapplication.Job{}, fmt.Errorf("mark canceled assistant message: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return answerapplication.Job{}, fmt.Errorf("commit answer job cancellation: %w", err)
@@ -422,12 +762,13 @@ func (r *AnswerJobRepository) ClaimNextAnswerJob(
 
 	const selectQuery = `
 		SELECT
-			id, owner_user_id, document_id, query, top_k,
+			id, owner_user_id, requested_document_id, query, top_k,
 			requested_response_language, status, attempt_count,
 			error_code, error_message, next_attempt_at,
 			answer_text, resolved_response_language, sources,
 			prompt_tokens, completion_tokens, total_tokens,
-			created_at, updated_at, started_at, completed_at
+			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id
 		FROM answer_jobs
 		WHERE owner_user_id = $1
 		  AND status = 'queued'
@@ -460,12 +801,13 @@ func (r *AnswerJobRepository) ClaimNextAnswerJob(
 			heartbeat_at = CURRENT_TIMESTAMP
 		WHERE id = $1 AND status = 'queued'
 		RETURNING
-			id, owner_user_id, document_id, query, top_k,
+			id, owner_user_id, requested_document_id, query, top_k,
 			requested_response_language, status, attempt_count,
 			error_code, error_message, next_attempt_at,
 			answer_text, resolved_response_language, sources,
 			prompt_tokens, completion_tokens, total_tokens,
 			created_at, updated_at, started_at, completed_at,
+			conversation_id, user_message_id, assistant_message_id,
 			lease_token
 	`
 	claimed, err := scanClaimedAnswerJob(tx.QueryRow(
@@ -559,9 +901,10 @@ func (r *AnswerJobRepository) GetAnswerJobQueueStats(
 	return stats, nil
 }
 
-// DeleteExpiredAnswerJobs 原子删除一批超过保留期的终态任务。
+// DeleteExpiredStandaloneAnswerJobs 原子删除一批超过保留期的 standalone 终态任务。
+// 会话关联任务随 conversation 生命周期保留，并只通过会话级联删除。
 // SKIP LOCKED 允许未来多个后端副本并行维护，且不会等待正在被其他事务处理的行。
-func (r *AnswerJobRepository) DeleteExpiredAnswerJobs(
+func (r *AnswerJobRepository) DeleteExpiredStandaloneAnswerJobs(
 	ctx context.Context,
 	completedBefore time.Time,
 	limit int,
@@ -574,6 +917,7 @@ func (r *AnswerJobRepository) DeleteExpiredAnswerJobs(
 			SELECT id
 			FROM answer_jobs
 			WHERE status IN ('succeeded', 'failed', 'canceled')
+			  AND conversation_id IS NULL
 			  AND completed_at < $1
 			ORDER BY completed_at ASC, id ASC
 			LIMIT $2
@@ -585,7 +929,7 @@ func (r *AnswerJobRepository) DeleteExpiredAnswerJobs(
 	`
 	result, err := r.pool.Exec(ctx, query, completedBefore, limit)
 	if err != nil {
-		return 0, fmt.Errorf("delete expired answer jobs: %w", err)
+		return 0, fmt.Errorf("delete expired standalone answer jobs: %w", err)
 	}
 	return result.RowsAffected(), nil
 }
@@ -672,6 +1016,70 @@ func (r *AnswerJobRepository) MarkAnswerJobSucceeded(
 		return fmt.Errorf("encode answer job sources: %w", err)
 	}
 
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin answer job success: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var ownerUserID int64
+	var conversationID *int64
+	if err := tx.QueryRow(
+		ctx,
+		`SELECT owner_user_id, conversation_id
+		 FROM answer_jobs
+		 WHERE id = $1
+		   AND status = 'processing'
+		   AND lease_token = $2
+		   AND lease_expires_at > CURRENT_TIMESTAMP`,
+		jobID,
+		leaseToken,
+	).Scan(&ownerUserID, &conversationID); errors.Is(err, pgx.ErrNoRows) {
+		return answerapplication.ErrAnswerJobLeaseLost
+	} else if err != nil {
+		return fmt.Errorf("read answer job scope before success: %w", err)
+	}
+	if conversationID == nil {
+		if err := lockStandaloneAnswerSourceDocuments(ctx, tx, ownerUserID, output.Sources); err != nil {
+			return err
+		}
+	}
+
+	var lockedOwnerUserID int64
+	var lockedConversationID *int64
+	var assistantMessageID *int64
+	if err := tx.QueryRow(
+		ctx,
+		`SELECT owner_user_id, conversation_id, assistant_message_id
+		 FROM answer_jobs
+		 WHERE id = $1
+		   AND status = 'processing'
+		   AND lease_token = $2
+		   AND lease_expires_at > CURRENT_TIMESTAMP
+		 FOR UPDATE`,
+		jobID,
+		leaseToken,
+	).Scan(&lockedOwnerUserID, &lockedConversationID, &assistantMessageID); errors.Is(err, pgx.ErrNoRows) {
+		return answerapplication.ErrAnswerJobLeaseLost
+	} else if err != nil {
+		return fmt.Errorf("lock answer job for success: %w", err)
+	}
+	if lockedOwnerUserID != ownerUserID || (lockedConversationID == nil) != (conversationID == nil) ||
+		(lockedConversationID != nil && *lockedConversationID != *conversationID) {
+		return answerapplication.ErrAnswerJobLeaseLost
+	}
+	if assistantMessageID != nil {
+		if err := updateAssistantMessage(
+			ctx,
+			tx,
+			*assistantMessageID,
+			output.Answer,
+			conversationdomain.MessageStatusCompleted,
+		); err != nil {
+			return fmt.Errorf("complete assistant message: %w", err)
+		}
+	}
+
 	const query = `
 		UPDATE answer_jobs
 		SET
@@ -695,7 +1103,7 @@ func (r *AnswerJobRepository) MarkAnswerJobSucceeded(
 		  AND lease_token = $8
 		  AND lease_expires_at > CURRENT_TIMESTAMP
 	`
-	commandTag, err := r.pool.Exec(
+	commandTag, err := tx.Exec(
 		ctx,
 		query,
 		jobID,
@@ -712,6 +1120,63 @@ func (r *AnswerJobRepository) MarkAnswerJobSucceeded(
 	}
 	if commandTag.RowsAffected() != 1 {
 		return answerapplication.ErrAnswerJobLeaseLost
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit answer job success: %w", err)
+	}
+	return nil
+}
+
+func lockStandaloneAnswerSourceDocuments(
+	ctx context.Context,
+	tx pgx.Tx,
+	ownerUserID int64,
+	sources []answerapplication.Source,
+) error {
+	unique := make(map[int64]struct{}, len(sources))
+	for _, source := range sources {
+		if source.DocumentID <= 0 {
+			return answerapplication.ErrAnswerJobSourceDocumentsUnavailable
+		}
+		unique[source.DocumentID] = struct{}{}
+	}
+	if len(unique) == 0 {
+		return nil
+	}
+	documentIDs := make([]int64, 0, len(unique))
+	for documentID := range unique {
+		documentIDs = append(documentIDs, documentID)
+	}
+	sort.Slice(documentIDs, func(left, right int) bool { return documentIDs[left] < documentIDs[right] })
+	rows, err := tx.Query(
+		ctx,
+		`SELECT id
+		 FROM documents
+		 WHERE owner_user_id = $1
+		   AND id = ANY($2::BIGINT[])
+		 ORDER BY id ASC
+		 FOR KEY SHARE`,
+		ownerUserID,
+		documentIDs,
+	)
+	if err != nil {
+		return fmt.Errorf("lock standalone answer source documents: %w", err)
+	}
+	lockedCount := 0
+	for rows.Next() {
+		var documentID int64
+		if err := rows.Scan(&documentID); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan standalone answer source document: %w", err)
+		}
+		lockedCount++
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate standalone answer source documents: %w", err)
+	}
+	if lockedCount != len(documentIDs) {
+		return answerapplication.ErrAnswerJobSourceDocumentsUnavailable
 	}
 	return nil
 }
@@ -776,6 +1241,41 @@ func (r *AnswerJobRepository) MarkAnswerJobFailed(
 	errorCode answerapplication.JobErrorCode,
 	errorMessage string,
 ) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin answer job failure: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	var assistantMessageID *int64
+	if err := tx.QueryRow(
+		ctx,
+		`SELECT assistant_message_id
+		 FROM answer_jobs
+		 WHERE id = $1
+		   AND status = 'processing'
+		   AND lease_token = $2
+		   AND lease_expires_at > CURRENT_TIMESTAMP
+		 FOR UPDATE`,
+		jobID,
+		leaseToken,
+	).Scan(&assistantMessageID); errors.Is(err, pgx.ErrNoRows) {
+		return answerapplication.ErrAnswerJobLeaseLost
+	} else if err != nil {
+		return fmt.Errorf("lock answer job for failure: %w", err)
+	}
+	if assistantMessageID != nil {
+		if err := updateAssistantMessage(
+			ctx,
+			tx,
+			*assistantMessageID,
+			"暂时无法生成回答，请稍后重试。",
+			conversationdomain.MessageStatusFailed,
+		); err != nil {
+			return fmt.Errorf("fail assistant message: %w", err)
+		}
+	}
+
 	const query = `
 		UPDATE answer_jobs
 		SET
@@ -793,7 +1293,7 @@ func (r *AnswerJobRepository) MarkAnswerJobFailed(
 		  AND lease_token = $4
 		  AND lease_expires_at > CURRENT_TIMESTAMP
 	`
-	commandTag, err := r.pool.Exec(
+	commandTag, err := tx.Exec(
 		ctx,
 		query,
 		jobID,
@@ -806,6 +1306,34 @@ func (r *AnswerJobRepository) MarkAnswerJobFailed(
 	}
 	if commandTag.RowsAffected() != 1 {
 		return answerapplication.ErrAnswerJobLeaseLost
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit answer job failure: %w", err)
+	}
+	return nil
+}
+
+func updateAssistantMessage(
+	ctx context.Context,
+	tx pgx.Tx,
+	messageID int64,
+	content string,
+	status conversationdomain.MessageStatus,
+) error {
+	commandTag, err := tx.Exec(
+		ctx,
+		`UPDATE conversation_messages
+		 SET content = $2, status = $3, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = $1 AND role = 'assistant'`,
+		messageID,
+		content,
+		string(status),
+	)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() != 1 {
+		return fmt.Errorf("assistant message %d not found", messageID)
 	}
 	return nil
 }
@@ -901,6 +1429,9 @@ func scanAnswerJob(row pgx.Row) (answerapplication.Job, error) {
 	var promptTokens *int
 	var completionTokens *int
 	var totalTokens *int
+	var conversationID *int64
+	var userMessageID *int64
+	var assistantMessageID *int64
 
 	err := row.Scan(
 		&job.ID,
@@ -924,6 +1455,9 @@ func scanAnswerJob(row pgx.Row) (answerapplication.Job, error) {
 		&job.UpdatedAt,
 		&job.StartedAt,
 		&job.CompletedAt,
+		&conversationID,
+		&userMessageID,
+		&assistantMessageID,
 	)
 	if err != nil {
 		return answerapplication.Job{}, err
@@ -931,6 +1465,9 @@ func scanAnswerJob(row pgx.Row) (answerapplication.Job, error) {
 
 	job.RequestedResponseLanguage = answerapplication.ResponseLanguage(requestedLanguage)
 	job.Status = answerapplication.JobStatus(status)
+	job.ConversationID = conversationID
+	job.UserMessageID = userMessageID
+	job.AssistantMessageID = assistantMessageID
 	if errorCode != nil {
 		job.ErrorCode = answerapplication.JobErrorCode(*errorCode)
 	}
@@ -975,6 +1512,9 @@ func scanClaimedAnswerJob(row pgx.Row) (answerapplication.Job, error) {
 	var promptTokens *int
 	var completionTokens *int
 	var totalTokens *int
+	var conversationID *int64
+	var userMessageID *int64
+	var assistantMessageID *int64
 
 	err := row.Scan(
 		&job.ID,
@@ -998,6 +1538,9 @@ func scanClaimedAnswerJob(row pgx.Row) (answerapplication.Job, error) {
 		&job.UpdatedAt,
 		&job.StartedAt,
 		&job.CompletedAt,
+		&conversationID,
+		&userMessageID,
+		&assistantMessageID,
 		&job.LeaseToken,
 	)
 	if err != nil {
@@ -1006,6 +1549,9 @@ func scanClaimedAnswerJob(row pgx.Row) (answerapplication.Job, error) {
 
 	job.RequestedResponseLanguage = answerapplication.ResponseLanguage(requestedLanguage)
 	job.Status = answerapplication.JobStatus(status)
+	job.ConversationID = conversationID
+	job.UserMessageID = userMessageID
+	job.AssistantMessageID = assistantMessageID
 	if errorCode != nil {
 		job.ErrorCode = answerapplication.JobErrorCode(*errorCode)
 	}
