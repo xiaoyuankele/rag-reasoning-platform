@@ -18,7 +18,7 @@ import (
 
 const (
 	answerCacheSchemaVersion  = "v1"
-	AnswerPromptVersion       = "v1"
+	AnswerPromptVersion       = "v2"
 	AnswerRetrievalVersion    = "v1"
 	answerCacheWaitPollPeriod = 100 * time.Millisecond
 )
@@ -167,6 +167,12 @@ func (s *CachedService) Answer(
 ) (Output, error) {
 	if !scope.IsValid() {
 		return Output{}, accessdomain.ErrInvalidOwnerScope
+	}
+	// 当前答案缓存键只描述问题、文档范围和语料版本，不包含会话历史。
+	// conversation-linked 任务必须绕过缓存，否则同一问题可能复用另一轮上下文的答案。
+	if input.ConversationID != nil || input.UserMessageID != nil || input.AssistantMessageID != nil {
+		s.observe(ctx, AnswerCacheSkipped, 0, 0, nil)
+		return s.next.Answer(ctx, scope, input)
 	}
 
 	normalizedInput, language, err := normalizeAnswerCacheInput(input)

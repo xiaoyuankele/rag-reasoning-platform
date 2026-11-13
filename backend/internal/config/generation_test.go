@@ -29,7 +29,10 @@ func TestLoadGenerationUsesSafeDefaults(t *testing.T) {
 		generationConfig.MaxConcurrencyPerUser != defaultAnswerMaxConcurrencyPerUser ||
 		generationConfig.MaxWaitersGlobal != defaultAnswerMaxWaitersGlobal ||
 		generationConfig.MaxWaitersPerUser != defaultAnswerMaxWaitersPerUser ||
-		generationConfig.QueueWaitTimeout != defaultAnswerQueueWaitTimeout {
+		generationConfig.QueueWaitTimeout != defaultAnswerQueueWaitTimeout ||
+		generationConfig.AnswerInputTokenBudget != defaultAnswerInputTokenBudget ||
+		generationConfig.ConversationHistoryMaxTurns != defaultConversationHistoryMaxTurns ||
+		generationConfig.ConversationHistoryMaxTokens != defaultConversationHistoryMaxTokens {
 		t.Fatalf("default generation config = %+v", generationConfig)
 	}
 }
@@ -49,6 +52,9 @@ func TestLoadGenerationUsesEnvironment(t *testing.T) {
 	t.Setenv("ANSWER_MAX_WAITERS_GLOBAL", "80")
 	t.Setenv("ANSWER_MAX_WAITERS_PER_USER", "6")
 	t.Setenv("ANSWER_QUEUE_WAIT_TIMEOUT", "5s")
+	t.Setenv("ANSWER_INPUT_TOKEN_BUDGET", "20000")
+	t.Setenv("CONVERSATION_HISTORY_MAX_TURNS", "8")
+	t.Setenv("CONVERSATION_HISTORY_MAX_TOKENS", "4000")
 
 	generationConfig, err := LoadGeneration()
 	if err != nil {
@@ -66,7 +72,10 @@ func TestLoadGenerationUsesEnvironment(t *testing.T) {
 		generationConfig.MaxConcurrencyPerUser != 2 ||
 		generationConfig.MaxWaitersGlobal != 80 ||
 		generationConfig.MaxWaitersPerUser != 6 ||
-		generationConfig.QueueWaitTimeout != 5*time.Second {
+		generationConfig.QueueWaitTimeout != 5*time.Second ||
+		generationConfig.AnswerInputTokenBudget != 20000 ||
+		generationConfig.ConversationHistoryMaxTurns != 8 ||
+		generationConfig.ConversationHistoryMaxTokens != 4000 {
 		t.Fatalf("generation config = %+v, want environment values", generationConfig)
 	}
 }
@@ -104,6 +113,12 @@ func TestLoadGenerationRejectsInvalidValues(t *testing.T) {
 		{name: "per-user answer waiters above maximum", environment: "ANSWER_MAX_WAITERS_PER_USER", value: "101"},
 		{name: "invalid answer wait timeout", environment: "ANSWER_QUEUE_WAIT_TIMEOUT", value: "soon"},
 		{name: "zero answer wait timeout", environment: "ANSWER_QUEUE_WAIT_TIMEOUT", value: "0s"},
+		{name: "zero answer input budget", environment: "ANSWER_INPUT_TOKEN_BUDGET", value: "0"},
+		{name: "answer input budget above maximum", environment: "ANSWER_INPUT_TOKEN_BUDGET", value: "131073"},
+		{name: "zero history turns", environment: "CONVERSATION_HISTORY_MAX_TURNS", value: "0"},
+		{name: "history turns above maximum", environment: "CONVERSATION_HISTORY_MAX_TURNS", value: "21"},
+		{name: "zero history tokens", environment: "CONVERSATION_HISTORY_MAX_TOKENS", value: "0"},
+		{name: "history tokens above maximum", environment: "CONVERSATION_HISTORY_MAX_TOKENS", value: "16001"},
 		{name: "negative temperature", environment: "GENERATION_TEMPERATURE", value: "-0.1", wantedError: ErrInvalidGenerationTemperature},
 		{name: "temperature above two", environment: "GENERATION_TEMPERATURE", value: "2.1", wantedError: ErrInvalidGenerationTemperature},
 	}
@@ -160,6 +175,16 @@ func TestLoadGenerationRejectsPerUserLimitsAboveGlobalLimits(t *testing.T) {
 	}
 }
 
+func TestLoadGenerationRejectsHistoryBudgetWithoutEvidenceReserve(t *testing.T) {
+	clearGenerationEnvironment(t)
+	t.Setenv("ANSWER_INPUT_TOKEN_BUDGET", "4000")
+	t.Setenv("CONVERSATION_HISTORY_MAX_TOKENS", "3000")
+
+	if _, err := LoadGeneration(); !errors.Is(err, ErrInvalidConversationHistoryBudget) {
+		t.Fatalf("LoadGeneration() error = %v, want ErrInvalidConversationHistoryBudget", err)
+	}
+}
+
 func clearGenerationEnvironment(t *testing.T) {
 	t.Helper()
 
@@ -177,6 +202,9 @@ func clearGenerationEnvironment(t *testing.T) {
 		"ANSWER_MAX_WAITERS_GLOBAL",
 		"ANSWER_MAX_WAITERS_PER_USER",
 		"ANSWER_QUEUE_WAIT_TIMEOUT",
+		"ANSWER_INPUT_TOKEN_BUDGET",
+		"CONVERSATION_HISTORY_MAX_TURNS",
+		"CONVERSATION_HISTORY_MAX_TOKENS",
 	} {
 		t.Setenv(name, "")
 	}

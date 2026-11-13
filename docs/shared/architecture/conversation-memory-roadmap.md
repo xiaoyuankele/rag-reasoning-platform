@@ -1,9 +1,11 @@
 # 多轮对话记忆：数据边界与演进路线
 
-> 状态：2026-11-04，M1 会话与消息持久化，以及 M2 第一片助手消息占位、
+> 状态：2026-11-12，M1 会话与消息持久化，以及 M2 第一片助手消息占位、
 > Answer Job、latest、opaque cursor、参数、来源与 Token、会话管理，以及 standalone/linked 终态保留策略；
 > 已分别提交为 `d64170c` 和 `e1977e5`；完整代码门禁、隔离 PostgreSQL 集成、持久开发库迁移、本地 HTTP 冒烟和三轮真实 Generation 已通过。
-> 历史消息尚未进入 Generation Prompt，SSE、摘要、来源快照和记忆召回仍未实现。
+> M3.1 第一片已经把当前 user message 之前的 completed 历史接入 Generation Prompt，并使用 6 轮、
+> 3000 历史 Token 和 16000 总输入 Token 三重边界；单元、静态、隔离 PostgreSQL 与 Fake Generator
+> 纵向门禁已通过，真实远程多轮质量尚未单独验收；SSE、摘要、来源快照和记忆召回仍未实现。
 >
 > 本文描述个人用户 RAG 从“单次带来源问答”演进到“有限、可追溯的多轮对话”的数据模型和并发边界。它不承诺 Agent、长期人格记忆或跨用户共享。
 
@@ -63,21 +65,26 @@ POST /conversations/:id/messages（Cookie → OwnerScope）
   → 返回新消息；相同 ID 与相同正文按幂等重放返回
 ```
 
-M2 第一片通过单独接口创建异步回答，目前仍只使用本轮问题：
+M2 第一片通过单独接口创建异步回答；M3.1 在 Worker 执行时增加受控历史：
 
 ```text
 POST /conversations/:id/answer-jobs（Cookie → OwnerScope）
   → 锁定该用户自己的 conversations 行
   → 在同一事务中写入 user message 与 assistant/generating 占位
   → 创建并关联 Answer Job
-  → Worker 按本轮 query 在同一 OwnerScope 内执行检索和 Generation
+  → Worker 按 user_message_id 冻结 sequence_no 边界
+  → SQL 在同一 OwnerScope 内读取边界之前的 completed 消息
+  → Application 选择最近 6 轮、最多 3000 个估算 Token 的历史
+  → 最近 completed 用户问题与当前追问组成一次最多 1000 Unicode 字符的检索查询
+  → 按 16000 Token 总输入预算组装历史、当前 query 和实时 RAG 证据
+  → Worker 执行检索和 Generation
   → 成功时一次性写入最终答案；失败或 queued 取消时收尾占位消息
   → 前端按已知 Job ID 轮询并刷新消息终态
   → 页面重新进入时按 conversation ID 恢复随会话保留的 latest linked Job
   → queued/processing 继续轮询；终态恢复重试、来源和 Token 快照
 ```
 
-M3 才会在回答前受控读取“最近若干消息 + 已验证摘要 + 当前证据”，并设置上下文 Token 预算。SSE 只负责传输生成中的增量内容；不应把每个 token 写入 PostgreSQL。最终答案、终态和来源快照仍应一次性持久化，取消、超时或进程中断必须明确收尾为 `interrupted` 或 `failed`。
+M3.1 已实现最近消息与当前证据的有界组装；更旧历史的已验证摘要和独立来源快照留在 M3.2。SSE 只负责传输生成中的增量内容；不应把每个 token 写入 PostgreSQL。最终答案、终态和来源快照仍应一次性持久化，取消、超时或进程中断必须明确收尾为 `interrupted` 或 `failed`。
 
 ## 4. 与当前 RAG、重解析和向量化的关系
 
@@ -114,7 +121,8 @@ Redis 仅适合短暂的 SSE 事件中转、连接状态、跨实例限流或全
 | M0 | 单轮有来源问答，无持久会话 | 已提交基线 | 问答 OwnerScope、引用与容量闸门正确 |
 | M1 | `conversations`、`conversation_messages`、创建/读取会话和消息 | 第一片已提交；隔离 PostgreSQL 集成通过 | 两个用户不能读取或猜测彼此会话；重复提交只写一条用户消息 |
 | M2 | 异步 Answer Job、latest 恢复、cursor、参数、结果、会话管理、取消和故障收尾 | 第一片已提交并通过真实 Generation；SSE 待完成 | 消息历史稳定遍历；归档只读；删除级联；来源和 Token 使用 Job 快照 |
-| M3 | 最近历史、摘要、上下文 Token 预算、来源快照 | 未实现 | 长会话成本受控；文档重解析后历史回答仍可解释 |
+| M3.1 | 最近 completed 历史、冻结消息边界、上下文 Token 预算 | 第一片已提交；单元和隔离 PostgreSQL 边界测试通过，真实远程多轮质量待验收 | 指代追问有效；跨用户和未来消息不能进入旧任务；成本受控 |
+| M3.2 | 旧历史摘要、独立来源快照 | 未实现 | 文档重解析后历史回答仍可解释；长对话无需无限携带原文 |
 | M4（按指标） | Redis 跨实例事件和槽位、可选 memory retrieval | 未实现 | 多实例不打乱顺序、不突破 Provider 容量 |
 
 实施前应补充评测集：单轮事实问答、多轮指代/追问、文档更新后的追问、无证据拒答和跨用户越权尝试。只有能用这些样本证明多轮正确率或体验提升，才扩大为 Agent 编排或长期记忆。
@@ -128,6 +136,10 @@ Redis 仅适合短暂的 SSE 事件中转、连接状态、跨实例限流或全
 - retained Job 的 sources 仍缺少文档 revision、证据正文或内容 hash，因此长期保存 Job 不等于 M3 的独立历史证据快照；
 - 相同 `client_message_id` 的并发重放和队列失败清理已经通过真实 PostgreSQL 测试；后续业务重试仍必须创建新 ID；
 - conversation-linked `client_message_id` 幂等凭据保留到会话删除；standalone Job 仍按 TTL 清理，清理后的请求不再具备永久回放语义；
+- M3.1 使用 Provider 无关的保守 Token 估算，并在真实调用后以 `prompt_tokens` 作为观测事实；尚未接入 qwen 专用 tokenizer；
+- 当前答案缓存键不包含会话历史，因此 conversation-linked Job 强制绕过结果缓存；standalone `/answers` 继续使用现有 Cache-Aside；
+- 历史只用于理解指代和意图，Prompt 明确要求事实仍以本轮编号文档证据为准；
+- 上下文化检索不增加第二次 Embedding 调用：它完整保留当前问题，只用剩余字符预算加入最近 completed 用户问题；
 - `ANSWER_JOBS_ENABLED` 默认关闭；本地持久开发库已应用迁移 29～37，并完成单用户顺序执行的真实远程 Generation；其他目标数据库发布前仍需确认迁移版本，k6 混合场景尚未验收。
 
 ## 8. 与现有路线的对齐

@@ -395,6 +395,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 				MaxActiveJobsGlobal:   embeddingConfig.ActiveJobsGlobalLimit,
 			},
 		)
+	}
+	if rolePlan.serveHTTP || rolePlan.runAnswerWorker {
 		conversationRepository = postgres.NewConversationRepository(databasePool)
 	}
 
@@ -800,10 +802,16 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			return err
 		}
 
-		baseAnswerService, err := answerapplication.NewService(
+		baseAnswerService, err := answerapplication.NewServiceWithConversationHistory(
 			semanticSearchService,
 			generator,
 			observability.NewGenerationCallLogger(logger),
+			conversationRepository,
+			answerapplication.ConversationHistoryConfig{
+				MaxTurns:         generationConfig.ConversationHistoryMaxTurns,
+				MaxTokens:        generationConfig.ConversationHistoryMaxTokens,
+				InputTokenBudget: generationConfig.AnswerInputTokenBudget,
+			},
 			generationConfig.ModelName,
 			generationConfig.MaxOutputTokens,
 			generationConfig.Temperature,
@@ -811,6 +819,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("create answer service: %w", err)
 		}
+		logger.Info(
+			"Conversation history configured",
+			"event", "conversation_history_configured",
+			"max_turns", generationConfig.ConversationHistoryMaxTurns,
+			"max_history_tokens", generationConfig.ConversationHistoryMaxTokens,
+			"input_token_budget", generationConfig.AnswerInputTokenBudget,
+		)
 
 		answerAdmissionObserver := observability.NewAnswerAdmissionLogger(logger)
 		var capacityAwareAnswerService answerapplication.Answerer = baseAnswerService

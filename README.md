@@ -2,11 +2,15 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态（2026-11-04）：已提交基线完成 P0～P5、P6 后端 B1～B7 与密码重置，个人用户前端也已接入
+> 当前状态（2026-11-12）：已提交基线完成 P0～P5、P6 后端 B1～B7 与密码重置，个人用户前端也已接入
 > Session 恢复、登录/注册/退出、受保护路由以及文档、检索、向量化和单轮问答入口。M1 会话与消息持久化、
 > M2 异步 Answer Job、latest 恢复、游标分页、参数、来源与 Token、会话管理和终态保留策略已分别提交为
 > `d64170c` 与 `e1977e5`，并通过完整代码门禁、隔离 PostgreSQL、持久迁移、本地 HTTP 冒烟和三轮真实
-> `qwen3.6-flash` Generation 验收。历史消息还没有进入 Generation Prompt，SSE、来源快照、摘要和上下文 Token 预算仍未实现；
+> `qwen3.6-flash` Generation 验收。M3.1 第一片已经让 conversation-linked 回答按冻结消息边界读取
+> 最近 6 轮、最多 3000 个估算 Token 的 completed 历史；最近用户问题还会与当前追问组成一次有界语义检索，
+> 最终在 16000 Token 总输入预算内与当前 RAG 证据组装 Prompt。该片已通过单元、静态、隔离 PostgreSQL 与
+> Fake Generator 纵向门禁，真实远程多轮质量仍待单独验收；
+> SSE、来源快照和旧历史摘要仍未实现；
 > 异步问答默认由 `ANSWER_JOBS_ENABLED=false` 关闭。团队工作区和
 > 成员权限留到 P7，混合检索、DOCX、OCR、复杂学术版面及表格公式质量继续作为后续增量能力。
 
@@ -155,6 +159,7 @@ rag_reasoning_platform_individual/
 | P5 | 已完成（个人版基线） | 稳定运行路径、可观测性、容器部署、配套备份恢复、任务恢复、默认回归、一次性数据库集成及发布候选分级验收均已完成；不包含用户与租户系统 |
 | P6 | 后端已完成；前端认证闭环已接入 | 身份闭环、忘记/重置密码、全链路用户隔离、本地 Mailpit 注册、46 篇历史文档事务化认领和 `owner_user_id NOT NULL` 已完成；前端已接入 Session 恢复、认证页面和受保护应用外壳，完整个人用户产品验收继续推进 |
 | 会话 M1/M2 | 第一片已提交并完成真实 Generation 验收 | M1 持久化、M2 异步回答、latest、opaque cursor、参数、来源/Token、会话管理和 standalone/linked 保留边界已通过代码门禁、隔离 PostgreSQL、迁移 29～37、本地 HTTP 冒烟及三轮真实 Generation；真实多轮上下文、SSE、独立历史证据快照与 Token 预算未实现 |
+| 会话 M3.1 | 第一片已提交；真实远程多轮质量待验收 | 按 OwnerScope 和当前 user message 冻结历史边界，选择最近 6 轮/最多 3000 个估算 Token，使用最近用户问题补足追问检索语义，并以 16000 Token 总预算裁剪低排名证据；答案缓存对会话任务强制绕过，摘要、来源快照和真实多轮质量验收仍待完成 |
 | P7 | 未开始 | 团队工作区、成员权限、共享、租户配额和审计尚未设计或实现 |
 
 前端认证闭环和受保护工作台已经接入；文档、向量化、关键词/语义检索、单轮问答和会话页面均已有代码与自动化门禁。
@@ -502,6 +507,9 @@ Go 后端当前支持以下环境变量：
 | `ANSWER_MAX_WAITERS_GLOBAL` | `500` | 单个后端进程允许同步等待问答槽位的全局请求上限 |
 | `ANSWER_MAX_WAITERS_PER_USER` | `5` | 同一用户允许同步等待问答槽位的请求上限；超出返回 `429` |
 | `ANSWER_QUEUE_WAIT_TIMEOUT` | `5s` | 问答请求等待执行槽位的最长时间；超时返回可重试的 `503 answer_capacity_exhausted` |
+| `ANSWER_INPUT_TOKEN_BUDGET` | `16000` | 系统规则、会话历史、当前问题和 RAG 证据的应用级估算输入上限 |
+| `CONVERSATION_HISTORY_MAX_TURNS` | `6` | conversation-linked 回答最多读取的最近用户轮次数；user-only 消息也计一轮 |
+| `CONVERSATION_HISTORY_MAX_TOKENS` | `3000` | 会话历史标题、角色标签和正文合计的保守估算 Token 上限 |
 | `ANSWER_JOBS_ENABLED` | `false` | 是否注册并运行持久化异步问答；要求 `ANSWER_ENABLED=true`，默认关闭以避免远程费用 |
 | `ANSWER_JOB_WORKER_CONCURRENCY` | `10` | 异步任务 Worker 数；仍经过共享问答闸门，因此同步与异步实际执行总数不会超过 `ANSWER_MAX_CONCURRENCY` |
 | `ANSWER_JOB_POLL_INTERVAL` | `1s` | 异步问答队列为空或单轮出错后的轮询间隔 |

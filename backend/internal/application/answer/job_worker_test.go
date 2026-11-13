@@ -109,9 +109,15 @@ func (o *recordingAnswerJobObserver) ObserveAnswerJobEvent(
 }
 
 func TestAnswerJobWorkerSucceedsWithExistingAnswerService(t *testing.T) {
+	conversationID := int64(7)
+	userMessageID := int64(8)
+	assistantMessageID := int64(9)
 	repository := &fakeAnswerJobWorkerRepository{job: Job{
 		ID:                        11,
 		OwnerUserID:               42,
+		ConversationID:            &conversationID,
+		UserMessageID:             &userMessageID,
+		AssistantMessageID:        &assistantMessageID,
 		Query:                     "question",
 		TopK:                      5,
 		RequestedResponseLanguage: ResponseLanguageAuto,
@@ -129,7 +135,10 @@ func TestAnswerJobWorkerSucceedsWithExistingAnswerService(t *testing.T) {
 		scope accessdomain.OwnerScope,
 		input Input,
 	) (Output, error) {
-		if scope.OwnerUserID() != 42 || input.Query != "question" || input.TopK != 5 {
+		if scope.OwnerUserID() != 42 || input.Query != "question" || input.TopK != 5 ||
+			input.ConversationID == nil || *input.ConversationID != conversationID ||
+			input.UserMessageID == nil || *input.UserMessageID != userMessageID ||
+			input.AssistantMessageID == nil || *input.AssistantMessageID != assistantMessageID {
 			t.Fatalf("Answer() scope/input = %+v, %+v", scope, input)
 		}
 		return wantedOutput, nil

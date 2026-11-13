@@ -514,6 +514,99 @@ func (r *ConversationRepository) ListMessagesCursor(
 	return conversationdomain.MessageCursorResult{Messages: messagesDescending, HasMore: hasMore}, nil
 }
 
+// ListCompletedMessagesBefore 返回当前用户消息之前的最近 completed 历史，
+// 并恢复为从旧到新的 Prompt 顺序。current user message 同时充当不可变边界：
+// Worker 即使延迟执行，也不会读到该消息之后的新 turn。
+func (r *ConversationRepository) ListCompletedMessagesBefore(
+	ctx context.Context,
+	scope accessdomain.OwnerScope,
+	conversationID int64,
+	userMessageID int64,
+	limit int,
+) ([]conversationdomain.Message, error) {
+	if !scope.IsValid() {
+		return nil, accessdomain.ErrInvalidOwnerScope
+	}
+	if conversationID <= 0 || userMessageID <= 0 || limit <= 0 {
+		return nil, conversationdomain.ErrNotFound
+	}
+
+	const query = `
+		WITH boundary AS (
+			SELECT current_message.sequence_no
+			FROM conversations AS conversation
+			JOIN conversation_messages AS current_message
+			  ON current_message.id = $3
+			 AND current_message.conversation_id = conversation.id
+			 AND current_message.role = 'user'
+			WHERE conversation.id = $1
+			  AND conversation.owner_user_id = $2
+		)
+		SELECT message.id, message.conversation_id, message.sequence_no,
+		       message.role, message.content, message.status,
+		       message.client_message_id, message.created_at, message.updated_at
+		FROM conversation_messages AS message
+		CROSS JOIN boundary
+		WHERE message.conversation_id = $1
+		  AND message.sequence_no < boundary.sequence_no
+		  AND message.status = 'completed'
+		ORDER BY message.sequence_no DESC, message.id DESC
+		LIMIT $4
+	`
+	rows, err := r.pool.Query(
+		ctx,
+		query,
+		conversationID,
+		scope.OwnerUserID(),
+		userMessageID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query completed conversation history: %w", err)
+	}
+	defer rows.Close()
+
+	messages := make([]conversationdomain.Message, 0, limit)
+	for rows.Next() {
+		message, scanErr := scanConversationMessage(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan completed conversation history: %w", scanErr)
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate completed conversation history: %w", err)
+	}
+	if len(messages) == 0 {
+		var boundaryExists bool
+		if err := r.pool.QueryRow(
+			ctx,
+			`SELECT EXISTS (
+				SELECT 1
+				FROM conversations AS conversation
+				JOIN conversation_messages AS current_message
+				  ON current_message.id = $3
+				 AND current_message.conversation_id = conversation.id
+				 AND current_message.role = 'user'
+				WHERE conversation.id = $1 AND conversation.owner_user_id = $2
+			)`,
+			conversationID,
+			scope.OwnerUserID(),
+			userMessageID,
+		).Scan(&boundaryExists); err != nil {
+			return nil, fmt.Errorf("check conversation history boundary: %w", err)
+		}
+		if !boundaryExists {
+			return nil, conversationdomain.ErrNotFound
+		}
+	}
+
+	for left, right := 0, len(messages)-1; left < right; left, right = left+1, right-1 {
+		messages[left], messages[right] = messages[right], messages[left]
+	}
+	return messages, nil
+}
+
 func (r *ConversationRepository) AppendUserMessage(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,

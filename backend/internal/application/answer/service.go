@@ -86,6 +86,8 @@ type Service struct {
 	searcher        semanticSearcher
 	generator       generationdomain.Generator
 	events          GenerationEventObserver
+	historyReader   ConversationHistoryReader
+	historyConfig   ConversationHistoryConfig
 	modelName       string
 	maxOutputTokens int
 	temperature     float64
@@ -96,6 +98,55 @@ func NewService(
 	searcher semanticSearcher,
 	generator generationdomain.Generator,
 	events GenerationEventObserver,
+	modelName string,
+	maxOutputTokens int,
+	temperature float64,
+) (*Service, error) {
+	return newService(
+		searcher,
+		generator,
+		events,
+		nil,
+		ConversationHistoryConfig{InputTokenBudget: defaultAnswerInputTokenBudget},
+		modelName,
+		maxOutputTokens,
+		temperature,
+	)
+}
+
+// NewServiceWithConversationHistory 创建可以为 conversation-linked Answer Job
+// 读取有界历史的问答服务。普通 /answers 不携带会话标识，仍保持单轮语义。
+func NewServiceWithConversationHistory(
+	searcher semanticSearcher,
+	generator generationdomain.Generator,
+	events GenerationEventObserver,
+	historyReader ConversationHistoryReader,
+	historyConfig ConversationHistoryConfig,
+	modelName string,
+	maxOutputTokens int,
+	temperature float64,
+) (*Service, error) {
+	if historyReader == nil || !historyConfig.IsValid() {
+		return nil, ErrAnswerConfiguration
+	}
+	return newService(
+		searcher,
+		generator,
+		events,
+		historyReader,
+		historyConfig,
+		modelName,
+		maxOutputTokens,
+		temperature,
+	)
+}
+
+func newService(
+	searcher semanticSearcher,
+	generator generationdomain.Generator,
+	events GenerationEventObserver,
+	historyReader ConversationHistoryReader,
+	historyConfig ConversationHistoryConfig,
 	modelName string,
 	maxOutputTokens int,
 	temperature float64,
@@ -114,6 +165,8 @@ func NewService(
 		searcher:        searcher,
 		generator:       generator,
 		events:          events,
+		historyReader:   historyReader,
+		historyConfig:   historyConfig,
 		modelName:       modelName,
 		maxOutputTokens: maxOutputTokens,
 		temperature:     temperature,
@@ -141,12 +194,28 @@ func (s *Service) Answer(
 		input.TopK <= embeddingapplication.MaxSemanticSearchTopK {
 		candidateTopK = embeddingapplication.MaxSemanticSearchTopK
 	}
+	validatedCurrentQuery, err := embeddingapplication.ValidateSemanticSearchInput(
+		embeddingapplication.SemanticSearchInput{
+			Query:      input.Query,
+			DocumentID: input.DocumentID,
+			TopK:       candidateTopK,
+		},
+	)
+	if err != nil {
+		return Output{}, err
+	}
+
+	history, err := s.loadConversationHistory(ctx, scope, input, responseLanguage)
+	if err != nil {
+		return Output{}, fmt.Errorf("load conversation history: %w", err)
+	}
+	retrievalQuery := buildContextualSearchQuery(validatedCurrentQuery, history.Messages)
 
 	searchResult, err := s.searcher.Search(
 		ctx,
 		scope,
 		embeddingapplication.SemanticSearchInput{
-			Query:      input.Query,
+			Query:      retrievalQuery,
 			DocumentID: input.DocumentID,
 			TopK:       candidateTopK,
 		},
@@ -161,8 +230,8 @@ func (s *Service) Answer(
 		input.TopK,
 		input.DocumentID == nil,
 	)
+	candidateEvidenceCount := len(selectedHits)
 
-	sources := newSources(selectedHits)
 	if len(selectedHits) == 0 {
 		s.events.ObserveGenerationEvent(ctx, GenerationEvent{
 			Type:             GenerationEventSkipped,
@@ -175,28 +244,38 @@ func (s *Service) Answer(
 		})
 
 		return Output{
-			Query:            searchResult.Query,
+			Query:            validatedCurrentQuery,
 			Answer:           insufficientEvidenceAnswer(responseLanguage),
 			ResponseLanguage: responseLanguage,
-			Sources:          sources,
+			Sources:          make([]Source, 0),
 		}, nil
 	}
 
-	userPrompt, err := buildUserPrompt(
-		searchResult.Query,
+	userPrompt, selectedHits, estimatedInputTokens, err := buildBudgetedUserPrompt(
+		validatedCurrentQuery,
+		history.Messages,
 		selectedHits,
 		responseLanguage,
+		s.historyConfig.InputTokenBudget,
 	)
 	if err != nil {
 		return Output{}, fmt.Errorf("build answer prompt: %w", err)
 	}
+	sources := newSources(selectedHits)
 
 	baseEvent := GenerationEvent{
-		ModelName:        s.modelName,
-		ResponseLanguage: responseLanguage,
-		DocumentID:       input.DocumentID,
-		RequestedTopK:    input.TopK,
-		EvidenceCount:    len(selectedHits),
+		ModelName:               s.modelName,
+		ResponseLanguage:        responseLanguage,
+		DocumentID:              input.DocumentID,
+		RequestedTopK:           input.TopK,
+		CandidateEvidenceCount:  candidateEvidenceCount,
+		EvidenceCount:           len(selectedHits),
+		EvidenceBudgetTruncated: len(selectedHits) < candidateEvidenceCount,
+		HistoryMessageCount:     len(history.Messages),
+		HistoryTurnCount:        history.TurnCount,
+		HistoryEstimatedTokens:  history.EstimatedTokens,
+		HistoryTruncated:        history.Truncated,
+		EstimatedInputTokens:    estimatedInputTokens,
 	}
 	s.events.ObserveGenerationEvent(ctx, withGenerationEventType(
 		baseEvent,
@@ -207,11 +286,14 @@ func (s *Service) Answer(
 	generated, err := s.generator.Generate(
 		ctx,
 		generationdomain.GenerateRequest{
-			SystemInstruction: buildSystemInstruction(responseLanguage),
-			UserPrompt:        userPrompt,
-			Model:             s.modelName,
-			MaxOutputTokens:   s.maxOutputTokens,
-			Temperature:       s.temperature,
+			SystemInstruction: buildSystemInstructionWithHistory(
+				responseLanguage,
+				len(history.Messages) > 0,
+			),
+			UserPrompt:      userPrompt,
+			Model:           s.modelName,
+			MaxOutputTokens: s.maxOutputTokens,
+			Temperature:     s.temperature,
 		},
 	)
 	providerDuration := time.Since(providerStartedAt)
@@ -233,7 +315,7 @@ func (s *Service) Answer(
 	s.events.ObserveGenerationEvent(ctx, succeededEvent)
 
 	return Output{
-		Query:            searchResult.Query,
+		Query:            validatedCurrentQuery,
 		Answer:           generated.Text,
 		ResponseLanguage: responseLanguage,
 		Sources:          sources,

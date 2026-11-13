@@ -105,6 +105,120 @@ func TestConversationRepositoryScopesMessagesAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestConversationRepositoryListsCompletedHistoryBeforeFrozenUserMessage(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	ownerA := insertScopedRepositoryUser(t, ctx, pool, fmt.Sprintf("history-a-%d@example.com", time.Now().UnixNano()))
+	ownerB := insertScopedRepositoryUser(t, ctx, pool, fmt.Sprintf("history-b-%d@example.com", time.Now().UnixNano()))
+	t.Cleanup(func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupContext, "DELETE FROM users WHERE id IN ($1, $2)", ownerA, ownerB)
+	})
+	scopeA, _ := accessdomain.NewOwnerScope(ownerA)
+	scopeB, _ := accessdomain.NewOwnerScope(ownerB)
+	repository := postgresrepository.NewConversationRepository(pool)
+	created, err := repository.CreateConversation(ctx, scopeA, conversationdomain.CreateInput{Title: "history boundary"})
+	if err != nil {
+		t.Fatalf("create conversation: %v", err)
+	}
+	if _, err := repository.AppendUserMessage(ctx, scopeA, conversationdomain.AppendUserMessageInput{
+		ConversationID: created.ID,
+		Content:        "standalone note",
+	}); err != nil {
+		t.Fatalf("append standalone note: %v", err)
+	}
+	previous, err := repository.StartTurn(ctx, scopeA, conversationdomain.StartTurnInput{
+		ConversationID: created.ID,
+		Content:        "previous question",
+	})
+	if err != nil {
+		t.Fatalf("start previous turn: %v", err)
+	}
+	if _, err := repository.UpdateAssistantMessage(ctx, scopeA, conversationdomain.UpdateAssistantMessageInput{
+		ConversationID: created.ID,
+		MessageID:      previous.AssistantMessage.ID,
+		Content:        "previous answer",
+		Status:         conversationdomain.MessageStatusCompleted,
+	}); err != nil {
+		t.Fatalf("complete previous assistant: %v", err)
+	}
+	failed, err := repository.StartTurn(ctx, scopeA, conversationdomain.StartTurnInput{
+		ConversationID: created.ID,
+		Content:        "question with failed answer",
+	})
+	if err != nil {
+		t.Fatalf("start failed turn: %v", err)
+	}
+	if _, err := repository.UpdateAssistantMessage(ctx, scopeA, conversationdomain.UpdateAssistantMessageInput{
+		ConversationID: created.ID,
+		MessageID:      failed.AssistantMessage.ID,
+		Content:        "failed answer",
+		Status:         conversationdomain.MessageStatusFailed,
+	}); err != nil {
+		t.Fatalf("fail assistant: %v", err)
+	}
+	current, err := repository.StartTurn(ctx, scopeA, conversationdomain.StartTurnInput{
+		ConversationID: created.ID,
+		Content:        "current question",
+	})
+	if err != nil {
+		t.Fatalf("start current turn: %v", err)
+	}
+
+	history, err := repository.ListCompletedMessagesBefore(
+		ctx,
+		scopeA,
+		created.ID,
+		current.UserMessage.ID,
+		20,
+	)
+	if err != nil {
+		t.Fatalf("list completed history: %v", err)
+	}
+	wantedContents := []string{
+		"standalone note",
+		"previous question",
+		"previous answer",
+		"question with failed answer",
+	}
+	if len(history) != len(wantedContents) {
+		t.Fatalf("history = %+v, want %d completed messages", history, len(wantedContents))
+	}
+	for index, wanted := range wantedContents {
+		if history[index].Content != wanted || history[index].SequenceNo >= current.UserMessage.SequenceNo {
+			t.Fatalf("history[%d] = %+v, want content %q before current boundary", index, history[index], wanted)
+		}
+	}
+
+	limited, err := repository.ListCompletedMessagesBefore(
+		ctx,
+		scopeA,
+		created.ID,
+		current.UserMessage.ID,
+		2,
+	)
+	if err != nil || len(limited) != 2 ||
+		limited[0].Content != "previous answer" ||
+		limited[1].Content != "question with failed answer" {
+		t.Fatalf("limited history = %+v, %v", limited, err)
+	}
+	if _, err := repository.ListCompletedMessagesBefore(
+		ctx,
+		scopeB,
+		created.ID,
+		current.UserMessage.ID,
+		20,
+	); !errors.Is(err, conversationdomain.ErrNotFound) {
+		t.Fatalf("cross-owner history error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestConversationRepositoryRejectsConflictingClientMessageID(t *testing.T) {
 	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
 		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")

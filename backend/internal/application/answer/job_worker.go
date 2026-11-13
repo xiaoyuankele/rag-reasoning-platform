@@ -8,6 +8,7 @@ import (
 
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
+	conversationdomain "rag-reasoning-platform/backend/internal/domain/conversation"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 	generationdomain "rag-reasoning-platform/backend/internal/domain/generation"
@@ -310,10 +311,13 @@ func (w *JobWorker) RunOnce(ctx context.Context) (handled bool, err error) {
 		processingContext,
 		scope,
 		Input{
-			Query:            job.Query,
-			DocumentID:       job.DocumentID,
-			TopK:             job.TopK,
-			ResponseLanguage: job.RequestedResponseLanguage,
+			Query:              job.Query,
+			DocumentID:         job.DocumentID,
+			TopK:               job.TopK,
+			ResponseLanguage:   job.RequestedResponseLanguage,
+			ConversationID:     job.ConversationID,
+			UserMessageID:      job.UserMessageID,
+			AssistantMessageID: job.AssistantMessageID,
 		},
 	)
 	cancel()
@@ -457,7 +461,11 @@ func isPermanentAnswerJobError(err error) bool {
 		errors.Is(err, embeddingapplication.ErrInvalidDocumentID) ||
 		errors.Is(err, embeddingapplication.ErrDocumentEmbeddingsNotReady) ||
 		errors.Is(err, ErrInvalidResponseLanguage) ||
+		errors.Is(err, ErrConversationHistoryUnavailable) ||
+		errors.Is(err, ErrInvalidConversationHistoryInput) ||
+		errors.Is(err, ErrAnswerInputTokenBudgetExceeded) ||
 		errors.Is(err, ErrAnswerJobSourceDocumentsUnavailable) ||
+		errors.Is(err, conversationdomain.ErrNotFound) ||
 		errors.Is(err, documentdomain.ErrNotFound) ||
 		errors.Is(err, embeddingdomain.ErrEmbeddingAuthentication) ||
 		errors.Is(err, embeddingdomain.ErrEmbeddingQuotaExceeded) ||
@@ -493,7 +501,11 @@ func classifyAnswerJobError(err error) JobErrorCategory {
 		errors.Is(err, embeddingapplication.ErrSemanticSearchQueryTooLong),
 		errors.Is(err, embeddingapplication.ErrInvalidSemanticSearchTopK),
 		errors.Is(err, embeddingapplication.ErrInvalidDocumentID),
-		errors.Is(err, ErrInvalidResponseLanguage):
+		errors.Is(err, ErrInvalidResponseLanguage),
+		errors.Is(err, ErrConversationHistoryUnavailable),
+		errors.Is(err, ErrInvalidConversationHistoryInput),
+		errors.Is(err, ErrAnswerInputTokenBudgetExceeded),
+		errors.Is(err, conversationdomain.ErrNotFound):
 		return JobErrorCategoryInvalidInput
 	case errors.Is(err, embeddingdomain.ErrEmbeddingAuthentication):
 		return JobErrorCategoryEmbeddingAuthentication

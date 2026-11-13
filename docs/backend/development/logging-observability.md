@@ -363,6 +363,16 @@ standalone 异步问答保留期清理成功删除一批数据时输出 `standal
 不反复写空日志；数据库清理失败由 WorkerLoop 输出 `standalone_answer_job_retention_error`。这些事件不能解释为
 会话历史被删除；conversation-linked Job 随会话保留。日志禁止记录问题、答案、来源和 Owner ID。
 
+M3.1 的 `answer_generation_*` 事件增加安全上下文预算字段：
+
+- `history_message_count`、`history_turn_count`：本轮实际进入 Prompt 的历史规模；
+- `history_estimated_tokens`、`history_truncated`：Provider 无关估算值和是否因预算裁剪；
+- `candidate_evidence_count`、`evidence_count`、`evidence_budget_truncated`：预算裁剪前后的证据数量；
+- `estimated_input_tokens`：系统规则、历史、当前问题和最终证据的应用侧估算总量。
+
+这些字段只记录数量和预算，不记录历史正文、问题、Prompt、答案或 Owner。真实 Provider 返回的
+`prompt_tokens` 仍是成本与后续校准的最终事实。
+
 完整冻结条件、PowerShell 命令、字段口径和金额换算方法见
 [模型调用成本基线](../performance/model-call-cost-baseline.md)。真实付费批次必须单独获得授权。
 

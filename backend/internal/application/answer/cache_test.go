@@ -226,6 +226,35 @@ func TestCachedServiceDoesNotCacheInsufficientEvidence(t *testing.T) {
 	}
 }
 
+func TestCachedServiceBypassesConversationLinkedAnswers(t *testing.T) {
+	next := &countingAnswerer{output: cacheableAnswerOutput()}
+	cache := newFakeAnswerCacheStore()
+	service := newCachedAnswerServiceForTest(
+		t,
+		next,
+		&mutableCorpusRevisionReader{revision: 1},
+		cache,
+	)
+	conversationID := int64(7)
+	userMessageID := int64(8)
+	input := Input{
+		Query:          "follow-up question",
+		TopK:           5,
+		ConversationID: &conversationID,
+		UserMessageID:  &userMessageID,
+	}
+
+	if _, err := service.Answer(t.Context(), testAnswerOwnerScope(t), input); err != nil {
+		t.Fatalf("first Answer() error = %v", err)
+	}
+	if _, err := service.Answer(t.Context(), testAnswerOwnerScope(t), input); err != nil {
+		t.Fatalf("second Answer() error = %v", err)
+	}
+	if next.calls.Load() != 2 || cache.setCalls != 0 {
+		t.Fatalf("downstream/cache calls = %d/%d, want 2/0", next.calls.Load(), cache.setCalls)
+	}
+}
+
 func TestCachedServiceCacheOrRevisionFailureFallsBack(t *testing.T) {
 	testCases := []struct {
 		name        string
