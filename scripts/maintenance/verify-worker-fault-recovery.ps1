@@ -49,6 +49,28 @@ function Get-NativeText {
     return (($output | ForEach-Object { [string]$_ }) -join "`n").Trim()
 }
 
+function Get-LatestMigrationVersion {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot
+    )
+
+    $migrationDirectory = Join-Path $ProjectRoot "backend\migrations"
+    $versions = @(
+        Get-ChildItem -LiteralPath $migrationDirectory -File -Filter "*.up.sql" |
+            ForEach-Object {
+                if ($_.Name -notmatch '^(\d+)_.*\.up\.sql$') {
+                    throw "unexpected migration filename: $($_.Name)"
+                }
+                [int]$Matches[1]
+            }
+    )
+    if ($versions.Count -eq 0) {
+        throw "no up migrations were found"
+    }
+    return [int](($versions | Measure-Object -Maximum).Maximum)
+}
+
 function Invoke-BestEffortDockerCleanup {
     param(
         [Parameter(Mandatory)]
@@ -443,6 +465,7 @@ function Assert-ReplacementDidNotStealEarly {
 
 $scriptDirectory = Split-Path -Parent $PSCommandPath
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDirectory "..\.."))
+$expectedSchemaVersion = Get-LatestMigrationVersion -ProjectRoot $projectRoot
 $originalLocation = Get-Location
 $script:RunMarker = [Guid]::NewGuid().ToString("N").Substring(0, 10)
 $script:TestDatabase = "rag_fault_$($script:RunMarker)"
@@ -536,7 +559,10 @@ try {
     $databaseCreated = $true
 
     $migrationWorker = Start-TestWorker -Role "document-worker" -WorkerID "migration"
-    Wait-TestDatabaseValue -SQL "SELECT MAX(version)::TEXT FROM schema_migrations;" -ExpectedValue "28" -Description "wait for schema 28"
+    Wait-TestDatabaseValue `
+        -SQL "SELECT MAX(version)::TEXT FROM schema_migrations;" `
+        -ExpectedValue ([string]$expectedSchemaVersion) `
+        -Description "wait for schema $expectedSchemaVersion"
     Stop-WorkerGracefully -ContainerName $migrationWorker
     [void](Invoke-BestEffortDockerCleanup -ArgumentList @("rm", "--force", $migrationWorker))
 
@@ -707,7 +733,7 @@ FOR EACH ROW EXECUTE FUNCTION capture_fault_lease();
         worktree_dirty = -not [string]::IsNullOrWhiteSpace($worktreeStatus)
         verification_script_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
         fake_provider_script_sha256 = (Get-FileHash -LiteralPath $providerScriptPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        schema_version = 28
+        schema_version = $expectedSchemaVersion
         lease_duration_seconds = $LeaseDurationSeconds
         remote_provider_calls = 0
         local_fake_provider = [ordered]@{

@@ -49,6 +49,28 @@ function Get-NativeText {
     return (($output | ForEach-Object { [string]$_ }) -join "`n").Trim()
 }
 
+function Get-LatestMigrationVersion {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProjectRoot
+    )
+
+    $migrationDirectory = Join-Path $ProjectRoot "backend\migrations"
+    $versions = @(
+        Get-ChildItem -LiteralPath $migrationDirectory -File -Filter "*.up.sql" |
+            ForEach-Object {
+                if ($_.Name -notmatch '^(\d+)_.*\.up\.sql$') {
+                    throw "unexpected migration filename: $($_.Name)"
+                }
+                [int]$Matches[1]
+            }
+    )
+    if ($versions.Count -eq 0) {
+        throw "no up migrations were found"
+    }
+    return [int](($versions | Measure-Object -Maximum).Maximum)
+}
+
 function Invoke-BestEffortCleanup {
     param(
         [Parameter(Mandatory)]
@@ -197,6 +219,7 @@ function Stop-WorkerGracefully {
 
 $scriptDirectory = Split-Path -Parent $PSCommandPath
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDirectory "..\.."))
+$expectedSchemaVersion = Get-LatestMigrationVersion -ProjectRoot $projectRoot
 $originalLocation = Get-Location
 $runMarker = [Guid]::NewGuid().ToString("N").Substring(0, 10)
 $testDatabase = "rag_role_$runMarker"
@@ -257,7 +280,7 @@ try {
     $databaseCreated = $true
 
     # Start one document worker first as the single migration runner. Other
-    # processes join only after schema version 28 is ready.
+    # processes join only after all migrations in this checkout are ready.
     $firstWorker = Start-IsolatedWorker -Role "document-worker" -Replica 1 -DatabaseName $testDatabase -RunMarker $runMarker
     [void]$containers.Add($firstWorker)
 
@@ -280,8 +303,8 @@ try {
             "--command", "SELECT MAX(version) FROM schema_migrations;"
         ) `
         -Description "read isolated schema version"
-    if ($schemaVersion -ne "28") {
-        throw "isolated schema version is $schemaVersion, want 28"
+    if ($schemaVersion -ne [string]$expectedSchemaVersion) {
+        throw "isolated schema version is $schemaVersion, want $expectedSchemaVersion"
     }
 
     foreach ($container in $containers) {
