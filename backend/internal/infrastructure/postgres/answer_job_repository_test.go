@@ -532,6 +532,45 @@ func TestAnswerJobRepositoryFinalizesLinkedConversationAssistant(t *testing.T) {
 	}
 }
 
+func TestAnswerJobRepositoryRejectsConversationWithActiveAgentRun(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	owner := answerJobTestOwnerScope(t, ctx, pool, "answer-active-agent")
+	conversationRepository := postgresrepository.NewConversationRepository(pool)
+	agentRepository := newAgentTestRepository(pool, "agent-worker-answer-guard")
+	answerRepository := postgresrepository.NewAnswerJobRepository(
+		pool,
+		answerapplication.JobAdmissionLimits{MaxQueuedJobsPerOwner: 5, MaxQueuedJobsGlobal: 20},
+		answerapplication.JobSchedulingPolicy{
+			MaxInFlightPerOwner: 1, MaxBorrowedInFlightPerOwner: 1, StarvationThreshold: time.Second,
+		},
+	)
+	conversation := createAgentTestConversation(t, ctx, pool, owner, "active agent guard")
+	queueAgentTestRun(t, ctx, agentRepository, owner, conversation.ID, "answer-guard-agent")
+	turn, err := conversationRepository.StartTurn(ctx, owner, conversationdomain.StartTurnInput{
+		ConversationID: conversation.ID,
+		Content:        "answer must wait",
+	})
+	if err != nil {
+		t.Fatalf("start answer turn behind active agent: %v", err)
+	}
+	conversationID := conversation.ID
+	userMessageID := turn.UserMessage.ID
+	assistantMessageID := turn.AssistantMessage.ID
+	_, err = answerRepository.CreateAnswerJob(ctx, owner, answerapplication.Input{
+		Query: "answer must wait", TopK: 5, ResponseLanguage: answerapplication.ResponseLanguageEnglish,
+		ConversationID: &conversationID, UserMessageID: &userMessageID, AssistantMessageID: &assistantMessageID,
+	})
+	if !errors.Is(err, answerapplication.ErrConversationAnswerActive) {
+		t.Fatalf("answer creation behind active agent error = %v", err)
+	}
+}
+
 func TestAnswerJobRetentionPreservesConversationHistory(t *testing.T) {
 	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
 		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")

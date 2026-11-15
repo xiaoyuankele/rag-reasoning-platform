@@ -193,6 +193,23 @@ func (r *AnswerJobRepository) CreateAnswerJob(
 			return answerapplication.Job{}, fmt.Errorf("find answer job before creation: %w", existingErr)
 		}
 
+		var activeAgentRunExists bool
+		if err := tx.QueryRow(
+			ctx,
+			`SELECT EXISTS (
+				SELECT 1
+				FROM agent_runs
+				WHERE conversation_id = $1
+				  AND status IN ('queued', 'processing')
+			)`,
+			linkedConversationID,
+		).Scan(&activeAgentRunExists); err != nil {
+			return answerapplication.Job{}, fmt.Errorf("check active agent run before answer job creation: %w", err)
+		}
+		if activeAgentRunExists {
+			return answerapplication.Job{}, answerapplication.ErrConversationAnswerActive
+		}
+
 		switch conversationdomain.MessageStatus(assistantStatus) {
 		case conversationdomain.MessageStatusGenerating:
 			// 新 turn 已经处于可入队状态。
