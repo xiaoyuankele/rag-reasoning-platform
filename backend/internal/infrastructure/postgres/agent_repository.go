@@ -23,6 +23,7 @@ import (
 const (
 	agentAdmissionAdvisoryLockID int64 = 0x5241474147454E54
 	agentCanceledMessage               = "Agent 执行已取消。"
+	agentCanceledStepMessage           = "agent run canceled before Tool execution"
 	agentFailedMessage                 = "暂时无法完成 Agent 执行，请稍后重试。"
 	maxAgentErrorMessageBytes          = 1000
 	maxAgentRunResultBytes             = 32768
@@ -430,6 +431,15 @@ func (r *AgentRepository) CancelRun(
 	case agentdomain.RunStatusQueued:
 	default:
 		return agentdomain.Run{}, fmt.Errorf("cancel agent run with invalid status %q", run.Status)
+	}
+	if err := failActiveAgentSteps(
+		ctx,
+		tx,
+		run.ID,
+		agentdomain.ErrorCodeWorkerInterrupted,
+		agentCanceledStepMessage,
+	); err != nil {
+		return agentdomain.Run{}, err
 	}
 	if err := updateAssistantMessage(
 		ctx,

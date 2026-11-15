@@ -32,7 +32,10 @@ var (
 	ErrInvalidAdmissionLimits      = errors.New("agent run admission limits are invalid")
 	ErrInvalidSchedulingPolicy     = errors.New("agent run scheduling policy is invalid")
 	ErrInvalidLeasePolicy          = errors.New("agent run lease policy is invalid")
+	ErrInvalidRecoveryBatch        = errors.New("agent recovery batch size is invalid")
 )
+
+const MaxRecoveryBatchSize = 100
 
 // CreateRunInput is the normalized, server-budgeted persistence command.
 type CreateRunInput struct {
@@ -94,12 +97,12 @@ type WorkerRepository interface {
 		errorCode agentdomain.ErrorCode,
 		errorMessage string,
 	) error
-	MarkRunSucceeded(
+	CommitFinal(
 		ctx context.Context,
 		runID int64,
 		leaseToken string,
-		result agentdomain.Result,
-	) error
+		input CommitFinalInput,
+	) (agentdomain.Step, error)
 	MarkRunFailed(
 		ctx context.Context,
 		runID int64,
@@ -109,22 +112,22 @@ type WorkerRepository interface {
 	) error
 	RequeueExpiredRuns(
 		ctx context.Context,
+		limit int,
 		errorCode agentdomain.ErrorCode,
 		errorMessage string,
 	) (int64, error)
 }
 
-type StartStepInput struct {
-	Kind      agentdomain.StepKind
-	ToolName  *string
-	Arguments json.RawMessage
-}
-
-type CompleteStepInput struct {
-	Result           json.RawMessage
+type PersistDecisionInput struct {
+	ToolName         string
+	Arguments        json.RawMessage
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
+}
+
+type CompleteStepInput struct {
+	Result json.RawMessage
 }
 
 // FinalStepResult is the auditable JSON shape shared by the final Step and Run snapshot.
@@ -135,14 +138,19 @@ type FinalStepResult struct {
 }
 
 type FailStepInput struct {
-	ErrorCode        agentdomain.ErrorCode
-	ErrorMessage     string
+	ErrorCode    agentdomain.ErrorCode
+	ErrorMessage string
+}
+
+type CommitFinalInput struct {
+	Result           FinalStepResult
 	PromptTokens     int
 	CompletionTokens int
 	TotalTokens      int
 }
 
-// StepRepository persists bounded actions under the current Run lease.
+// StepRepository persists decisions before execution and completes bounded
+// Tool actions under the current Run lease.
 type StepRepository interface {
 	ListSteps(
 		ctx context.Context,
@@ -159,11 +167,11 @@ type StepRepository interface {
 		runID int64,
 		leaseToken string,
 	) (agentdomain.Step, error)
-	StartStep(
+	PersistDecision(
 		ctx context.Context,
 		runID int64,
 		leaseToken string,
-		input StartStepInput,
+		input PersistDecisionInput,
 	) (agentdomain.Step, error)
 	MarkStepSucceeded(
 		ctx context.Context,

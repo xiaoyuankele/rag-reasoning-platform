@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -320,71 +320,62 @@ func (r *AgentRepository) RequeueRun(
 	return nil
 }
 
-func (r *AgentRepository) MarkRunSucceeded(
+// CommitFinal atomically persists the final decision, assistant message and Run terminal state.
+func (r *AgentRepository) CommitFinal(
 	ctx context.Context,
 	runID int64,
 	leaseToken string,
-	result agentdomain.Result,
-) error {
-	if !result.IsValid() || (len(result.Payload) > 0 && !json.Valid(result.Payload)) {
-		return errors.New("agent run result is invalid")
+	input agentapplication.CommitFinalInput,
+) (agentdomain.Step, error) {
+	if strings.TrimSpace(input.Result.Answer) == "" ||
+		!input.Result.ResponseLanguage.IsValid() ||
+		(len(input.Result.Payload) > 0 && !json.Valid(input.Result.Payload)) ||
+		!agentdomain.TokenUsageIsValid(input.PromptTokens, input.CompletionTokens, input.TotalTokens) {
+		return agentdomain.Step{}, agentapplication.ErrInvalidStep
 	}
-	persistedJSON, err := json.Marshal(agentapplication.FinalStepResult{
-		Answer: result.Answer, ResponseLanguage: result.ResponseLanguage, Payload: result.Payload,
-	})
+	persistedJSON, err := json.Marshal(input.Result)
 	if err != nil {
-		return fmt.Errorf("encode agent run result: %w", err)
+		return agentdomain.Step{}, fmt.Errorf("encode agent final decision: %w", err)
 	}
 	if len(persistedJSON) > maxAgentRunResultBytes {
-		return errors.New("agent run result is too large")
+		return agentdomain.Step{}, agentapplication.ErrInvalidStep
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin agent run success: %w", err)
+		return agentdomain.Step{}, fmt.Errorf("begin agent final commit: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	withinLimit, err := jsonbSizeWithin(ctx, tx, persistedJSON, maxAgentRunResultBytes)
 	if err != nil {
-		return err
+		return agentdomain.Step{}, err
 	}
 	if !withinLimit {
-		return errors.New("agent run result is too large")
+		return agentdomain.Step{}, agentapplication.ErrInvalidStep
 	}
 	run, err := r.lockFencedRun(ctx, tx, runID, leaseToken)
 	if err != nil {
-		return err
+		return agentdomain.Step{}, err
 	}
-	if run.PromptTokens != result.PromptTokens ||
-		run.CompletionTokens != result.CompletionTokens ||
-		run.TotalTokens != result.TotalTokens {
-		return errors.New("agent run result token totals do not match persisted steps")
+	if run.StepCount >= run.Budget.MaxSteps {
+		return agentdomain.Step{}, agentapplication.ErrStepLimitExceeded
 	}
-	var finalResultJSON []byte
-	if err := tx.QueryRow(
-		ctx,
-		`SELECT result_json
-		 FROM agent_steps
-		 WHERE agent_run_id = $1 AND kind = 'final' AND status = 'succeeded'`,
-		run.ID,
-	).Scan(&finalResultJSON); errors.Is(err, pgx.ErrNoRows) {
-		return agentapplication.ErrRunNotProcessing
-	} else if err != nil {
-		return fmt.Errorf("read final agent step result: %w", err)
+	if input.TotalTokens > run.Budget.MaxTotalTokens-run.TotalTokens {
+		return agentdomain.Step{}, agentapplication.ErrTokenBudgetExceeded
 	}
-	var persistedFinal agentapplication.FinalStepResult
-	if err := json.Unmarshal(finalResultJSON, &persistedFinal); err != nil {
-		return errors.New("final agent step result has invalid audit shape")
+	deadlineOpen, err := agentDeadlineOpen(ctx, tx, run.Budget.DeadlineAt)
+	if err != nil {
+		return agentdomain.Step{}, err
 	}
-	if persistedFinal.Answer != result.Answer ||
-		persistedFinal.ResponseLanguage != result.ResponseLanguage ||
-		!agentJSONEqual(persistedFinal.Payload, result.Payload) {
-		return errors.New("final agent step and run result do not match")
+	if !deadlineOpen {
+		return agentdomain.Step{}, agentapplication.ErrRunDeadlineExceeded
 	}
+	var finalExists bool
 	var activeStep bool
 	var failedStep bool
 	if err := tx.QueryRow(
 		ctx,
 		`SELECT
+			EXISTS (SELECT 1 FROM agent_steps WHERE agent_run_id = $1 AND kind = 'final'),
 			EXISTS (
 				SELECT 1 FROM agent_steps
 				WHERE agent_run_id = $1 AND status IN ('pending', 'running')
@@ -394,21 +385,48 @@ func (r *AgentRepository) MarkRunSucceeded(
 				WHERE agent_run_id = $1 AND status = 'failed'
 			)`,
 		run.ID,
-	).Scan(&activeStep, &failedStep); err != nil {
-		return fmt.Errorf("validate final agent step: %w", err)
+	).Scan(&finalExists, &activeStep, &failedStep); err != nil {
+		return agentdomain.Step{}, fmt.Errorf("validate final agent boundary: %w", err)
+	}
+	if finalExists {
+		return agentdomain.Step{}, agentapplication.ErrFinalStepAlreadyPersisted
 	}
 	if activeStep || failedStep {
-		return agentapplication.ErrRunNotProcessing
+		return agentdomain.Step{}, agentapplication.ErrInvalidStep
+	}
+	sequenceNo := run.StepCount + 1
+	step, err := scanAgentStep(tx.QueryRow(
+		ctx,
+		`INSERT INTO agent_steps AS step (
+			agent_run_id, sequence_no, kind, status, result_json,
+			prompt_tokens, completion_tokens, total_tokens,
+			started_at, completed_at
+		 )
+		 VALUES ($1, $2, 'final', 'succeeded', $3::JSONB, $4, $5, $6,
+		         CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		 RETURNING `+agentStepReturningColumns,
+		run.ID,
+		sequenceNo,
+		persistedJSON,
+		input.PromptTokens,
+		input.CompletionTokens,
+		input.TotalTokens,
+	))
+	if err != nil {
+		return agentdomain.Step{}, fmt.Errorf("insert final agent step: %w", err)
 	}
 	if err := updateAssistantMessage(
 		ctx,
 		tx,
 		run.AssistantMessageID,
-		result.Answer,
+		input.Result.Answer,
 		conversationdomain.MessageStatusCompleted,
 	); err != nil {
-		return fmt.Errorf("complete agent assistant message: %w", err)
+		return agentdomain.Step{}, fmt.Errorf("complete agent assistant message: %w", err)
 	}
+	promptTokens := run.PromptTokens + input.PromptTokens
+	completionTokens := run.CompletionTokens + input.CompletionTokens
+	totalTokens := run.TotalTokens + input.TotalTokens
 	commandTag, err := tx.Exec(
 		ctx,
 		`UPDATE agent_runs
@@ -416,6 +434,7 @@ func (r *AgentRepository) MarkRunSucceeded(
 		     error_code = NULL,
 		     error_message = NULL,
 		     result_json = $2::JSONB,
+		     step_count = step_count + 1,
 		     prompt_tokens = $3,
 		     completion_tokens = $4,
 		     total_tokens = $5,
@@ -425,24 +444,31 @@ func (r *AgentRepository) MarkRunSucceeded(
 		     lease_token = NULL,
 		     lease_expires_at = NULL,
 		     heartbeat_at = NULL
-		 WHERE id = $1 AND status = 'processing' AND lease_token = $6`,
+		 WHERE id = $1
+		   AND status = 'processing'
+		   AND lease_token = $6
+		   AND lease_expires_at > CURRENT_TIMESTAMP
+		   AND step_count = $7
+		   AND COALESCE(total_tokens, 0) + $8 <= max_total_tokens`,
 		run.ID,
 		persistedJSON,
-		result.PromptTokens,
-		result.CompletionTokens,
-		result.TotalTokens,
+		promptTokens,
+		completionTokens,
+		totalTokens,
 		leaseToken,
+		run.StepCount,
+		input.TotalTokens,
 	)
 	if err != nil {
-		return fmt.Errorf("mark agent run succeeded: %w", err)
+		return agentdomain.Step{}, fmt.Errorf("commit final agent run state: %w", err)
 	}
 	if commandTag.RowsAffected() != 1 {
-		return agentapplication.ErrRunLeaseLost
+		return agentdomain.Step{}, agentapplication.ErrRunLeaseLost
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit agent run success: %w", err)
+		return agentdomain.Step{}, fmt.Errorf("commit agent final transaction: %w", err)
 	}
-	return nil
+	return step, nil
 }
 
 func (r *AgentRepository) MarkRunFailed(
@@ -476,9 +502,13 @@ func (r *AgentRepository) MarkRunFailed(
 // RequeueExpiredRuns recovers expired leases and terminally fails attempt two.
 func (r *AgentRepository) RequeueExpiredRuns(
 	ctx context.Context,
+	limit int,
 	errorCode agentdomain.ErrorCode,
 	errorMessage string,
 ) (int64, error) {
+	if limit <= 0 || limit > agentapplication.MaxRecoveryBatchSize {
+		return 0, agentapplication.ErrInvalidRecoveryBatch
+	}
 	if err := validateAgentError(errorCode, errorMessage); err != nil {
 		return 0, err
 	}
@@ -497,7 +527,9 @@ func (r *AgentRepository) RequeueExpiredRuns(
 		 WHERE status = 'processing'
 		   AND lease_expires_at <= CURRENT_TIMESTAMP
 		 ORDER BY id
-		 FOR UPDATE SKIP LOCKED`,
+		 FOR UPDATE SKIP LOCKED
+		 LIMIT $1`,
+		limit,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("select expired agent runs: %w", err)
@@ -563,6 +595,9 @@ func (r *AgentRepository) lockFencedRun(
 	runID int64,
 	leaseToken string,
 ) (agentdomain.Run, error) {
+	// Lease validity is decided when this transaction acquires the Run row lock.
+	// Recovery cannot install a newer token until the lock is released, so a
+	// transaction that began while valid may finish without racing a takeover.
 	run, err := scanAgentRun(tx.QueryRow(
 		ctx,
 		`SELECT `+agentRunSelectColumns+`
@@ -592,9 +627,6 @@ func resetRunningAgentSteps(ctx context.Context, tx pgx.Tx, runID int64) error {
 		     error_code = NULL,
 		     error_message = NULL,
 		     result_json = NULL,
-		     prompt_tokens = NULL,
-		     completion_tokens = NULL,
-		     total_tokens = NULL,
 		     updated_at = CURRENT_TIMESTAMP,
 		     started_at = NULL,
 		     completed_at = NULL
@@ -613,22 +645,8 @@ func (r *AgentRepository) failLockedRun(
 	errorCode agentdomain.ErrorCode,
 	errorMessage string,
 ) error {
-	if _, err := tx.Exec(
-		ctx,
-		`UPDATE agent_steps
-		 SET status = 'failed',
-		     result_json = NULL,
-		     error_code = $2,
-		     error_message = $3,
-		     updated_at = CURRENT_TIMESTAMP,
-		     started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
-		     completed_at = CURRENT_TIMESTAMP
-		 WHERE agent_run_id = $1 AND status IN ('pending', 'running')`,
-		run.ID,
-		errorCode,
-		errorMessage,
-	); err != nil {
-		return fmt.Errorf("fail active agent steps: %w", err)
+	if err := failActiveAgentSteps(ctx, tx, run.ID, errorCode, errorMessage); err != nil {
+		return err
 	}
 	if err := updateAssistantMessage(
 		ctx,
@@ -665,14 +683,29 @@ func (r *AgentRepository) failLockedRun(
 	return nil
 }
 
-func agentJSONEqual(left, right json.RawMessage) bool {
-	if len(left) == 0 || len(right) == 0 {
-		return len(left) == 0 && len(right) == 0
+func failActiveAgentSteps(
+	ctx context.Context,
+	tx pgx.Tx,
+	runID int64,
+	errorCode agentdomain.ErrorCode,
+	errorMessage string,
+) error {
+	if _, err := tx.Exec(
+		ctx,
+		`UPDATE agent_steps
+		 SET status = 'failed',
+		     result_json = NULL,
+		     error_code = $2,
+		     error_message = $3,
+		     updated_at = CURRENT_TIMESTAMP,
+		     started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+		     completed_at = CURRENT_TIMESTAMP
+		 WHERE agent_run_id = $1 AND status IN ('pending', 'running')`,
+		runID,
+		errorCode,
+		errorMessage,
+	); err != nil {
+		return fmt.Errorf("fail active agent steps: %w", err)
 	}
-	var leftValue any
-	var rightValue any
-	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
-		return false
-	}
-	return reflect.DeepEqual(leftValue, rightValue)
+	return nil
 }

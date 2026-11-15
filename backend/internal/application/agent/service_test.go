@@ -58,7 +58,7 @@ func (f *fakeStepRepository) ClaimPendingStep(context.Context, int64, string) (a
 	return agentdomain.Step{}, ErrNoPendingStep
 }
 
-func (f *fakeStepRepository) StartStep(context.Context, int64, string, StartStepInput) (agentdomain.Step, error) {
+func (f *fakeStepRepository) PersistDecision(context.Context, int64, string, PersistDecisionInput) (agentdomain.Step, error) {
 	return agentdomain.Step{}, nil
 }
 
@@ -183,7 +183,7 @@ func TestServiceQueriesCancelAndListSteps(t *testing.T) {
 
 func TestStepInputJSONRemainsOpaqueAtPort(t *testing.T) {
 	raw := json.RawMessage(`{"query":"safe"}`)
-	input := StartStepInput{Kind: agentdomain.StepKindToolCall, Arguments: raw}
+	input := PersistDecisionInput{ToolName: "search_documents", Arguments: raw}
 	if string(input.Arguments) != string(raw) {
 		t.Fatalf("arguments = %s", input.Arguments)
 	}

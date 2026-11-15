@@ -104,9 +104,6 @@ func (r *AgentRepository) ClaimPendingStep(
 	if err != nil {
 		return agentdomain.Step{}, err
 	}
-	if run.TotalTokens >= run.Budget.MaxTotalTokens {
-		return agentdomain.Step{}, agentapplication.ErrTokenBudgetExceeded
-	}
 	deadlineOpen, err := agentDeadlineOpen(ctx, tx, run.Budget.DeadlineAt)
 	if err != nil {
 		return agentdomain.Step{}, err
@@ -119,7 +116,7 @@ func (r *AgentRepository) ClaimPendingStep(
 		ctx,
 		`SELECT id
 		 FROM agent_steps
-		 WHERE agent_run_id = $1 AND status = 'pending'
+		 WHERE agent_run_id = $1 AND kind = 'tool_call' AND status = 'pending'
 		 ORDER BY sequence_no ASC
 		 FOR UPDATE
 		 LIMIT 1`,
@@ -152,14 +149,14 @@ func (r *AgentRepository) ClaimPendingStep(
 	return step, nil
 }
 
-// StartStep persists a new running action under the current Run lease.
-func (r *AgentRepository) StartStep(
+// PersistDecision durably records one Tool decision before the Tool may run.
+func (r *AgentRepository) PersistDecision(
 	ctx context.Context,
 	runID int64,
 	leaseToken string,
-	input agentapplication.StartStepInput,
+	input agentapplication.PersistDecisionInput,
 ) (agentdomain.Step, error) {
-	if err := validateStartAgentStep(input); err != nil {
+	if err := validatePersistDecision(input); err != nil {
 		return agentdomain.Step{}, err
 	}
 	tx, err := r.pool.Begin(ctx)
@@ -171,10 +168,11 @@ func (r *AgentRepository) StartStep(
 	if err != nil {
 		return agentdomain.Step{}, err
 	}
-	if run.StepCount >= run.Budget.MaxSteps {
+	// One Step is always reserved for the final decision.
+	if run.StepCount >= run.Budget.MaxSteps-1 {
 		return agentdomain.Step{}, agentapplication.ErrStepLimitExceeded
 	}
-	if run.TotalTokens >= run.Budget.MaxTotalTokens {
+	if input.TotalTokens > run.Budget.MaxTotalTokens-run.TotalTokens {
 		return agentdomain.Step{}, agentapplication.ErrTokenBudgetExceeded
 	}
 	deadlineOpen, err := agentDeadlineOpen(ctx, tx, run.Budget.DeadlineAt)
@@ -212,28 +210,30 @@ func (r *AgentRepository) StartStep(
 	if failedStepExists {
 		return agentdomain.Step{}, agentapplication.ErrInvalidStep
 	}
-	if len(input.Arguments) > 0 {
-		withinLimit, err := jsonbSizeWithin(ctx, tx, input.Arguments, maxAgentStepArgumentsBytes)
-		if err != nil {
-			return agentdomain.Step{}, err
-		}
-		if !withinLimit {
-			return agentdomain.Step{}, agentapplication.ErrInvalidStep
-		}
+	withinLimit, err := jsonbSizeWithin(ctx, tx, input.Arguments, maxAgentStepArgumentsBytes)
+	if err != nil {
+		return agentdomain.Step{}, err
+	}
+	if !withinLimit {
+		return agentdomain.Step{}, agentapplication.ErrInvalidStep
 	}
 	sequenceNo := run.StepCount + 1
+	toolName := input.ToolName
 	step, err := scanAgentStep(tx.QueryRow(
 		ctx,
 		`INSERT INTO agent_steps AS step (
-			agent_run_id, sequence_no, kind, status, tool_name, arguments_json, started_at
+			agent_run_id, sequence_no, kind, status, tool_name, arguments_json,
+			prompt_tokens, completion_tokens, total_tokens, started_at
 		 )
-		 VALUES ($1, $2, $3, 'running', $4, $5::JSONB, CURRENT_TIMESTAMP)
+		 VALUES ($1, $2, 'tool_call', 'running', $3, $4::JSONB, $5, $6, $7, CURRENT_TIMESTAMP)
 		 RETURNING `+agentStepReturningColumns,
 		run.ID,
 		sequenceNo,
-		input.Kind,
-		input.ToolName,
-		nullableJSON(input.Arguments),
+		toolName,
+		input.Arguments,
+		input.PromptTokens,
+		input.CompletionTokens,
+		input.TotalTokens,
 	))
 	if err != nil {
 		return agentdomain.Step{}, fmt.Errorf("insert running agent step: %w", err)
@@ -242,24 +242,31 @@ func (r *AgentRepository) StartStep(
 		ctx,
 		`UPDATE agent_runs
 		 SET step_count = step_count + 1,
+		     prompt_tokens = COALESCE(prompt_tokens, 0) + $4,
+		     completion_tokens = COALESCE(completion_tokens, 0) + $5,
+		     total_tokens = COALESCE(total_tokens, 0) + $6,
 		     updated_at = CURRENT_TIMESTAMP
 		 WHERE id = $1
 		   AND status = 'processing'
 		   AND lease_token = $2
 		   AND lease_expires_at > CURRENT_TIMESTAMP
-		   AND step_count = $3`,
+		   AND step_count = $3
+		   AND COALESCE(total_tokens, 0) + $6 <= max_total_tokens`,
 		run.ID,
 		leaseToken,
 		run.StepCount,
+		input.PromptTokens,
+		input.CompletionTokens,
+		input.TotalTokens,
 	)
 	if err != nil {
-		return agentdomain.Step{}, fmt.Errorf("increment agent run step count: %w", err)
+		return agentdomain.Step{}, fmt.Errorf("persist agent decision accounting: %w", err)
 	}
 	if commandTag.RowsAffected() != 1 {
 		return agentdomain.Step{}, agentapplication.ErrRunLeaseLost
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return agentdomain.Step{}, fmt.Errorf("commit agent step start: %w", err)
+		return agentdomain.Step{}, fmt.Errorf("commit agent decision: %w", err)
 	}
 	return step, nil
 }
@@ -272,8 +279,7 @@ func (r *AgentRepository) MarkStepSucceeded(
 	input agentapplication.CompleteStepInput,
 ) (agentdomain.Step, error) {
 	if len(input.Result) == 0 || len(input.Result) > maxAgentStepResultBytes ||
-		!json.Valid(input.Result) ||
-		!agentdomain.TokenUsageIsValid(input.PromptTokens, input.CompletionTokens, input.TotalTokens) {
+		!json.Valid(input.Result) {
 		return agentdomain.Step{}, agentapplication.ErrInvalidStep
 	}
 	tx, err := r.pool.Begin(ctx)
@@ -292,15 +298,12 @@ func (r *AgentRepository) MarkStepSucceeded(
 	if err != nil {
 		return agentdomain.Step{}, err
 	}
-	if input.TotalTokens > run.Budget.MaxTotalTokens-run.TotalTokens {
-		return agentdomain.Step{}, agentapplication.ErrTokenBudgetExceeded
-	}
 	var lockedStepID int64
 	if err := tx.QueryRow(
 		ctx,
 		`SELECT id
 		 FROM agent_steps
-		 WHERE id = $1 AND agent_run_id = $2 AND status = 'running'
+		 WHERE id = $1 AND agent_run_id = $2 AND kind = 'tool_call' AND status = 'running'
 		 FOR UPDATE`,
 		stepID,
 		run.ID,
@@ -316,45 +319,15 @@ func (r *AgentRepository) MarkStepSucceeded(
 		     result_json = $2::JSONB,
 		     error_code = NULL,
 		     error_message = NULL,
-		     prompt_tokens = $3,
-		     completion_tokens = $4,
-		     total_tokens = $5,
 		     updated_at = CURRENT_TIMESTAMP,
 		     completed_at = CURRENT_TIMESTAMP
 		 WHERE id = $1 AND status = 'running'
 		 RETURNING `+agentStepReturningColumns,
 		lockedStepID,
 		input.Result,
-		input.PromptTokens,
-		input.CompletionTokens,
-		input.TotalTokens,
 	))
 	if err != nil {
 		return agentdomain.Step{}, fmt.Errorf("mark agent step succeeded: %w", err)
-	}
-	commandTag, err := tx.Exec(
-		ctx,
-		`UPDATE agent_runs
-		 SET prompt_tokens = COALESCE(prompt_tokens, 0) + $3,
-		     completion_tokens = COALESCE(completion_tokens, 0) + $4,
-		     total_tokens = COALESCE(total_tokens, 0) + $5,
-		     updated_at = CURRENT_TIMESTAMP
-		 WHERE id = $1
-		   AND status = 'processing'
-		   AND lease_token = $2
-		   AND lease_expires_at > CURRENT_TIMESTAMP
-		   AND COALESCE(total_tokens, 0) + $5 <= max_total_tokens`,
-		run.ID,
-		leaseToken,
-		input.PromptTokens,
-		input.CompletionTokens,
-		input.TotalTokens,
-	)
-	if err != nil {
-		return agentdomain.Step{}, fmt.Errorf("accumulate agent run token usage: %w", err)
-	}
-	if commandTag.RowsAffected() != 1 {
-		return agentdomain.Step{}, agentapplication.ErrRunLeaseLost
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return agentdomain.Step{}, fmt.Errorf("commit agent step success: %w", err)
@@ -372,27 +345,20 @@ func (r *AgentRepository) MarkStepFailed(
 	if err := validateAgentError(input.ErrorCode, input.ErrorMessage); err != nil {
 		return agentdomain.Step{}, err
 	}
-	if !agentdomain.TokenUsageIsValid(input.PromptTokens, input.CompletionTokens, input.TotalTokens) {
-		return agentdomain.Step{}, agentapplication.ErrInvalidStep
-	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return agentdomain.Step{}, fmt.Errorf("begin agent step failure: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	run, err := r.lockFencedRun(ctx, tx, runID, leaseToken)
-	if err != nil {
+	if _, err := r.lockFencedRun(ctx, tx, runID, leaseToken); err != nil {
 		return agentdomain.Step{}, err
-	}
-	if input.TotalTokens > run.Budget.MaxTotalTokens-run.TotalTokens {
-		return agentdomain.Step{}, agentapplication.ErrTokenBudgetExceeded
 	}
 	var lockedStepID int64
 	if err := tx.QueryRow(
 		ctx,
 		`SELECT id
 		 FROM agent_steps
-		 WHERE id = $1 AND agent_run_id = $2 AND status = 'running'
+		 WHERE id = $1 AND agent_run_id = $2 AND kind = 'tool_call' AND status = 'running'
 		 FOR UPDATE`,
 		stepID,
 		runID,
@@ -408,9 +374,6 @@ func (r *AgentRepository) MarkStepFailed(
 		     result_json = NULL,
 		     error_code = $2,
 		     error_message = $3,
-		     prompt_tokens = $4,
-		     completion_tokens = $5,
-		     total_tokens = $6,
 		     updated_at = CURRENT_TIMESTAMP,
 		     completed_at = CURRENT_TIMESTAMP
 		 WHERE id = $1 AND status = 'running'
@@ -418,36 +381,9 @@ func (r *AgentRepository) MarkStepFailed(
 		lockedStepID,
 		input.ErrorCode,
 		input.ErrorMessage,
-		input.PromptTokens,
-		input.CompletionTokens,
-		input.TotalTokens,
 	))
 	if err != nil {
 		return agentdomain.Step{}, fmt.Errorf("mark agent step failed: %w", err)
-	}
-	commandTag, err := tx.Exec(
-		ctx,
-		`UPDATE agent_runs
-		 SET prompt_tokens = COALESCE(prompt_tokens, 0) + $3,
-		     completion_tokens = COALESCE(completion_tokens, 0) + $4,
-		     total_tokens = COALESCE(total_tokens, 0) + $5,
-		     updated_at = CURRENT_TIMESTAMP
-		 WHERE id = $1
-		   AND status = 'processing'
-		   AND lease_token = $2
-		   AND lease_expires_at > CURRENT_TIMESTAMP
-		   AND COALESCE(total_tokens, 0) + $5 <= max_total_tokens`,
-		run.ID,
-		leaseToken,
-		input.PromptTokens,
-		input.CompletionTokens,
-		input.TotalTokens,
-	)
-	if err != nil {
-		return agentdomain.Step{}, fmt.Errorf("accumulate failed agent step token usage: %w", err)
-	}
-	if commandTag.RowsAffected() != 1 {
-		return agentdomain.Step{}, agentapplication.ErrRunLeaseLost
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return agentdomain.Step{}, fmt.Errorf("commit agent step failure: %w", err)
@@ -533,31 +469,15 @@ func scanAgentSteps(rows pgx.Rows) ([]agentdomain.Step, error) {
 	return steps, nil
 }
 
-func validateStartAgentStep(input agentapplication.StartStepInput) error {
-	if !input.Kind.IsValid() {
+func validatePersistDecision(input agentapplication.PersistDecisionInput) error {
+	if strings.TrimSpace(input.ToolName) == "" ||
+		strings.TrimSpace(input.ToolName) != input.ToolName || len(input.ToolName) > 100 ||
+		len(input.Arguments) == 0 || len(input.Arguments) > maxAgentStepArgumentsBytes ||
+		!json.Valid(input.Arguments) ||
+		!agentdomain.TokenUsageIsValid(input.PromptTokens, input.CompletionTokens, input.TotalTokens) {
 		return agentapplication.ErrInvalidStep
 	}
-	switch input.Kind {
-	case agentdomain.StepKindToolCall:
-		if input.ToolName == nil || strings.TrimSpace(*input.ToolName) == "" ||
-			strings.TrimSpace(*input.ToolName) != *input.ToolName || len(*input.ToolName) > 100 ||
-			len(input.Arguments) == 0 ||
-			len(input.Arguments) > maxAgentStepArgumentsBytes || !json.Valid(input.Arguments) {
-			return agentapplication.ErrInvalidStep
-		}
-	case agentdomain.StepKindFinal:
-		if input.ToolName != nil || len(input.Arguments) != 0 {
-			return agentapplication.ErrInvalidStep
-		}
-	}
 	return nil
-}
-
-func nullableJSON(value json.RawMessage) any {
-	if len(value) == 0 {
-		return nil
-	}
-	return value
 }
 
 func agentDeadlineOpen(ctx context.Context, tx pgx.Tx, deadline time.Time) (bool, error) {
