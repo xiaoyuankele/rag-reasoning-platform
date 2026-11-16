@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	agentdomain "rag-reasoning-platform/backend/internal/domain/agent"
@@ -64,5 +65,17 @@ func TestAgentContextValidationExcludesUnknownRolesAndEmptyContent(t *testing.T)
 	}
 	if tooMany.IsValid() {
 		t.Fatal("oversized history message count must be rejected")
+	}
+}
+
+func TestModelRequestOwnerIsLocalOnly(t *testing.T) {
+	request := ModelRequest{OwnerUserID: 42, RunID: 7}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if strings.Contains(string(encoded), "42") || strings.Contains(string(encoded), "OwnerUserID") ||
+		strings.Contains(string(encoded), "owner_user_id") {
+		t.Fatalf("ModelRequest JSON leaked OwnerUserID: %s", encoded)
 	}
 }

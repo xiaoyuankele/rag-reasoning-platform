@@ -23,6 +23,9 @@ var (
 	ErrDistributedAnswerConfiguration = errors.New(
 		"distributed answer capacity configuration is invalid",
 	)
+	ErrProviderCapacityKeyConfiguration = errors.New(
+		"provider capacity key configuration is invalid",
+	)
 )
 
 // DistributedCapacityStore 是问答应用层依赖的 Redis 容量协调最小端口。
@@ -48,14 +51,48 @@ type DistributedAnswerConfig struct {
 	WaitTimeout            time.Duration
 }
 
+// ProviderCapacityKeyBuilder derives the byte-compatible global and owner Redis
+// keys for one provider/model identity. It is shared with Agent assembly so a
+// rolling upgrade cannot split capacity across two key spaces.
+type ProviderCapacityKeyBuilder func(ownerUserID int64) ([]string, error)
+
+// NewProviderCapacityKeyBuilder preserves the original Answer key algorithm:
+// SHA-256(provider + NUL + model), first 12 bytes, under the legacy
+// {namespace-answer-hash} Redis hash tag.
+func NewProviderCapacityKeyBuilder(
+	namespace string,
+	provider string,
+	model string,
+) (ProviderCapacityKeyBuilder, error) {
+	if strings.TrimSpace(namespace) == "" || strings.TrimSpace(provider) == "" ||
+		strings.TrimSpace(model) == "" {
+		return nil, ErrProviderCapacityKeyConfiguration
+	}
+	identity := sha256.Sum256([]byte(provider + "\x00" + model))
+	hashTag := fmt.Sprintf(
+		"{%s-answer-%s}",
+		namespace,
+		hex.EncodeToString(identity[:12]),
+	)
+	return func(ownerUserID int64) ([]string, error) {
+		if ownerUserID <= 0 {
+			return nil, accessdomain.ErrInvalidOwnerScope
+		}
+		return []string{
+			hashTag + ":global",
+			fmt.Sprintf("%s:owner:%d", hashTag, ownerUserID),
+		}, nil
+	}, nil
+}
+
 // DistributedService 在完整问答链路前申请 Redis 全局和 Owner 执行槽位。
 // 本地 ConcurrentService 仍负责公平等待；本类型只解决多个进程合计容量。
 type DistributedService struct {
-	next      Answerer
-	store     DistributedCapacityStore
-	events    AnswerAdmissionEventObserver
-	config    DistributedAnswerConfig
-	globalKey string
+	next   Answerer
+	store  DistributedCapacityStore
+	events AnswerAdmissionEventObserver
+	config DistributedAnswerConfig
+	keys   ProviderCapacityKeyBuilder
 }
 
 var _ Answerer = (*DistributedService)(nil)
@@ -82,18 +119,12 @@ func NewDistributedService(
 		return nil, ErrDistributedAnswerConfiguration
 	}
 
-	identity := sha256.Sum256([]byte(config.Provider + "\x00" + config.Model))
-	hashTag := fmt.Sprintf(
-		"{%s-answer-%s}",
-		config.Namespace,
-		hex.EncodeToString(identity[:12]),
-	)
+	keys, err := NewProviderCapacityKeyBuilder(config.Namespace, config.Provider, config.Model)
+	if err != nil {
+		return nil, ErrDistributedAnswerConfiguration
+	}
 	return &DistributedService{
-		next:      next,
-		store:     store,
-		events:    events,
-		config:    config,
-		globalKey: hashTag + ":global",
+		next: next, store: store, events: events, config: config, keys: keys,
 	}, nil
 }
 
@@ -107,9 +138,9 @@ func (s *DistributedService) Answer(
 		return Output{}, accessdomain.ErrInvalidOwnerScope
 	}
 
-	keys := []string{
-		s.globalKey,
-		fmt.Sprintf("%s:owner:%d", strings.TrimSuffix(s.globalKey, ":global"), scope.OwnerUserID()),
+	keys, keyErr := s.keys(scope.OwnerUserID())
+	if keyErr != nil {
+		return Output{}, accessdomain.ErrInvalidOwnerScope
 	}
 	limits := []int{
 		s.config.MaxConcurrencyGlobal,

@@ -33,29 +33,48 @@ func (r *traceRecorder) snapshot() []string {
 }
 
 type memoryExecutionRepository struct {
-	mu         sync.Mutex
-	run        agentdomain.Run
-	steps      []agentdomain.Step
-	claimed    bool
-	nextStepID int64
-	trace      *traceRecorder
-	renewErr   error
-	failCode   agentdomain.ErrorCode
-	requeued   bool
-	finalInput *CommitFinalInput
+	mu              sync.Mutex
+	run             agentdomain.Run
+	steps           []agentdomain.Step
+	claimed         bool
+	nextStepID      int64
+	trace           *traceRecorder
+	renewErr        error
+	failCode        agentdomain.ErrorCode
+	requeued        bool
+	finalInput      *CommitFinalInput
+	recoveryCount   int64
+	recoveryErr     error
+	recoveryCalls   int
+	recoveryLimit   int
+	recoveryCode    agentdomain.ErrorCode
+	recoveryMessage string
+	claimCalls      int
 }
 
 func newMemoryExecutionRepository(run agentdomain.Run, steps []agentdomain.Step, trace *traceRecorder) *memoryExecutionRepository {
 	return &memoryExecutionRepository{run: run, steps: append([]agentdomain.Step(nil), steps...), nextStepID: 100, trace: trace}
 }
 
-func (r *memoryExecutionRepository) RequeueExpiredRuns(context.Context, int, agentdomain.ErrorCode, string) (int64, error) {
-	return 0, nil
+func (r *memoryExecutionRepository) RequeueExpiredRuns(
+	_ context.Context,
+	limit int,
+	code agentdomain.ErrorCode,
+	message string,
+) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recoveryCalls++
+	r.recoveryLimit = limit
+	r.recoveryCode = code
+	r.recoveryMessage = message
+	return r.recoveryCount, r.recoveryErr
 }
 
 func (r *memoryExecutionRepository) ClaimNextRun(context.Context) (agentdomain.Run, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.claimCalls++
 	if r.claimed {
 		return agentdomain.Run{}, ErrNoQueuedRun
 	}
@@ -365,6 +384,37 @@ func testWorkerPolicy() WorkerPolicy {
 	}
 }
 
+func TestWorkerStartupRecoverySharesRunOnceSemantics(t *testing.T) {
+	repository := newMemoryExecutionRepository(testWorkerRun(), nil, &traceRecorder{})
+	repository.recoveryCount = 3
+	worker, err := NewWorker(repository, validContextProvider(t), &scriptedModel{}, &fakeToolSet{}, testWorkerPolicy())
+	if err != nil {
+		t.Fatalf("NewWorker() error = %v", err)
+	}
+	recovered, err := worker.RecoverExpiredRuns(t.Context())
+	if err != nil || recovered != 3 {
+		t.Fatalf("RecoverExpiredRuns() = %d, %v", recovered, err)
+	}
+	if repository.recoveryCalls != 1 || repository.recoveryLimit != testWorkerPolicy().RecoveryBatchSize ||
+		repository.recoveryCode != agentdomain.ErrorCodeWorkerInterrupted ||
+		repository.recoveryMessage != safeRecoveryMessage || repository.claimCalls != 0 {
+		t.Fatalf("startup recovery repository state = %+v", repository)
+	}
+
+	repository.claimed = true
+	if handled, err := worker.RunOnce(t.Context()); err != nil || handled {
+		t.Fatalf("RunOnce() = %t, %v", handled, err)
+	}
+	if repository.recoveryCalls != 2 || repository.claimCalls != 1 {
+		t.Fatalf("RunOnce recovery/claim calls = %d/%d", repository.recoveryCalls, repository.claimCalls)
+	}
+
+	repository.recoveryErr = errors.New("recovery unavailable")
+	if _, err := worker.RecoverExpiredRuns(t.Context()); err == nil || !strings.Contains(err.Error(), "recover expired agent runs") {
+		t.Fatalf("RecoverExpiredRuns(error) = %v", err)
+	}
+}
+
 func validContextProvider(t *testing.T) ContextProvider {
 	t.Helper()
 	return contextProviderFunc(func(_ context.Context, scope accessdomain.OwnerScope, run agentdomain.Run) (AgentContext, error) {
@@ -463,7 +513,8 @@ func TestWorkerRunsDeterministicSearchReadFinalChain(t *testing.T) {
 		t.Fatal("final input was not persisted")
 	}
 	for index, request := range model.requests {
-		if request.ResponseLanguage != agentdomain.ResponseLanguageEnglish ||
+		if request.OwnerUserID != testWorkerRun().OwnerUserID ||
+			request.ResponseLanguage != agentdomain.ResponseLanguageEnglish ||
 			request.Context.ResponseLanguage != agentdomain.ResponseLanguageEnglish {
 			t.Fatalf("model request %d language = %q / context %q", index, request.ResponseLanguage, request.Context.ResponseLanguage)
 		}

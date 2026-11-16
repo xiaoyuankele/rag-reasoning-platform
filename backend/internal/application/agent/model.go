@@ -127,6 +127,9 @@ type ModelObservation struct {
 }
 
 type ModelRequest struct {
+	// OwnerUserID is local admission metadata. It must never enter Provider
+	// payloads, persistence or ordinary logs.
+	OwnerUserID         int64 `json:"-"`
 	RunID               int64
 	RequestedDocumentID *int64
 	ResponseLanguage    agentdomain.ResponseLanguage

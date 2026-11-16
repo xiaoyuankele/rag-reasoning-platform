@@ -128,13 +128,8 @@ func NewWorker(
 
 // RunOnce recovers a bounded expired batch, claims one Run and executes it.
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
-	if _, err := w.repository.RequeueExpiredRuns(
-		ctx,
-		w.policy.RecoveryBatchSize,
-		agentdomain.ErrorCodeWorkerInterrupted,
-		safeRecoveryMessage,
-	); err != nil {
-		return false, fmt.Errorf("recover expired agent runs: %w", err)
+	if _, err := w.RecoverExpiredRuns(ctx); err != nil {
+		return false, err
 	}
 	run, err := w.repository.ClaimNextRun(ctx)
 	if errors.Is(err, ErrNoQueuedRun) {
@@ -189,6 +184,21 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		return true, fmt.Errorf("agent run %d interrupted: %w", run.ID, ctx.Err())
 	}
 	return true, executionErr
+}
+
+// RecoverExpiredRuns performs the one bounded recovery operation shared by
+// startup readiness and every worker iteration.
+func (w *Worker) RecoverExpiredRuns(ctx context.Context) (int64, error) {
+	recovered, err := w.repository.RequeueExpiredRuns(
+		ctx,
+		w.policy.RecoveryBatchSize,
+		agentdomain.ErrorCodeWorkerInterrupted,
+		safeRecoveryMessage,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("recover expired agent runs: %w", err)
+	}
+	return recovered, nil
 }
 
 func (w *Worker) executeRun(ctx context.Context, run agentdomain.Run) error {
@@ -248,6 +258,7 @@ func (w *Worker) executeRun(ctx context.Context, run agentdomain.Run) error {
 			return w.failRun(ctx, run, code, safeMessageForCode(code))
 		}
 		request := ModelRequest{
+			OwnerUserID:         scope.OwnerUserID(),
 			RunID:               run.ID,
 			RequestedDocumentID: copyOptionalInt64(run.RequestedDocumentID),
 			ResponseLanguage:    contextSnapshot.ResponseLanguage,

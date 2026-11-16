@@ -17,7 +17,8 @@ import (
 
 func validModelRequest() agentapplication.ModelRequest {
 	return agentapplication.ModelRequest{
-		RunID: 7,
+		OwnerUserID: 42424242,
+		RunID:       7,
 		Context: agentapplication.AgentContext{
 			SystemInstruction: "Use trusted evidence only.",
 			History: []agentapplication.ModelMessage{
@@ -81,6 +82,10 @@ func TestClientDecideSendsToolsAndObservationRoundTrip(t *testing.T) {
 		}
 		if strings.Contains(string(body), "reasoning_content") || strings.Contains(string(body), "provider-secret-id") {
 			t.Fatalf("request contains forbidden provider fields: %s", body)
+		}
+		if strings.Contains(string(body), "42424242") || strings.Contains(string(body), "OwnerUserID") ||
+			strings.Contains(string(body), "owner_user_id") {
+			t.Fatalf("request contains local OwnerUserID: %s", body)
 		}
 		var payload chatCompletionRequest
 		if err := json.Unmarshal(body, &payload); err != nil {

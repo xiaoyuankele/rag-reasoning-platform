@@ -3,6 +3,7 @@ package answer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -15,16 +16,19 @@ type fakeDistributedAnswerCapacityStore struct {
 	acquired     bool
 	acquireErr   error
 	releaseCalls int
+	acquireKeys  []string
+	releaseKeys  []string
 }
 
 func (f *fakeDistributedAnswerCapacityStore) AcquireCapacity(
 	_ context.Context,
-	_ []string,
+	keys []string,
 	_ []int,
 	_ time.Duration,
 ) (string, []int, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.acquireKeys = append([]string(nil), keys...)
 	if f.acquireErr != nil {
 		return "", nil, false, f.acquireErr
 	}
@@ -37,12 +41,13 @@ func (f *fakeDistributedAnswerCapacityStore) AcquireCapacity(
 
 func (f *fakeDistributedAnswerCapacityStore) ReleaseCapacity(
 	_ context.Context,
-	_ []string,
+	keys []string,
 	_ string,
 ) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.releaseCalls++
+	f.releaseKeys = append([]string(nil), keys...)
 	f.acquired = false
 	return nil
 }
@@ -74,11 +79,47 @@ func TestDistributedAnswerServiceAcquiresAndReleasesCapacity(t *testing.T) {
 	if store.releaseCalls != 1 {
 		t.Fatalf("release calls = %d, want 1", store.releaseCalls)
 	}
+	wantKeys := []string{
+		"{test-capacity-answer-5eea56c918953fe3c2b162f1}:global",
+		"{test-capacity-answer-5eea56c918953fe3c2b162f1}:owner:42",
+	}
+	if fmt.Sprint(store.acquireKeys) != fmt.Sprint(wantKeys) ||
+		fmt.Sprint(store.releaseKeys) != fmt.Sprint(wantKeys) {
+		t.Fatalf("capacity keys acquire=%v release=%v want=%v", store.acquireKeys, store.releaseKeys, wantKeys)
+	}
 	events := observer.snapshot()
 	if len(events) != 2 ||
 		events[0].Type != AnswerDistributedAdmissionEventAdmitted ||
 		events[1].Type != AnswerDistributedAdmissionEventReleased {
 		t.Fatalf("distributed events = %+v", events)
+	}
+}
+
+func TestProviderCapacityKeyBuilderPreservesLegacyKeysAndIsolatesModels(t *testing.T) {
+	builder, err := NewProviderCapacityKeyBuilder("rag-capacity", "dashscope", "qwen3.6-flash")
+	if err != nil {
+		t.Fatalf("NewProviderCapacityKeyBuilder() error = %v", err)
+	}
+	keys, err := builder(42)
+	if err != nil {
+		t.Fatalf("builder() error = %v", err)
+	}
+	want := []string{
+		"{rag-capacity-answer-987b8848e27794a9bb1856e5}:global",
+		"{rag-capacity-answer-987b8848e27794a9bb1856e5}:owner:42",
+	}
+	if fmt.Sprint(keys) != fmt.Sprint(want) {
+		t.Fatalf("keys = %v, want %v", keys, want)
+	}
+	sameBuilder, _ := NewProviderCapacityKeyBuilder("rag-capacity", "dashscope", "qwen3.6-flash")
+	sameKeys, _ := sameBuilder(42)
+	otherBuilder, _ := NewProviderCapacityKeyBuilder("rag-capacity", "dashscope", "qwen-plus")
+	otherKeys, _ := otherBuilder(42)
+	if fmt.Sprint(sameKeys) != fmt.Sprint(keys) || fmt.Sprint(otherKeys) == fmt.Sprint(keys) {
+		t.Fatalf("same=%v other=%v base=%v", sameKeys, otherKeys, keys)
+	}
+	if _, err := builder(0); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {
+		t.Fatalf("builder(invalid owner) error = %v", err)
 	}
 }
 
