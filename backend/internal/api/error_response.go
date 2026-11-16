@@ -66,6 +66,15 @@ const (
 	errorCodeConversationDuplicateMessage     = "conversation_duplicate_message"
 	errorCodeConversationAnswerActive         = "conversation_answer_active"
 	errorCodeConversationArchived             = "conversation_archived"
+	errorCodeInvalidAgentRunID                = "invalid_agent_run_id"
+	errorCodeInvalidAgentRunRequest           = "invalid_agent_run_request"
+	errorCodeAgentRunNotFound                 = "agent_run_not_found"
+	errorCodeAgentRunIdempotencyConflict      = "agent_run_idempotency_conflict"
+	errorCodeConversationExecutionActive      = "conversation_execution_active"
+	errorCodeAgentRunProcessing               = "agent_run_processing"
+	errorCodeAgentRunTerminal                 = "agent_run_terminal"
+	errorCodeAgentRunOwnerQueueCapacity       = "agent_run_owner_queue_capacity"
+	errorCodeAgentRunQueueCapacity            = "agent_run_queue_capacity"
 	errorCodeInternal                         = "internal_error"
 )
 
