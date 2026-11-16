@@ -202,7 +202,7 @@ func (r *ConversationRepository) UpdateConversation(
 	}
 
 	if input.Status != nil && *input.Status == conversationdomain.StatusArchived {
-		var activeAnswerExists bool
+		var activeExecutionExists bool
 		if err := tx.QueryRow(
 			ctx,
 			`SELECT EXISTS (
@@ -211,13 +211,21 @@ func (r *ConversationRepository) UpdateConversation(
 				WHERE conversation_id = $1
 				  AND owner_user_id = $2
 				  AND status IN ('queued', 'processing')
+				UNION ALL
+				SELECT 1
+				FROM agent_runs
+				WHERE conversation_id = $1
+				  AND owner_user_id = $2
+				  AND status IN ('queued', 'processing')
 			)`,
 			locked.ID,
 			scope.OwnerUserID(),
-		).Scan(&activeAnswerExists); err != nil {
-			return conversationdomain.Conversation{}, fmt.Errorf("check active answer job before archive: %w", err)
+		).Scan(&activeExecutionExists); err != nil {
+			return conversationdomain.Conversation{}, fmt.Errorf("check active conversation execution before archive: %w", err)
 		}
-		if activeAnswerExists {
+		if activeExecutionExists {
+			// Historical public compatibility: this error still maps to
+			// conversation_answer_active for both Answer and Agent execution.
 			return conversationdomain.Conversation{}, conversationdomain.ErrAnswerActive
 		}
 
@@ -301,7 +309,7 @@ func (r *ConversationRepository) DeleteConversation(
 		return fmt.Errorf("lock scoped conversation for deletion: %w", err)
 	}
 
-	var activeAnswerExists bool
+	var activeExecutionExists bool
 	if err := tx.QueryRow(
 		ctx,
 		`SELECT EXISTS (
@@ -310,13 +318,21 @@ func (r *ConversationRepository) DeleteConversation(
 			WHERE conversation_id = $1
 			  AND owner_user_id = $2
 			  AND status IN ('queued', 'processing')
+			UNION ALL
+			SELECT 1
+			FROM agent_runs
+			WHERE conversation_id = $1
+			  AND owner_user_id = $2
+			  AND status IN ('queued', 'processing')
 		)`,
 		lockedConversationID,
 		scope.OwnerUserID(),
-	).Scan(&activeAnswerExists); err != nil {
-		return fmt.Errorf("check active answer job before conversation deletion: %w", err)
+	).Scan(&activeExecutionExists); err != nil {
+		return fmt.Errorf("check active conversation execution before conversation deletion: %w", err)
 	}
-	if activeAnswerExists {
+	if activeExecutionExists {
+		// Historical public compatibility: this error still maps to
+		// conversation_answer_active for both Answer and Agent execution.
 		return conversationdomain.ErrAnswerActive
 	}
 

@@ -2,6 +2,7 @@ package postgres_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	agentapplication "rag-reasoning-platform/backend/internal/application/agent"
 	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
+	agentdomain "rag-reasoning-platform/backend/internal/domain/agent"
 	conversationdomain "rag-reasoning-platform/backend/internal/domain/conversation"
 	postgresrepository "rag-reasoning-platform/backend/internal/infrastructure/postgres"
 )
@@ -1342,5 +1345,338 @@ func TestAnswerJobRepositoryGetsLatestConversationJobWithinOwnerScope(t *testing
 		latest.Result.Answer != "latest answer" || latest.Result.TotalTokens != 14 ||
 		len(latest.Result.Sources) != 1 || latest.Result.Sources[0].OriginalName != "source.pdf" {
 		t.Fatalf("latest job = %+v, want third succeeded snapshot", latest)
+	}
+}
+
+func TestConversationLifecycleGuardsActiveAgentAndAllowsTerminalRuns(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	conversationRepository := postgresrepository.NewConversationRepository(pool)
+	agentRepository := newAgentTestRepository(pool, "agent-worker-conversation-lifecycle")
+	owner := answerJobTestOwnerScope(t, ctx, pool, "conversation-agent-lifecycle")
+	archived := conversationdomain.StatusArchived
+	stepIDsByConversation := make(map[int64][]int64)
+
+	createConversation := func(title string) conversationdomain.Conversation {
+		t.Helper()
+		conversation, err := conversationRepository.CreateConversation(
+			ctx, owner, conversationdomain.CreateInput{Title: title},
+		)
+		if err != nil {
+			t.Fatalf("create %q conversation: %v", title, err)
+		}
+		return conversation
+	}
+	assertArchiveBlocked := func(conversationID int64) {
+		t.Helper()
+		if _, err := conversationRepository.UpdateConversation(ctx, owner, conversationdomain.UpdateInput{
+			ConversationID: conversationID, Status: &archived,
+		}); !errors.Is(err, conversationdomain.ErrAnswerActive) {
+			t.Fatalf("archive active Agent conversation %d error = %v", conversationID, err)
+		}
+	}
+	assertDeleteBlocked := func(conversationID int64) {
+		t.Helper()
+		if err := conversationRepository.DeleteConversation(ctx, owner, conversationID); !errors.Is(err, conversationdomain.ErrAnswerActive) {
+			t.Fatalf("delete active Agent conversation %d error = %v", conversationID, err)
+		}
+	}
+
+	canceledConversation := createConversation("queued Agent")
+	canceledQueued := queueAgentTestRun(t, ctx, agentRepository, owner, canceledConversation.ID, "queued-agent")
+	assertArchiveBlocked(canceledConversation.ID)
+	assertDeleteBlocked(canceledConversation.ID)
+	if _, err := agentRepository.CancelRun(ctx, owner, canceledQueued.Run.ID); err != nil {
+		t.Fatalf("cancel queued Agent: %v", err)
+	}
+	if _, err := conversationRepository.UpdateConversation(ctx, owner, conversationdomain.UpdateInput{
+		ConversationID: canceledConversation.ID, Status: &archived,
+	}); err != nil {
+		t.Fatalf("archive canceled Agent conversation: %v", err)
+	}
+	if err := conversationRepository.DeleteConversation(ctx, owner, canceledConversation.ID); err != nil {
+		t.Fatalf("delete canceled Agent conversation: %v", err)
+	}
+
+	failedConversation := createConversation("processing Agent failure")
+	queueAgentTestRun(t, ctx, agentRepository, owner, failedConversation.ID, "failed-agent")
+	failedClaim, err := agentRepository.ClaimNextRun(ctx)
+	if err != nil {
+		t.Fatalf("claim failed Agent fixture: %v", err)
+	}
+	assertArchiveBlocked(failedConversation.ID)
+	assertDeleteBlocked(failedConversation.ID)
+	failedStep, err := agentRepository.PersistDecision(ctx, failedClaim.ID, failedClaim.LeaseToken, agentapplication.PersistDecisionInput{
+		ToolName: "search_documents", Arguments: json.RawMessage(`{"query":"failure","strategy":"keyword","top_k":1}`),
+		PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+	})
+	if err != nil {
+		t.Fatalf("persist failed Agent decision: %v", err)
+	}
+	stepIDsByConversation[failedConversation.ID] = []int64{failedStep.ID}
+	if err := agentRepository.MarkRunFailed(
+		ctx,
+		failedClaim.ID,
+		failedClaim.LeaseToken,
+		agentdomain.ErrorCodeExecutionFailed,
+		"safe failure",
+	); err != nil {
+		t.Fatalf("fail processing Agent: %v", err)
+	}
+	if _, err := conversationRepository.UpdateConversation(ctx, owner, conversationdomain.UpdateInput{
+		ConversationID: failedConversation.ID, Status: &archived,
+	}); err != nil {
+		t.Fatalf("archive failed Agent conversation: %v", err)
+	}
+	if err := conversationRepository.DeleteConversation(ctx, owner, failedConversation.ID); err != nil {
+		t.Fatalf("delete failed Agent conversation: %v", err)
+	}
+
+	succeededConversation := createConversation("processing Agent success")
+	queueAgentTestRun(t, ctx, agentRepository, owner, succeededConversation.ID, "succeeded-agent")
+	succeededClaim, err := agentRepository.ClaimNextRun(ctx)
+	if err != nil {
+		t.Fatalf("claim succeeded Agent fixture: %v", err)
+	}
+	assertDeleteBlocked(succeededConversation.ID)
+	finalStep, err := agentRepository.CommitFinal(ctx, succeededClaim.ID, succeededClaim.LeaseToken, agentapplication.CommitFinalInput{
+		Result: agentapplication.FinalStepResult{
+			Answer: "done", ResponseLanguage: agentdomain.ResponseLanguageEnglish,
+			Payload: json.RawMessage(`{"sources":[]}`),
+		},
+		PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+	})
+	if err != nil {
+		t.Fatalf("complete processing Agent: %v", err)
+	}
+	stepIDsByConversation[succeededConversation.ID] = []int64{finalStep.ID}
+	if _, err := conversationRepository.UpdateConversation(ctx, owner, conversationdomain.UpdateInput{
+		ConversationID: succeededConversation.ID, Status: &archived,
+	}); err != nil {
+		t.Fatalf("archive succeeded Agent conversation: %v", err)
+	}
+	if err := conversationRepository.DeleteConversation(ctx, owner, succeededConversation.ID); err != nil {
+		t.Fatalf("delete succeeded Agent conversation: %v", err)
+	}
+
+	for _, conversationID := range []int64{
+		canceledConversation.ID, failedConversation.ID, succeededConversation.ID,
+	} {
+		var conversations int
+		var messages int
+		var runs int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM conversations WHERE id = $1`, conversationID).Scan(&conversations); err != nil {
+			t.Fatalf("count deleted conversation %d: %v", conversationID, err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = $1`, conversationID).Scan(&messages); err != nil {
+			t.Fatalf("count deleted messages %d: %v", conversationID, err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM agent_runs WHERE conversation_id = $1`, conversationID).Scan(&runs); err != nil {
+			t.Fatalf("count deleted Agent Runs %d: %v", conversationID, err)
+		}
+		steps := 0
+		for _, stepID := range stepIDsByConversation[conversationID] {
+			var stepCount int
+			if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM agent_steps WHERE id = $1`, stepID).Scan(&stepCount); err != nil {
+				t.Fatalf("count deleted Agent Step %d: %v", stepID, err)
+			}
+			steps += stepCount
+		}
+		if conversations != 0 || messages != 0 || runs != 0 || steps != 0 {
+			t.Fatalf("cascade counts for %d = conversations:%d messages:%d runs:%d steps:%d", conversationID, conversations, messages, runs, steps)
+		}
+	}
+}
+
+func TestConversationAgentGuardPreservesOwnerIsolation(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	conversationRepository := postgresrepository.NewConversationRepository(pool)
+	agentRepository := newAgentTestRepository(pool, "agent-worker-owner-isolation")
+	ownerA := answerJobTestOwnerScope(t, ctx, pool, "conversation-agent-owner-a")
+	ownerB := answerJobTestOwnerScope(t, ctx, pool, "conversation-agent-owner-b")
+	conversationB, err := conversationRepository.CreateConversation(
+		ctx, ownerB, conversationdomain.CreateInput{Title: "Owner B active Agent"},
+	)
+	if err != nil {
+		t.Fatalf("create owner B conversation: %v", err)
+	}
+	queueAgentTestRun(t, ctx, agentRepository, ownerB, conversationB.ID, "owner-b-agent")
+	archived := conversationdomain.StatusArchived
+	conversationA, err := conversationRepository.CreateConversation(
+		ctx, ownerA, conversationdomain.CreateInput{Title: "Owner A clean conversation"},
+	)
+	if err != nil {
+		t.Fatalf("create owner A conversation: %v", err)
+	}
+	if _, err := conversationRepository.UpdateConversation(ctx, ownerA, conversationdomain.UpdateInput{
+		ConversationID: conversationA.ID, Status: &archived,
+	}); err != nil {
+		t.Fatalf("owner B Agent blocked owner A archive: %v", err)
+	}
+	if err := conversationRepository.DeleteConversation(ctx, ownerA, conversationA.ID); err != nil {
+		t.Fatalf("owner B Agent blocked owner A delete: %v", err)
+	}
+	if _, err := conversationRepository.UpdateConversation(ctx, ownerA, conversationdomain.UpdateInput{
+		ConversationID: conversationB.ID, Status: &archived,
+	}); !errors.Is(err, conversationdomain.ErrNotFound) {
+		t.Fatalf("cross-owner archive error = %v, want ErrNotFound", err)
+	}
+	if err := conversationRepository.DeleteConversation(ctx, ownerA, conversationB.ID); !errors.Is(err, conversationdomain.ErrNotFound) {
+		t.Fatalf("cross-owner delete error = %v, want ErrNotFound", err)
+	}
+	active, err := agentRepository.GetActiveRunByConversationID(ctx, ownerB, conversationB.ID)
+	if err != nil || active.Status != agentdomain.RunStatusQueued {
+		t.Fatalf("owner B active Agent after cross-owner attempts = %+v, %v", active, err)
+	}
+}
+
+func TestConversationDeleteSerializesWithAgentRunCreation(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	conversationRepository := postgresrepository.NewConversationRepository(pool)
+	agentRepository := newAgentTestRepository(pool, "agent-worker-delete-race")
+	owner := answerJobTestOwnerScope(t, ctx, pool, "conversation-agent-delete-race")
+
+	for iteration := range 8 {
+		conversation, err := conversationRepository.CreateConversation(
+			ctx, owner, conversationdomain.CreateInput{Title: fmt.Sprintf("Agent delete race %d", iteration)},
+		)
+		if err != nil {
+			t.Fatalf("create delete-race conversation %d: %v", iteration, err)
+		}
+		start := make(chan struct{})
+		var done sync.WaitGroup
+		done.Add(2)
+		var deleteErr error
+		var createErr error
+		var created agentapplication.QueueResult
+		go func() {
+			defer done.Done()
+			<-start
+			deleteErr = conversationRepository.DeleteConversation(ctx, owner, conversation.ID)
+		}()
+		go func() {
+			defer done.Done()
+			<-start
+			created, createErr = agentRepository.CreateRun(ctx, owner, agentapplication.CreateRunInput{
+				ConversationID:   conversation.ID,
+				Content:          "Agent delete race",
+				ClientRunID:      fmt.Sprintf("delete-race-%d", iteration),
+				ResponseLanguage: agentdomain.ResponseLanguageEnglish,
+				Budget: agentdomain.Budget{
+					MaxSteps: agentdomain.MaxPersistedSteps, MaxTotalTokens: agentdomain.MaxRunTotalTokens,
+					DeadlineAt: time.Now().Add(2 * time.Minute),
+				},
+			})
+		}()
+		close(start)
+		done.Wait()
+
+		switch {
+		case deleteErr == nil:
+			if !errors.Is(createErr, conversationdomain.ErrNotFound) {
+				t.Fatalf("iteration %d delete won but Agent create error = %v", iteration, createErr)
+			}
+		case createErr == nil:
+			if !errors.Is(deleteErr, conversationdomain.ErrAnswerActive) {
+				t.Fatalf("iteration %d Agent won but delete error = %v", iteration, deleteErr)
+			}
+			if _, err := agentRepository.CancelRun(ctx, owner, created.Run.ID); err != nil {
+				t.Fatalf("cancel delete-race Agent %d: %v", iteration, err)
+			}
+			if err := conversationRepository.DeleteConversation(ctx, owner, conversation.ID); err != nil {
+				t.Fatalf("cleanup delete-race conversation %d: %v", iteration, err)
+			}
+		default:
+			t.Fatalf("iteration %d invalid delete/Agent result = %v / %v", iteration, deleteErr, createErr)
+		}
+	}
+}
+
+func TestConversationArchiveSerializesWithAgentRunCreation(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	conversationRepository := postgresrepository.NewConversationRepository(pool)
+	agentRepository := newAgentTestRepository(pool, "agent-worker-archive-race")
+	owner := answerJobTestOwnerScope(t, ctx, pool, "conversation-agent-archive-race")
+	archived := conversationdomain.StatusArchived
+
+	for iteration := range 8 {
+		conversation, err := conversationRepository.CreateConversation(
+			ctx, owner, conversationdomain.CreateInput{Title: fmt.Sprintf("Agent archive race %d", iteration)},
+		)
+		if err != nil {
+			t.Fatalf("create archive-race conversation %d: %v", iteration, err)
+		}
+		start := make(chan struct{})
+		var done sync.WaitGroup
+		done.Add(2)
+		var archiveErr error
+		var createErr error
+		var created agentapplication.QueueResult
+		go func() {
+			defer done.Done()
+			<-start
+			_, archiveErr = conversationRepository.UpdateConversation(ctx, owner, conversationdomain.UpdateInput{
+				ConversationID: conversation.ID, Status: &archived,
+			})
+		}()
+		go func() {
+			defer done.Done()
+			<-start
+			created, createErr = agentRepository.CreateRun(ctx, owner, agentapplication.CreateRunInput{
+				ConversationID:   conversation.ID,
+				Content:          "Agent archive race",
+				ClientRunID:      fmt.Sprintf("archive-race-%d", iteration),
+				ResponseLanguage: agentdomain.ResponseLanguageEnglish,
+				Budget: agentdomain.Budget{
+					MaxSteps: agentdomain.MaxPersistedSteps, MaxTotalTokens: agentdomain.MaxRunTotalTokens,
+					DeadlineAt: time.Now().Add(2 * time.Minute),
+				},
+			})
+		}()
+		close(start)
+		done.Wait()
+
+		switch {
+		case archiveErr == nil:
+			if !errors.Is(createErr, conversationdomain.ErrArchived) {
+				t.Fatalf("iteration %d archive won but Agent create error = %v", iteration, createErr)
+			}
+		case createErr == nil:
+			if !errors.Is(archiveErr, conversationdomain.ErrAnswerActive) {
+				t.Fatalf("iteration %d Agent won but archive error = %v", iteration, archiveErr)
+			}
+			if _, err := agentRepository.CancelRun(ctx, owner, created.Run.ID); err != nil {
+				t.Fatalf("cancel archive-race Agent %d: %v", iteration, err)
+			}
+			if _, err := conversationRepository.UpdateConversation(ctx, owner, conversationdomain.UpdateInput{
+				ConversationID: conversation.ID, Status: &archived,
+			}); err != nil {
+				t.Fatalf("archive race cleanup %d: %v", iteration, err)
+			}
+		default:
+			t.Fatalf("iteration %d invalid archive/Agent result = %v / %v", iteration, archiveErr, createErr)
+		}
+		if err := conversationRepository.DeleteConversation(ctx, owner, conversation.ID); err != nil {
+			t.Fatalf("delete archive-race conversation %d: %v", iteration, err)
+		}
 	}
 }
