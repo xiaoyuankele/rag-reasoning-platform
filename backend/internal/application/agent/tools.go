@@ -23,12 +23,13 @@ const (
 
 	maxToolArgumentsBytes = 8 * 1024
 	maxToolResultBytes    = 32 * 1024
-	maxSearchQueryRunes   = 1000
-	maxSearchTopK         = 10
-	maxEvidenceRefs       = 10
 	maxEvidenceTitleRunes = 500
 	maxSnippetRunes       = 2000
-	maxExcerptRunes       = 4000
+
+	MaxSearchQueryRunes     = 1000
+	MaxSearchTopK           = 10
+	MaxReadEvidenceRefs     = 10
+	MaxEvidenceExcerptRunes = 4000
 )
 
 var (
@@ -349,7 +350,7 @@ func (r *ToolRegistry) ResolveFinalSources(
 	steps []agentdomain.Step,
 	evidenceRefs []string,
 ) ([]FinalSource, error) {
-	if len(evidenceRefs) == 0 || len(evidenceRefs) > maxEvidenceRefs {
+	if len(evidenceRefs) == 0 || len(evidenceRefs) > MaxReadEvidenceRefs {
 		return nil, ErrFinalEvidenceRequired
 	}
 	ledger, err := buildReadEvidenceLedger(run, steps)
@@ -392,9 +393,9 @@ func decodeSearchDocumentsInput(raw json.RawMessage) (SearchDocumentsInput, erro
 		return SearchDocumentsInput{}, ErrInvalidToolCall
 	}
 	input.Query = strings.TrimSpace(input.Query)
-	if input.Query == "" || !utf8.ValidString(input.Query) || utf8.RuneCountInString(input.Query) > maxSearchQueryRunes ||
+	if input.Query == "" || !utf8.ValidString(input.Query) || utf8.RuneCountInString(input.Query) > MaxSearchQueryRunes ||
 		(input.Strategy != SearchStrategyKeyword && input.Strategy != SearchStrategySemantic) ||
-		(input.DocumentID != nil && *input.DocumentID <= 0) || input.TopK <= 0 || input.TopK > maxSearchTopK {
+		(input.DocumentID != nil && *input.DocumentID <= 0) || input.TopK <= 0 || input.TopK > MaxSearchTopK {
 		return SearchDocumentsInput{}, ErrInvalidToolCall
 	}
 	return input, nil
@@ -405,7 +406,7 @@ func decodeReadEvidenceArguments(raw json.RawMessage) (readEvidenceArguments, er
 	if err := validateRootObjectKeys(raw, "evidence_refs"); err != nil {
 		return readEvidenceArguments{}, ErrInvalidToolCall
 	}
-	if err := decodeStrictJSON(raw, &input); err != nil || len(input.EvidenceRefs) == 0 || len(input.EvidenceRefs) > maxEvidenceRefs {
+	if err := decodeStrictJSON(raw, &input); err != nil || len(input.EvidenceRefs) == 0 || len(input.EvidenceRefs) > MaxReadEvidenceRefs {
 		return readEvidenceArguments{}, ErrInvalidToolCall
 	}
 	seen := make(map[string]struct{}, len(input.EvidenceRefs))
@@ -576,7 +577,7 @@ func validReadEvidence(item ReadEvidenceItem, locator EvidenceLocator) bool {
 		item.Title == locator.Title && optionalIntEqual(item.PageStart, locator.PageStart) &&
 		optionalIntEqual(item.PageEnd, locator.PageEnd) && validEvidenceTitle(item.Title) &&
 		strings.TrimSpace(item.Excerpt) != "" &&
-		utf8.ValidString(item.Excerpt) && utf8.RuneCountInString(item.Excerpt) <= maxExcerptRunes &&
+		utf8.ValidString(item.Excerpt) && utf8.RuneCountInString(item.Excerpt) <= MaxEvidenceExcerptRunes &&
 		strings.TrimSpace(item.ContentHash) == item.ContentHash && item.ContentHash != "" && len(item.ContentHash) <= 128 &&
 		validPageRange(item.PageStart, item.PageEnd)
 }

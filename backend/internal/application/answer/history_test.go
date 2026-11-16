@@ -3,6 +3,7 @@ package answer
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -73,6 +74,29 @@ func TestSelectConversationHistoryUsesNewestCompleteTurns(t *testing.T) {
 		if selected.Messages[index].Content != content {
 			t.Fatalf("messages[%d] = %q, want %q", index, selected.Messages[index].Content, content)
 		}
+	}
+}
+
+func TestExportedConversationHistorySelectorReusesM31Semantics(t *testing.T) {
+	messages := []conversationdomain.Message{
+		testHistoryMessage(1, conversationdomain.RoleUser, "old", conversationdomain.MessageStatusCompleted),
+		testHistoryMessage(2, conversationdomain.RoleAssistant, "answer", conversationdomain.MessageStatusCompleted),
+		testHistoryMessage(3, conversationdomain.RoleUser, strings.Repeat("最近历史", 100), conversationdomain.MessageStatusCompleted),
+	}
+	want := selectConversationHistory(messages, ResponseLanguageChinese, 1, 60)
+	got, language, err := SelectConversationHistoryForQuestion(
+		messages,
+		ResponseLanguageAuto,
+		"当前问题",
+		1,
+		60,
+	)
+	if err != nil || language != ResponseLanguageChinese || !reflect.DeepEqual(got, want) {
+		t.Fatalf("exported selector = %+v/%s/%v, want %+v/zh", got, language, err, want)
+	}
+	config := ConversationHistoryConfig{MaxTurns: 6, MaxTokens: 1000, InputTokenBudget: 5000}
+	if config.CandidateMessageLimit() != 14 {
+		t.Fatalf("candidate limit = %d, want 14", config.CandidateMessageLimit())
 	}
 }
 

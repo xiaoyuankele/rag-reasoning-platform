@@ -41,6 +41,14 @@ type ConversationHistoryConfig struct {
 	InputTokenBudget int
 }
 
+// CandidateMessageLimit includes one extra turn so selection can report truncation.
+func (c ConversationHistoryConfig) CandidateMessageLimit() int {
+	if !c.IsValid() {
+		return 0
+	}
+	return c.MaxTurns*2 + 2
+}
+
 // IsValid 保证历史不会占满整个 Prompt，至少给当前问题和文档证据保留空间。
 func (c ConversationHistoryConfig) IsValid() bool {
 	return c.MaxTurns > 0 && c.MaxTokens > 0 &&
@@ -59,11 +67,33 @@ type ConversationHistoryReader interface {
 	) ([]conversationdomain.Message, error)
 }
 
-type selectedConversationHistory struct {
+type ConversationHistorySelection struct {
 	Messages        []conversationdomain.Message
 	TurnCount       int
 	EstimatedTokens int
 	Truncated       bool
+}
+
+type selectedConversationHistory = ConversationHistorySelection
+
+// SelectConversationHistoryForQuestion exposes the single M3.1 selector to
+// other bounded conversation consumers without duplicating its token estimator.
+func SelectConversationHistoryForQuestion(
+	messages []conversationdomain.Message,
+	requested ResponseLanguage,
+	currentQuestion string,
+	maxTurns int,
+	maxTokens int,
+) (ConversationHistorySelection, ResponseLanguage, error) {
+	currentQuestion = strings.TrimSpace(currentQuestion)
+	if currentQuestion == "" || maxTurns <= 0 || maxTokens <= 0 {
+		return ConversationHistorySelection{}, "", ErrInvalidConversationHistoryInput
+	}
+	resolved, err := resolveResponseLanguage(requested, currentQuestion)
+	if err != nil {
+		return ConversationHistorySelection{}, "", err
+	}
+	return selectConversationHistory(messages, resolved, maxTurns, maxTokens), resolved, nil
 }
 
 func (s *Service) loadConversationHistory(
@@ -87,7 +117,7 @@ func (s *Service) loadConversationHistory(
 
 	// 一轮最多包含 user + assistant。额外多取一轮用于判断是否发生裁剪；
 	// standalone user-only 消息只会让候选更充足，不会突破后续双重预算。
-	candidateLimit := s.historyConfig.MaxTurns*2 + 2
+	candidateLimit := s.historyConfig.CandidateMessageLimit()
 	messages, err := s.historyReader.ListCompletedMessagesBefore(
 		ctx,
 		scope,
