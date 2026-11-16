@@ -15,6 +15,7 @@ import (
 var (
 	ErrInvalidModelDecision        = errors.New("agent model decision is invalid")
 	ErrModelTemporarilyUnavailable = errors.New("agent model is temporarily unavailable")
+	ErrModelRequestRejected        = errors.New("agent model request was rejected")
 	ErrAgentContextUnavailable     = errors.New("agent context is unavailable")
 )
 
@@ -117,6 +118,7 @@ type RemainingBudget struct {
 type ModelObservation struct {
 	SequenceNo int
 	ToolName   string
+	Arguments  json.RawMessage
 	Result     json.RawMessage
 }
 

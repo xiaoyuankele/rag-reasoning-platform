@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -453,6 +454,10 @@ func TestWorkerRunsDeterministicSearchReadFinalChain(t *testing.T) {
 		len(model.requests[1].Observations) != 1 || len(model.requests[2].Observations) != 2 {
 		t.Fatalf("model requests = %+v", model.requests)
 	}
+	if !strings.Contains(string(model.requests[1].Observations[0].Arguments), `"query":"bridge"`) ||
+		!strings.Contains(string(model.requests[2].Observations[1].Arguments), `"step-1:item-1"`) {
+		t.Fatalf("model observation arguments = %+v", model.requests)
+	}
 	if repository.finalInput == nil {
 		t.Fatal("final input was not persisted")
 	}
@@ -587,7 +592,28 @@ func TestWorkerExecutesRecoveredPendingActionBeforeCallingModel(t *testing.T) {
 	if calls := model.callCount(); calls != 1 {
 		t.Fatalf("model calls after recovered Tool = %d, want 1 final call", calls)
 	}
+	if len(model.requests) != 1 || len(model.requests[0].Observations) != 1 ||
+		string(model.requests[0].Observations[0].Arguments) != string(pending.Arguments) {
+		t.Fatalf("recovered observation arguments = %+v", model.requests)
+	}
 	if got := trace.snapshot(); len(got) < 3 || got[0] != "claim:pending" || got[1] != "tool:search_documents" {
 		t.Fatalf("recovery trace = %v", got)
+	}
+}
+
+func TestModelObservationsDefensivelyCopyArgumentsAndResult(t *testing.T) {
+	toolName := ToolSearchDocuments
+	steps := []agentdomain.Step{{
+		ID: 1, RunID: 1, SequenceNo: 1, Kind: agentdomain.StepKindToolCall,
+		Status: agentdomain.StepStatusSucceeded, ToolName: &toolName,
+		Arguments: json.RawMessage(`{"query":"original"}`),
+		Result:    json.RawMessage(`{"items":[]}`),
+	}}
+	observations := modelObservations(steps)
+	steps[0].Arguments[0] = 'x'
+	steps[0].Result[0] = 'x'
+	if len(observations) != 1 || string(observations[0].Arguments) != `{"query":"original"}` ||
+		string(observations[0].Result) != `{"items":[]}` {
+		t.Fatalf("observations changed with source Step: %+v", observations)
 	}
 }

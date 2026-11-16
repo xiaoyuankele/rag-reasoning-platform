@@ -483,6 +483,7 @@ func modelObservations(steps []agentdomain.Step) []ModelObservation {
 		observations = append(observations, ModelObservation{
 			SequenceNo: step.SequenceNo,
 			ToolName:   *step.ToolName,
+			Arguments:  append(json.RawMessage(nil), step.Arguments...),
 			Result:     append(json.RawMessage(nil), step.Result...),
 		})
 	}
