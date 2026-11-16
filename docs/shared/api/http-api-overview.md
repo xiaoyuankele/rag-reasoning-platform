@@ -1,6 +1,6 @@
 # HTTP API 总览
 
-> 更新时间：2026-11-01。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
+> 更新时间：2026-11-16。本文件是当前前后端协作的人工可读契约总览；具体字段以 Go Handler、
 > Handler 测试和后续 OpenAPI 文件为最终校验依据。
 
 ## 1. 当前访问边界
@@ -11,8 +11,9 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 禁止再次产生无主文档；后端双用户数据隔离发布验收已经通过。公开互联网部署仍需配套 HTTPS、真实邮件渠道、
 反向代理与生产环境安全配置。
 
-当前工作区候选已经增加会话 M1 持久化接口，以及 M2 第一片助手占位与异步 Answer Job 关联。候选实现尚未形成
-提交或发布版本；历史消息尚未进入 Generation Prompt，SSE、刷新后的活动任务恢复、摘要和历史证据快照仍按路线分阶段实现。
+当前工作区候选已经增加会话 M1/M2，以及 M3.1 有界历史：最近 completed 消息已进入 linked Answer Job 的
+检索与 Generation Prompt。SSE、旧历史摘要和独立历史证据快照仍按路线分阶段实现。Agent v0 的正式 HTTP
+契约见 [Agent v0 HTTP Contract](agent-v0-http-contract.md)；相关路由默认关闭，尚未发布。
 
 身份只来自后端验证的 Session，不能依赖前端传入 `user_id`。团队工作区和成员权限属于 P7。
 
@@ -36,14 +37,19 @@ Session 保护与 `owner_user_id` SQL 隔离。历史无归属数据已经完成
 | `GET` | `/conversations` | Session Cookie；可选 `page`、`page_size` | `200` | 分页获取当前用户会话 | 工作区候选；M1/已隔离 |
 | `GET` | `/conversations/cursor` | Session Cookie；可选 `page_size`、opaque `cursor` | `200` | 按 `updated_at,id` 动态游标加载会话 | 工作区候选；M2/OwnerScope/keyset |
 | `GET` | `/conversations/:id` | Session Cookie；路径参数 `id` | `200` | 获取当前用户会话详情 | 工作区候选；M1/已隔离 |
-| `PATCH` | `/conversations/:id` | Session Cookie；JSON：可选 `title`、`status=active\|archived`，至少一项 | `200`；活动回答冲突 `409` | 重命名、归档或恢复会话 | 工作区候选；M2/严格 JSON/已隔离 |
-| `DELETE` | `/conversations/:id` | Session Cookie；路径参数 `id` | `204`；活动回答冲突 `409` | 级联删除会话、消息和关联 Answer Job | 工作区候选；M2/已隔离/需二次确认 |
+| `PATCH` | `/conversations/:id` | Session Cookie；JSON：可选 `title`、`status=active\|archived`，至少一项 | `200`；活动 Answer/Agent 冲突 `409` | 重命名、归档或恢复会话 | 工作区候选；M2/严格 JSON/已隔离 |
+| `DELETE` | `/conversations/:id` | Session Cookie；路径参数 `id` | `204`；活动 Answer/Agent 冲突 `409` | 级联删除会话、消息及关联任务 | 工作区候选；M2/已隔离/需二次确认 |
 | `GET` | `/conversations/:id/messages` | Session Cookie；路径参数 `id`，可选 `page`、`page_size`、`order=asc\|desc` | `200` | 分页读取消息；`desc` 的第 1 页是最新窗口，页内仍升序 | 工作区候选；M1/已隔离 |
 | `GET` | `/conversations/:id/messages/cursor` | Session Cookie；路径参数 `id`，可选 `page_size`、opaque `cursor` | `200` | 从最新窗口按不可变 sequence 游标加载更早消息 | 工作区候选；M2/OwnerScope/keyset |
 | `POST` | `/conversations/:id/messages` | Session Cookie；JSON：`content`、可选 `client_message_id` | 新消息 `201`；幂等重放 `200` | 保存当前用户消息；暂不触发模型生成 | 工作区候选；M1/幂等/已隔离 |
-| `POST` | `/conversations/:id/answer-jobs` | Session Cookie；JSON：`content`、可选 `client_message_id`、`document_id`、`top_k`、`response_language` | 新任务 `202`；幂等重放 `200` | 原子保存用户消息和助手 `generating` 占位，再接入异步 Answer Job | 工作区候选；M2/双开关控制 |
+| `POST` | `/conversations/:id/answer-jobs` | Session Cookie；JSON：`content`、可选 `client_message_id`、`document_id`、`top_k`、`response_language` | 新任务 `202`；幂等重放 `200` | 保存用户消息和助手 `generating` 占位，再接入异步 Answer Job | 工作区候选；M2/双开关控制 |
 | `GET` | `/conversations/:id/answer-jobs/active` | Session Cookie；路径参数 `id` | 活动任务 `200`；无活动任务 `204` | 按会话恢复唯一的 queued/processing Answer Job | 工作区候选；M2/OwnerScope/双开关控制 |
 | `GET` | `/conversations/:id/answer-jobs/latest` | Session Cookie；路径参数 `id` | 最新任务 `200`；无关联任务 `204` | 恢复随会话保留的最新 Job、参数、来源和 Token | 工作区候选；M2/OwnerScope/双开关控制 |
+| `POST` | `/conversations/:id/agent-runs` | Session Cookie；JSON：`content`、`client_run_id`、可选 `document_id`、`response_language` | 新 Run `202`；幂等重放 `200` | 创建有界、只读、可恢复的 Agent Run | Agent v0；默认关闭 |
+| `GET` | `/agent-runs/:id` | Session Cookie；路径参数 `id` | `200` | 查询当前用户 Agent Run、Step、结果与安全错误 | Agent v0；OwnerScope/polling |
+| `GET` | `/conversations/:id/agent-runs/active` | Session Cookie；路径参数 `id` | 活动 Run `200`；无活动 Run `204` | 页面刷新后恢复 queued/processing Agent | Agent v0；OwnerScope/polling |
+| `GET` | `/conversations/:id/agent-runs/latest` | Session Cookie；路径参数 `id` | 最新 Run `200`；从未创建 `204` | 恢复最近 Agent 终态与时间线 | Agent v0；OwnerScope/polling |
+| `POST` | `/agent-runs/:id/cancel` | Session Cookie；路径参数 `id` | queued `200`；processing/terminal `409` | 取消尚未执行的 Agent Run | Agent v0；queued-only |
 | `POST` | `/documents/:id/embeddings` | Session Cookie；路径参数 `id` | 新建 `202`；活动任务已存在 `200`；用户满额 `429`；全局满额 `503` | 保存当前用户的向量化意图 | 用户功能；已隔离/幂等/背压 |
 | `POST` | `/embedding-jobs/batch` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 对多份文档逐项创建或复用向量任务 | 用户功能；已隔离/逐项结果/背压 |
 | `POST` | `/embedding-jobs/latest` | Session Cookie；JSON：`document_ids`，最多 100 项 | `200` | 按文档批量发现当前用户可见的最新向量任务 | 用户功能；已隔离/状态恢复 |
