@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type {
   AnswerResponseLanguage,
   GroundedAnswerSource,
@@ -32,6 +32,8 @@ import {
   queueConversationAnswer,
   updateConversation,
 } from '../features/conversations/api/conversation-api'
+import AgentRunPanel from '../features/agents/ui/AgentRunPanel.vue'
+import { useAgentRunWorkspace } from '../features/agents/model/use-agent-run-workspace'
 import DocumentScopePicker from '../features/documents/ui/DocumentScopePicker.vue'
 import { toApiError } from '../shared/api/api-error'
 import { capacityFailureFromApiError, type CapacityFailure } from '../shared/api/capacity-error'
@@ -68,7 +70,8 @@ const editingTitle = ref(false)
 const titleDraft = ref('')
 const deleteConfirmationConversationId = ref<number | null>(null)
 const sending = ref(false)
-const generateAnswer = ref(false)
+type ComposerMode = 'message' | 'answer' | 'agent'
+const composerMode = ref<ComposerMode>('message')
 const documentScope = ref<DocumentScope>(allDocumentsScope())
 const topK = ref(5)
 const responseLanguage = ref<AnswerResponseLanguage>('auto')
@@ -77,6 +80,7 @@ const answerJob = ref<ConversationAnswerJob | null>(null)
 const canceling = ref(false)
 const retrying = ref(false)
 const errorMessage = ref<string | null>(null)
+const executionConflictUnresolved = ref(false)
 const capacityFailure = ref<CapacityFailure | null>(null)
 const capacityRetryRemaining = ref(0)
 let answerPollTimer: ReturnType<typeof setTimeout> | null = null
@@ -120,6 +124,61 @@ function conversationSelectionIsCurrent(conversationId: number, generation: numb
     selectedConversation.value?.id === conversationId
   )
 }
+
+const agentWorkspace = useAgentRunWorkspace({
+  isSelectionCurrent: (context) =>
+    conversationSelectionIsCurrent(context.conversationId, context.selectionGeneration),
+  onTerminal: async (context) => {
+    await refreshLatestMessagesForSelection(context.conversationId, context.selectionGeneration)
+    await refreshConversationListForSelection(context.conversationId, context.selectionGeneration)
+  },
+})
+
+const {
+  availability: agentAvailability,
+  bindConversation: bindAgentConversation,
+  canCancel: canCancelAgent,
+  cancel: cancelAgent,
+  capacityFailure: agentCapacityFailure,
+  clearConversation: clearAgentConversation,
+  errorMessage: agentErrorMessage,
+  isActive: agentBusy,
+  isCoolingDown: agentCoolingDown,
+  manualRestore: restoreAgentManually,
+  manualRestoreRequired: agentManualRestoreRequired,
+  queue: queueAgent,
+  requestId: agentRequestId,
+  restoreActive: restoreActiveAgent,
+  restoreLatest: restoreLatestAgent,
+  retryAfterSeconds: agentRetryRemaining,
+  run: agentRun,
+  state: agentWorkspaceState,
+} = agentWorkspace
+
+const agentActionBusy = computed(
+  () =>
+    agentWorkspaceState.value === 'restoring' ||
+    agentWorkspaceState.value === 'queueing' ||
+    agentWorkspaceState.value === 'canceling',
+)
+const executionBusy = computed(
+  () =>
+    answerBusy.value ||
+    agentBusy.value ||
+    agentActionBusy.value ||
+    executionConflictUnresolved.value,
+)
+const composerCoolingDown = computed(
+  () =>
+    (composerMode.value === 'answer' && capacityRetryRemaining.value > 0) ||
+    (composerMode.value === 'agent' && agentCoolingDown.value),
+)
+
+watch(agentAvailability, (availability) => {
+  if (availability === 'unavailable' && composerMode.value === 'agent') {
+    composerMode.value = 'message'
+  }
+})
 
 function clearCapacityFailure(): void {
   if (capacityTimer !== null) {
@@ -421,6 +480,128 @@ function startAnswerPolling(
   void pollAnswerJob(job.id, generation, conversationId, selectionGeneration)
 }
 
+function applyAnswerJobSnapshot(
+  job: ConversationAnswerJob | null,
+  conversationId: number,
+  selectionGeneration: number,
+): void {
+  if (!conversationSelectionIsCurrent(conversationId, selectionGeneration)) return
+  invalidateAnswerPolling()
+  answerJob.value = job
+  answerJobStatus.value = job?.status ?? null
+  if (!job) return
+  applyAnswerJobParameters(job)
+  if (job.status === 'queued' || job.status === 'processing') {
+    startAnswerPolling(job, conversationId, selectionGeneration)
+  }
+}
+
+async function getActiveAnswerForConflict(
+  conversationId: number,
+): Promise<ConversationAnswerJob | null> {
+  try {
+    return await getActiveConversationAnswerJob(conversationId)
+  } catch (error) {
+    const apiError = toApiError(error)
+    if (apiError.kind === 'not-found' && apiError.code !== 'conversation_not_found') return null
+    throw error
+  }
+}
+
+function isExecutionConflict(error: unknown): boolean {
+  const apiError = toApiError(error)
+  return (
+    apiError.kind === 'conflict' &&
+    (apiError.code === 'conversation_execution_active' ||
+      apiError.code === 'conversation_answer_active')
+  )
+}
+
+async function reconcileExecutionConflict(
+  conversationId: number,
+  selectionGeneration: number,
+): Promise<void> {
+  if (!conversationSelectionIsCurrent(conversationId, selectionGeneration)) return
+  executionConflictUnresolved.value = true
+  errorMessage.value = null
+  const [answerActiveResult, agentActiveResult] = await Promise.allSettled([
+    getActiveAnswerForConflict(conversationId),
+    restoreActiveAgent(),
+  ])
+  if (!conversationSelectionIsCurrent(conversationId, selectionGeneration)) return
+
+  if (answerActiveResult.status === 'rejected') {
+    showRequestError(answerActiveResult.reason, '活动回答状态恢复失败。')
+    return
+  }
+  if (
+    agentActiveResult.status === 'rejected' ||
+    agentActiveResult.value.kind === 'failed' ||
+    agentActiveResult.value.kind === 'stale'
+  ) {
+    errorMessage.value = '活动 Agent 状态尚未确认，已暂停新的提交。'
+    return
+  }
+
+  const activeAnswer = answerActiveResult.value
+  if (activeAnswer) applyAnswerJobSnapshot(activeAnswer, conversationId, selectionGeneration)
+  const activeAgent =
+    agentActiveResult.status === 'fulfilled' && agentActiveResult.value.kind === 'active'
+      ? agentActiveResult.value.run
+      : null
+
+  if (activeAnswer && activeAgent) {
+    executionConflictUnresolved.value = false
+    errorMessage.value = '同一会话返回了多个活动执行，已暂停新的提交。'
+    return
+  }
+  if (activeAnswer || activeAgent) {
+    executionConflictUnresolved.value = false
+    errorMessage.value = '已恢复当前会话的活动执行，不会自动重复提交。'
+    return
+  }
+
+  const [messagesResult, answerLatestResult, agentLatestResult] = await Promise.allSettled([
+    refreshLatestMessagesForSelection(conversationId, selectionGeneration),
+    getLatestConversationAnswerJob(conversationId),
+    restoreLatestAgent(),
+  ])
+  if (!conversationSelectionIsCurrent(conversationId, selectionGeneration)) return
+  let reconciliationFailed = false
+  if (answerLatestResult.status === 'fulfilled') {
+    applyAnswerJobSnapshot(answerLatestResult.value, conversationId, selectionGeneration)
+  } else {
+    const apiError = toApiError(answerLatestResult.reason)
+    if (apiError.kind !== 'not-found' || apiError.code === 'conversation_not_found') {
+      reconciliationFailed = true
+      showRequestError(answerLatestResult.reason, '执行冲突后的回答状态恢复失败。')
+    }
+  }
+  if (messagesResult.status === 'rejected') {
+    reconciliationFailed = true
+    showRequestError(messagesResult.reason, '执行冲突后的消息刷新失败。')
+  }
+  if (
+    agentLatestResult.status === 'rejected' ||
+    agentLatestResult.value.kind === 'failed' ||
+    agentLatestResult.value.kind === 'stale'
+  ) {
+    reconciliationFailed = true
+    errorMessage.value = '执行冲突后的 Agent 状态恢复失败。'
+  }
+  if (reconciliationFailed) return
+  executionConflictUnresolved.value = false
+  if (!errorMessage.value) {
+    errorMessage.value = '已刷新会话执行状态，不会自动重复提交。'
+  }
+}
+
+async function handleReconcileExecution(): Promise<void> {
+  const conversation = selectedConversation.value
+  if (!conversation) return
+  await reconcileExecutionConflict(conversation.id, conversationSelectionGeneration)
+}
+
 async function refreshConversations(selectFirst = true): Promise<void> {
   const listGeneration = ++conversationListGeneration
   loading.value = true
@@ -481,7 +662,9 @@ async function loadMoreConversations(): Promise<void> {
 async function selectConversation(conversation: Conversation): Promise<void> {
   stopAnswerPolling()
   const selectionGeneration = ++conversationSelectionGeneration
+  executionConflictUnresolved.value = false
   selectedConversation.value = conversation
+  bindAgentConversation({ conversationId: conversation.id, selectionGeneration })
   editingTitle.value = false
   titleDraft.value = conversation.title
   deleteConfirmationConversationId.value = null
@@ -518,15 +701,13 @@ async function selectConversation(conversation: Conversation): Promise<void> {
     return
   }
 
-  let latestJob: ConversationAnswerJob | null = null
-  let latestJobError: unknown = null
-  try {
-    latestJob = await getRestorableConversationAnswerJob(conversation.id)
-  } catch (error) {
-    latestJobError = error
-  }
+  const [latestJobResult, agentRestoreResult] = await Promise.allSettled([
+    getRestorableConversationAnswerJob(conversation.id),
+    restoreLatestAgent(),
+  ])
   if (!selectionIsCurrent()) return
 
+  const latestJob = latestJobResult.status === 'fulfilled' ? latestJobResult.value : null
   if (latestJob) {
     answerJob.value = latestJob
     answerJobStatus.value = latestJob.status
@@ -534,8 +715,14 @@ async function selectConversation(conversation: Conversation): Promise<void> {
     if (latestJob.status === 'queued' || latestJob.status === 'processing') {
       startAnswerPolling(latestJob, conversation.id, selectionGeneration)
     }
-  } else if (latestJobError && toApiError(latestJobError).kind !== 'not-found') {
-    showRequestError(latestJobError, '最近回答任务状态恢复失败。')
+  } else if (
+    latestJobResult.status === 'rejected' &&
+    toApiError(latestJobResult.reason).kind !== 'not-found'
+  ) {
+    showRequestError(latestJobResult.reason, '最近回答任务状态恢复失败。')
+  }
+  if (agentRestoreResult.status === 'fulfilled' && agentRestoreResult.value.kind === 'terminal') {
+    await refreshLatestMessagesForSelection(conversation.id, selectionGeneration)
   }
 }
 
@@ -617,7 +804,8 @@ function beginRenameConversation(): void {
     conversationMutationBusy.value ||
     sending.value ||
     canceling.value ||
-    retrying.value
+    retrying.value ||
+    agentActionBusy.value
   )
     return
   titleDraft.value = conversation.title
@@ -670,7 +858,8 @@ async function handleConversationStatus(status: Conversation['status']): Promise
     conversationMutationBusy.value ||
     sending.value ||
     canceling.value ||
-    retrying.value
+    retrying.value ||
+    agentActionBusy.value
   )
     return
 
@@ -692,6 +881,10 @@ async function handleConversationStatus(status: Conversation['status']): Promise
     if (status === 'archived') invalidateAnswerPolling()
   } catch (error) {
     if (!selectionIsCurrent()) return
+    if (isExecutionConflict(error)) {
+      await reconcileExecutionConflict(conversationId, selectionGeneration)
+      return
+    }
     showRequestError(error, status === 'archived' ? '会话归档失败。' : '会话恢复失败。')
   } finally {
     updatingStatus.value = false
@@ -705,7 +898,8 @@ function requestDeleteConversation(): void {
     conversationMutationBusy.value ||
     sending.value ||
     canceling.value ||
-    retrying.value
+    retrying.value ||
+    agentActionBusy.value
   )
     return
   deleteConfirmationConversationId.value = conversation.id
@@ -725,7 +919,8 @@ async function handleDeleteConversation(): Promise<void> {
     conversationMutationBusy.value ||
     sending.value ||
     canceling.value ||
-    retrying.value
+    retrying.value ||
+    agentActionBusy.value
   )
     return
 
@@ -746,7 +941,9 @@ async function handleDeleteConversation(): Promise<void> {
     if (!selectionIsCurrent()) return
 
     conversationSelectionGeneration += 1
+    executionConflictUnresolved.value = false
     stopAnswerPolling()
+    clearAgentConversation()
     const nextConversation =
       conversations.value[deletedIndex] ?? conversations.value[deletedIndex - 1] ?? null
     if (nextConversation) {
@@ -770,6 +967,10 @@ async function handleDeleteConversation(): Promise<void> {
     }
   } catch (error) {
     if (!selectionIsCurrent()) return
+    if (isExecutionConflict(error)) {
+      await reconcileExecutionConflict(conversationId, selectionGeneration)
+      return
+    }
     showRequestError(error, '会话删除失败。')
   } finally {
     deleting.value = false
@@ -778,7 +979,9 @@ async function handleDeleteConversation(): Promise<void> {
 
 async function handleCreateConversation(): Promise<void> {
   stopAnswerPolling()
-  conversationSelectionGeneration += 1
+  clearAgentConversation()
+  executionConflictUnresolved.value = false
+  const selectionGeneration = ++conversationSelectionGeneration
   conversationListGeneration += 1
   creating.value = true
   errorMessage.value = null
@@ -796,10 +999,12 @@ async function handleCreateConversation(): Promise<void> {
     messagePaginationMode.value = null
     messageLoadedMore = false
     selectedConversation.value = conversation
+    bindAgentConversation({ conversationId: conversation.id, selectionGeneration })
     editingTitle.value = false
     titleDraft.value = conversation.title
     deleteConfirmationConversationId.value = null
     resetAnswerParameters()
+    await restoreLatestAgent()
   } catch (error) {
     showRequestError(error, '会话创建失败。')
   } finally {
@@ -816,8 +1021,8 @@ async function handleSendMessage(): Promise<void> {
     !content ||
     conversationMutationBusy.value ||
     sending.value ||
-    answerBusy.value ||
-    capacityRetryRemaining.value > 0
+    executionBusy.value ||
+    composerCoolingDown.value
   )
     return
 
@@ -827,10 +1032,33 @@ async function handleSendMessage(): Promise<void> {
     conversationSelectionIsCurrent(conversationId, selectionGeneration)
   sending.value = true
   errorMessage.value = null
-  clearCapacityFailure()
+  if (composerMode.value === 'answer') clearCapacityFailure()
   try {
+    if (composerMode.value === 'agent') {
+      const outcome = await queueAgent({
+        content,
+        clientRunId: crypto.randomUUID(),
+        documentId: documentIdFromScope(documentScope.value),
+        responseLanguage: responseLanguage.value,
+      })
+      if (!operationIsCurrent()) return
+      if (outcome.kind === 'execution-conflict') {
+        await reconcileExecutionConflict(conversationId, selectionGeneration)
+        return
+      }
+      if (outcome.kind === 'unavailable') {
+        composerMode.value = 'message'
+        return
+      }
+      if (outcome.kind !== 'started') return
+      mergeMessages([outcome.result.userMessage, outcome.result.assistantMessage])
+      draft.value = ''
+      await refreshConversationListForSelection(conversationId, selectionGeneration)
+      return
+    }
+
     const clientMessageId = crypto.randomUUID()
-    if (generateAnswer.value) {
+    if (composerMode.value === 'answer') {
       const result = await queueConversationAnswer(conversationId, {
         content,
         clientMessageId,
@@ -851,6 +1079,10 @@ async function handleSendMessage(): Promise<void> {
     await refreshConversationListForSelection(conversationId, selectionGeneration)
   } catch (error) {
     if (!operationIsCurrent()) return
+    if (isExecutionConflict(error)) {
+      await reconcileExecutionConflict(conversationId, selectionGeneration)
+      return
+    }
     showRequestError(error, '消息发送失败。')
   } finally {
     sending.value = false
@@ -916,6 +1148,18 @@ async function handleCancelAnswer(): Promise<void> {
   }
 }
 
+async function handleCancelAgent(): Promise<void> {
+  if (conversationArchived.value || conversationMutationBusy.value || !canCancelAgent.value) {
+    return
+  }
+  await cancelAgent()
+}
+
+async function handleRestoreAgent(): Promise<void> {
+  if (!selectedConversation.value) return
+  await restoreAgentManually()
+}
+
 async function handleRetryAnswer(): Promise<void> {
   const conversation = selectedConversation.value
   const job = answerJob.value
@@ -925,7 +1169,9 @@ async function handleRetryAnswer(): Promise<void> {
     !job ||
     !canRetryAnswer.value ||
     retrying.value ||
-    conversationMutationBusy.value
+    conversationMutationBusy.value ||
+    agentBusy.value ||
+    agentActionBusy.value
   )
     return
 
@@ -951,6 +1197,10 @@ async function handleRetryAnswer(): Promise<void> {
     await refreshConversationListForSelection(conversationId, selectionGeneration)
   } catch (error) {
     if (!operationIsCurrent()) return
+    if (isExecutionConflict(error)) {
+      await reconcileExecutionConflict(conversationId, selectionGeneration)
+      return
+    }
     showRequestError(error, '再次提交回答失败。')
   } finally {
     retrying.value = false
@@ -980,6 +1230,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   conversationSelectionGeneration += 1
   stopAnswerPolling()
+  clearAgentConversation()
   clearCapacityFailure()
 })
 </script>
@@ -989,7 +1240,7 @@ onBeforeUnmount(() => {
     <PageHeader
       eyebrow="Conversations"
       title="对话记录"
-      description="保存个人会话；开启回答任务后，可通过现有 RAG Worker 生成带来源回答。"
+      description="保存个人会话，并可选择保存消息、RAG 回答或受控 Agent Run。"
     />
 
     <div class="conversation-layout">
@@ -1032,7 +1283,7 @@ onBeforeUnmount(() => {
       <section class="conversation-panel" aria-label="当前会话">
         <div v-if="!selectedConversation" class="empty-panel">
           <strong>选择一个会话开始</strong>
-          <span>当前 M1 只保存用户消息，不会调用远程模型。</span>
+          <span>选择会话后，可以保存消息或显式提交回答任务。</span>
         </div>
         <template v-else>
           <div class="conversation-heading">
@@ -1063,7 +1314,13 @@ onBeforeUnmount(() => {
               <button
                 type="button"
                 :disabled="
-                  renaming || updatingStatus || deleting || sending || canceling || retrying
+                  renaming ||
+                  updatingStatus ||
+                  deleting ||
+                  sending ||
+                  canceling ||
+                  retrying ||
+                  agentActionBusy
                 "
                 @click="beginRenameConversation"
               >
@@ -1073,7 +1330,13 @@ onBeforeUnmount(() => {
                 v-if="selectedConversation.status === 'active'"
                 type="button"
                 :disabled="
-                  renaming || updatingStatus || deleting || sending || canceling || retrying
+                  renaming ||
+                  updatingStatus ||
+                  deleting ||
+                  sending ||
+                  canceling ||
+                  retrying ||
+                  agentActionBusy
                 "
                 @click="handleConversationStatus('archived')"
               >
@@ -1083,7 +1346,13 @@ onBeforeUnmount(() => {
                 v-else
                 type="button"
                 :disabled="
-                  renaming || updatingStatus || deleting || sending || canceling || retrying
+                  renaming ||
+                  updatingStatus ||
+                  deleting ||
+                  sending ||
+                  canceling ||
+                  retrying ||
+                  agentActionBusy
                 "
                 @click="handleConversationStatus('active')"
               >
@@ -1093,7 +1362,13 @@ onBeforeUnmount(() => {
                 type="button"
                 class="danger-button"
                 :disabled="
-                  renaming || updatingStatus || deleting || sending || canceling || retrying
+                  renaming ||
+                  updatingStatus ||
+                  deleting ||
+                  sending ||
+                  canceling ||
+                  retrying ||
+                  agentActionBusy
                 "
                 @click="requestDeleteConversation"
               >
@@ -1108,14 +1383,13 @@ onBeforeUnmount(() => {
             role="alert"
           >
             <span>
-              删除会话会永久删除消息、关联 Answer Job、回答来源与 Token，且无法恢复。确认删除“{{
-                selectedConversation.title
-              }}”？
+              删除会话会永久删除消息、关联 Answer Job/Agent Run、来源与
+              Token，且无法恢复。确认删除“{{ selectedConversation.title }}”？
             </span>
             <div>
               <button
                 type="button"
-                :disabled="deleting || sending || canceling || retrying"
+                :disabled="deleting || sending || canceling || retrying || agentActionBusy"
                 @click="handleDeleteConversation"
               >
                 {{ deleting ? '删除中…' : '确认删除' }}
@@ -1127,7 +1401,7 @@ onBeforeUnmount(() => {
           </div>
 
           <p v-if="conversationArchived" class="archived-notice">
-            此会话已归档。恢复后才能继续发送消息或提交 RAG 回答。
+            此会话已归档。恢复后才能继续发送消息或提交新的回答执行。
           </p>
 
           <div class="message-list" aria-live="polite">
@@ -1202,19 +1476,34 @@ onBeforeUnmount(() => {
             <p v-else class="composer-hint">本次回答没有可展示的检索来源。</p>
           </section>
 
+          <AgentRunPanel
+            v-if="agentRun"
+            :run="agentRun"
+            :state="agentWorkspaceState"
+            :error-message="agentErrorMessage"
+            :request-id="agentRequestId"
+            :read-only="conversationArchived"
+            :manual-restore-required="agentManualRestoreRequired"
+            @cancel="handleCancelAgent"
+            @restore="handleRestoreAgent"
+          />
+
           <form class="message-composer" @submit.prevent="handleSendMessage">
             <DocumentScopePicker
-              v-if="generateAnswer"
+              v-if="composerMode === 'answer' || composerMode === 'agent'"
               v-model="documentScope"
               :disabled="
                 conversationArchived ||
                 conversationMutationBusy ||
                 sending ||
-                answerBusy ||
-                capacityRetryRemaining > 0
+                executionBusy ||
+                composerCoolingDown
               "
             />
-            <div v-if="generateAnswer" class="answer-options">
+            <div
+              v-if="composerMode === 'answer' || composerMode === 'agent'"
+              class="answer-options"
+            >
               <label>
                 <span>回答语言</span>
                 <select
@@ -1223,8 +1512,8 @@ onBeforeUnmount(() => {
                     conversationArchived ||
                     conversationMutationBusy ||
                     sending ||
-                    answerBusy ||
-                    capacityRetryRemaining > 0
+                    executionBusy ||
+                    composerCoolingDown
                   "
                 >
                   <option value="auto">跟随问题</option>
@@ -1232,7 +1521,7 @@ onBeforeUnmount(() => {
                   <option value="en">English</option>
                 </select>
               </label>
-              <label>
+              <label v-if="composerMode === 'answer'">
                 <span>最多引用</span>
                 <select
                   v-model.number="topK"
@@ -1240,8 +1529,8 @@ onBeforeUnmount(() => {
                     conversationArchived ||
                     conversationMutationBusy ||
                     sending ||
-                    answerBusy ||
-                    capacityRetryRemaining > 0
+                    executionBusy ||
+                    composerCoolingDown
                   "
                 >
                   <option v-for="value in 20" :key="value" :value="value">{{ value }} 条</option>
@@ -1252,24 +1541,50 @@ onBeforeUnmount(() => {
               v-model="draft"
               aria-label="消息内容"
               placeholder="输入一条消息…"
-              :disabled="conversationArchived || conversationMutationBusy || sending"
+              :disabled="
+                conversationArchived || conversationMutationBusy || sending || executionBusy
+              "
               @keydown.enter.exact.prevent="handleSendMessage"
             />
-            <div class="composer-footer">
-              <label class="answer-toggle">
+            <fieldset class="composer-modes" aria-label="发送模式">
+              <label>
                 <input
-                  v-model="generateAnswer"
-                  type="checkbox"
+                  v-model="composerMode"
+                  type="radio"
+                  name="composer-mode"
+                  value="message"
+                  :disabled="conversationArchived || sending || executionBusy || agentActionBusy"
+                />
+                <span>仅保存消息</span>
+              </label>
+              <label>
+                <input
+                  v-model="composerMode"
+                  type="radio"
+                  name="composer-mode"
+                  value="answer"
+                  :disabled="conversationArchived || sending || executionBusy || agentActionBusy"
+                />
+                <span>RAG 回答</span>
+              </label>
+              <label v-if="agentAvailability !== 'unavailable'">
+                <input
+                  v-model="composerMode"
+                  type="radio"
+                  name="composer-mode"
+                  value="agent"
                   :disabled="
                     conversationArchived ||
-                    conversationMutationBusy ||
                     sending ||
-                    answerBusy ||
-                    capacityRetryRemaining > 0
+                    executionBusy ||
+                    agentActionBusy ||
+                    agentAvailability !== 'available'
                   "
                 />
-                <span>提交 RAG 回答</span>
+                <span>Agent</span>
               </label>
+            </fieldset>
+            <div class="composer-footer">
               <span v-if="answerJobStatus" class="answer-job-status">
                 {{
                   answerJobStatus === 'queued'
@@ -1282,7 +1597,11 @@ onBeforeUnmount(() => {
                 }}
               </span>
               <span v-else class="composer-hint">{{
-                generateAnswer ? '需要后端开启 Answer Job。' : '当前只保存消息。'
+                composerMode === 'answer'
+                  ? '需要后端开启 Answer Job。'
+                  : composerMode === 'agent'
+                    ? 'Agent 使用受控只读工具并通过轮询恢复。'
+                    : '当前只保存消息。'
               }}</span>
               <button
                 type="submit"
@@ -1291,18 +1610,21 @@ onBeforeUnmount(() => {
                   conversationMutationBusy ||
                   sending ||
                   !draft.trim() ||
-                  answerBusy ||
-                  capacityRetryRemaining > 0
+                  executionBusy ||
+                  composerCoolingDown ||
+                  (composerMode === 'agent' && agentAvailability !== 'available')
                 "
               >
                 {{
                   sending
-                    ? generateAnswer
-                      ? '提交中…'
-                      : '保存中…'
-                    : generateAnswer
-                      ? '提交回答'
-                      : '发送'
+                    ? composerMode === 'message'
+                      ? '保存中…'
+                      : '提交中…'
+                    : composerMode === 'answer'
+                      ? '提交 RAG 回答'
+                      : composerMode === 'agent'
+                        ? '提交 Agent Run'
+                        : '发送'
                 }}
               </button>
             </div>
@@ -1324,7 +1646,9 @@ onBeforeUnmount(() => {
                   conversationArchived ||
                   conversationMutationBusy ||
                   retrying ||
-                  capacityRetryRemaining > 0
+                  capacityRetryRemaining > 0 ||
+                  agentBusy ||
+                  agentActionBusy
                 "
                 @click="handleRetryAnswer"
               >
@@ -1339,14 +1663,46 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
-    <p v-if="capacityFailure" class="capacity-message" role="alert">
+    <p
+      v-if="composerMode === 'agent' && agentCapacityFailure"
+      class="capacity-message"
+      role="alert"
+    >
+      <strong>{{ agentCapacityFailure.title }}</strong
+      >：{{ agentCapacityFailure.message }}
+      <span v-if="agentRetryRemaining > 0">{{ agentRetryRemaining }} 秒后可再次提交。</span>
+      <span v-else>现在可以再次提交。</span>
+      <span v-if="agentCapacityFailure.requestId"
+        >请求编号：{{ agentCapacityFailure.requestId }}</span
+      >
+    </p>
+    <p v-else-if="capacityFailure" class="capacity-message" role="alert">
       <strong>{{ capacityFailure.title }}</strong
       >：{{ capacityFailure.message }}
       <span v-if="capacityRetryRemaining > 0">{{ capacityRetryRemaining }} 秒后可再次提交。</span>
       <span v-else>现在可以再次提交。</span>
       <span v-if="capacityFailure.requestId">请求编号：{{ capacityFailure.requestId }}</span>
     </p>
-    <p v-else-if="errorMessage" class="error-message" role="alert">{{ errorMessage }}</p>
+    <p
+      v-else-if="composerMode === 'agent' && agentErrorMessage && !agentRun"
+      class="error-message"
+      role="alert"
+    >
+      {{ agentErrorMessage }}
+      <span v-if="agentRequestId">请求编号：{{ agentRequestId }}</span>
+    </p>
+    <p v-else-if="errorMessage" class="error-message" role="alert">
+      {{ errorMessage }}
+      <button
+        v-if="executionConflictUnresolved"
+        type="button"
+        class="execution-reconcile-button"
+        :disabled="agentActionBusy"
+        @click="handleReconcileExecution"
+      >
+        重新检查执行状态
+      </button>
+    </p>
   </div>
 </template>
 
@@ -1762,15 +2118,27 @@ onBeforeUnmount(() => {
   color: var(--color-text-strong);
 }
 
-.answer-toggle {
+.composer-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.composer-modes label {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
   color: var(--color-text-strong);
   font-size: 12px;
 }
 
-.answer-toggle input {
+.composer-modes input {
   accent-color: var(--color-text-strong);
 }
 
@@ -1793,6 +2161,10 @@ onBeforeUnmount(() => {
   margin: 0;
   color: var(--color-danger);
   font-size: 13px;
+}
+
+.execution-reconcile-button {
+  margin-left: 8px;
 }
 
 @media (max-width: 760px) {

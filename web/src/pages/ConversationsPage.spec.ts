@@ -5,7 +5,15 @@ import type {
   ConversationAnswerJob,
   ConversationMessage,
 } from '../entities/conversation/model/conversation'
+import type { AgentRun } from '../entities/agent/model/agent-run'
 import { ApiError } from '../shared/api/api-error'
+import {
+  cancelAgentRun,
+  createAgentRun,
+  getActiveAgentRun,
+  getAgentRun,
+  getLatestAgentRun,
+} from '../features/agents/api/agent-api'
 import {
   appendUserMessage,
   cancelConversationAnswerJob,
@@ -39,6 +47,18 @@ vi.mock('../features/conversations/api/conversation-api', () => ({
   updateConversation: vi.fn(),
 }))
 
+vi.mock('../features/agents/api/agent-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../features/agents/api/agent-api')>()
+  return {
+    ...actual,
+    cancelAgentRun: vi.fn(),
+    createAgentRun: vi.fn(),
+    getActiveAgentRun: vi.fn(),
+    getAgentRun: vi.fn(),
+    getLatestAgentRun: vi.fn(),
+  }
+})
+
 vi.mock('../features/documents/model/use-document-scope-options', async () => {
   const { computed, ref, shallowRef } = await import('vue')
   const documents = shallowRef([
@@ -69,6 +89,11 @@ vi.mock('../features/documents/model/use-document-scope-options', async () => {
 })
 
 const appendUserMessageMock = vi.mocked(appendUserMessage)
+const cancelAgentRunMock = vi.mocked(cancelAgentRun)
+const createAgentRunMock = vi.mocked(createAgentRun)
+const getActiveAgentRunMock = vi.mocked(getActiveAgentRun)
+const getAgentRunMock = vi.mocked(getAgentRun)
+const getLatestAgentRunMock = vi.mocked(getLatestAgentRun)
 const cancelConversationAnswerJobMock = vi.mocked(cancelConversationAnswerJob)
 const createConversationMock = vi.mocked(createConversation)
 const deleteConversationMock = vi.mocked(deleteConversation)
@@ -192,6 +217,103 @@ const succeededJob: ConversationAnswerJob = {
   completedAt: new Date('2026-10-31T01:02:00Z'),
 }
 
+const queuedAgentRun: AgentRun = {
+  id: 71,
+  conversationId: 11,
+  userMessageId: 20,
+  assistantMessageId: 21,
+  clientRunId: 'agent-run-71',
+  requestedDocumentId: null,
+  requestedResponseLanguage: 'auto',
+  status: 'queued',
+  stepCount: 0,
+  maxSteps: 5,
+  maxTotalTokens: 48_000,
+  cancelable: true,
+  steps: [],
+  result: null,
+  error: null,
+  tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+  createdAt: new Date('2026-10-31T01:01:00Z'),
+  updatedAt: new Date('2026-10-31T01:01:00Z'),
+  startedAt: null,
+  completedAt: null,
+}
+
+const processingAgentRun: AgentRun = {
+  ...queuedAgentRun,
+  status: 'processing',
+  cancelable: false,
+  startedAt: new Date('2026-10-31T01:01:10Z'),
+}
+
+const succeededAgentRun: AgentRun = {
+  ...queuedAgentRun,
+  status: 'succeeded',
+  stepCount: 3,
+  cancelable: false,
+  steps: [
+    {
+      id: 81,
+      agentRunId: 71,
+      sequenceNo: 1,
+      kind: 'tool_call',
+      status: 'succeeded',
+      toolName: 'search_documents',
+      error: null,
+      tokenUsage: { promptTokens: 4, completionTokens: 1, totalTokens: 5 },
+      createdAt: new Date('2026-10-31T01:01:10Z'),
+      startedAt: new Date('2026-10-31T01:01:10Z'),
+      completedAt: new Date('2026-10-31T01:01:12Z'),
+    },
+    {
+      id: 82,
+      agentRunId: 71,
+      sequenceNo: 2,
+      kind: 'tool_call',
+      status: 'succeeded',
+      toolName: 'read_document_evidence',
+      error: null,
+      tokenUsage: { promptTokens: 3, completionTokens: 1, totalTokens: 4 },
+      createdAt: new Date('2026-10-31T01:01:13Z'),
+      startedAt: new Date('2026-10-31T01:01:13Z'),
+      completedAt: new Date('2026-10-31T01:01:15Z'),
+    },
+    {
+      id: 83,
+      agentRunId: 71,
+      sequenceNo: 3,
+      kind: 'final',
+      status: 'succeeded',
+      toolName: null,
+      error: null,
+      tokenUsage: { promptTokens: 3, completionTokens: 3, totalTokens: 6 },
+      createdAt: new Date('2026-10-31T01:01:16Z'),
+      startedAt: new Date('2026-10-31T01:01:16Z'),
+      completedAt: new Date('2026-10-31T01:01:20Z'),
+    },
+  ],
+  result: {
+    answer: 'Agent 最终回答。[1]',
+    responseLanguage: 'zh',
+    sources: [
+      {
+        citation: 1,
+        evidenceRef: 'step-1:item-1',
+        documentId: 7,
+        chunkId: 501,
+        title: '研究文档',
+        pageStart: 3,
+        pageEnd: 4,
+        contentHash: 'a'.repeat(64),
+      },
+    ],
+  },
+  tokenUsage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+  startedAt: new Date('2026-10-31T01:01:10Z'),
+  completedAt: new Date('2026-10-31T01:01:20Z'),
+}
+
 const assistantFailed: ConversationMessage = {
   ...assistantGenerating,
   content: '暂时无法生成回答，请稍后重试。',
@@ -207,7 +329,19 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+async function selectComposerMode(
+  wrapper: ReturnType<typeof mount>,
+  mode: 'message' | 'answer' | 'agent',
+): Promise<void> {
+  await wrapper.get(`input[name="composer-mode"][value="${mode}"]`).setValue(true)
+}
+
 beforeEach(() => {
+  cancelAgentRunMock.mockReset()
+  createAgentRunMock.mockReset()
+  getActiveAgentRunMock.mockReset()
+  getAgentRunMock.mockReset()
+  getLatestAgentRunMock.mockReset()
   appendUserMessageMock.mockReset()
   cancelConversationAnswerJobMock.mockReset()
   createConversationMock.mockReset()
@@ -261,6 +395,8 @@ beforeEach(() => {
   })
   getActiveConversationAnswerJobMock.mockResolvedValue(null)
   getLatestConversationAnswerJobMock.mockResolvedValue(null)
+  getActiveAgentRunMock.mockResolvedValue(null)
+  getLatestAgentRunMock.mockResolvedValue(null)
 })
 
 afterEach(() => vi.useRealTimers())
@@ -475,7 +611,7 @@ describe('ConversationsPage', () => {
     await flushPromises()
     await wrapper.get('.load-earlier-button').trigger('click')
     await flushPromises()
-    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await selectComposerMode(wrapper, 'answer')
     await wrapper.get('textarea').setValue('新问题')
     await wrapper.get('.message-composer').trigger('submit')
     await flushPromises()
@@ -687,7 +823,7 @@ describe('ConversationsPage', () => {
 
     const wrapper = mount(ConversationsPage)
     await flushPromises()
-    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await selectComposerMode(wrapper, 'answer')
     await wrapper.get('textarea').setValue('归档后不能发送')
     const archiveButton = wrapper
       .findAll('.conversation-management button')
@@ -744,7 +880,7 @@ describe('ConversationsPage', () => {
     await archiveButton!.trigger('click')
     await flushPromises()
 
-    expect(wrapper.get('.error-message').text()).toContain('当前会话仍有回答任务')
+    expect(wrapper.get('.error-message').text()).toContain('已刷新会话执行状态')
     expect(wrapper.text()).toContain('回答排队中')
     expect(wrapper.get('.secondary-button').text()).toContain('取消回答')
     expect(wrapper.find('.archived-notice').exists()).toBe(false)
@@ -784,7 +920,7 @@ describe('ConversationsPage', () => {
     await deleteButton!.trigger('click')
     expect(deleteConversationMock).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain(
-      '删除会话会永久删除消息、关联 Answer Job、回答来源与 Token，且无法恢复',
+      '删除会话会永久删除消息、关联 Answer Job/Agent Run、来源与 Token，且无法恢复',
     )
 
     const confirmationButtons = wrapper.findAll('.delete-confirmation button')
@@ -1118,7 +1254,7 @@ describe('ConversationsPage', () => {
 
     const wrapper = mount(ConversationsPage)
     await flushPromises()
-    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await selectComposerMode(wrapper, 'answer')
 
     const topKSelect = wrapper.findAll('.answer-options select')[1]
     expect((topKSelect.element as HTMLSelectElement).value).toBe('17')
@@ -1144,7 +1280,7 @@ describe('ConversationsPage', () => {
 
     const wrapper = mount(ConversationsPage)
     await flushPromises()
-    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await selectComposerMode(wrapper, 'answer')
     await wrapper.get('#document-scope').setValue('document:7')
     const optionSelects = wrapper.findAll('.answer-options select')
     await optionSelects[0].setValue('en')
@@ -1402,7 +1538,7 @@ describe('ConversationsPage', () => {
 
     const wrapper = mount(ConversationsPage)
     await flushPromises()
-    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await selectComposerMode(wrapper, 'answer')
     await wrapper.get('textarea').setValue('解释这份文档')
     await wrapper.get('form').trigger('submit')
     expect(
@@ -1477,7 +1613,7 @@ describe('ConversationsPage', () => {
 
     const wrapper = mount(ConversationsPage)
     await flushPromises()
-    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await selectComposerMode(wrapper, 'answer')
     await wrapper.get('textarea').setValue('解释这份文档')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
@@ -1633,7 +1769,7 @@ describe('ConversationsPage', () => {
 
     const wrapper = mount(ConversationsPage)
     await flushPromises()
-    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await selectComposerMode(wrapper, 'answer')
     await wrapper.get('textarea').setValue('解释这份文档')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
@@ -1661,7 +1797,7 @@ describe('ConversationsPage', () => {
 
     const wrapper = mount(ConversationsPage)
     await flushPromises()
-    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await selectComposerMode(wrapper, 'answer')
     await wrapper.get('textarea').setValue('解释这份文档')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
@@ -1716,7 +1852,7 @@ describe('ConversationsPage', () => {
 
     const wrapper = mount(ConversationsPage)
     await flushPromises()
-    await wrapper.get('input[type="checkbox"]').setValue(true)
+    await selectComposerMode(wrapper, 'answer')
     await wrapper.get('textarea').setValue('解释这份文档')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
@@ -1733,6 +1869,223 @@ describe('ConversationsPage', () => {
       topK: 8,
       responseLanguage: 'zh',
     })
+    wrapper.unmount()
+  })
+
+  it('uses mutually exclusive composer modes and creates an Agent Run without Answer fields', async () => {
+    const latePoll = deferred<AgentRun>()
+    createAgentRunMock.mockResolvedValue({
+      conversationId: 11,
+      userMessage,
+      assistantMessage: assistantGenerating,
+      agentRun: queuedAgentRun,
+    })
+    getAgentRunMock.mockReturnValue(latePoll.promise)
+
+    const wrapper = mount(ConversationsPage)
+    await flushPromises()
+    expect(wrapper.findAll('input[name="composer-mode"]')).toHaveLength(3)
+    await selectComposerMode(wrapper, 'agent')
+    await wrapper.get('textarea').setValue('解释这份文档')
+    await wrapper.get('.message-composer').trigger('submit')
+    await flushPromises()
+
+    expect(createAgentRunMock).toHaveBeenCalledWith(
+      11,
+      {
+        content: '解释这份文档',
+        clientRunId: expect.any(String),
+        documentId: undefined,
+        responseLanguage: 'auto',
+      },
+      expect.any(AbortSignal),
+    )
+    expect(queueConversationAnswerMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('Agent Run #71')
+    expect(wrapper.text()).toContain('等待 Worker 领取任务')
+    expect(wrapper.text()).toContain('正在生成回答…')
+    wrapper.unmount()
+  })
+
+  it('hides Agent after a generic route 404 while message and RAG modes remain usable', async () => {
+    getLatestAgentRunMock.mockRejectedValueOnce(
+      new ApiError('not-found', 'route missing', { status: 404 }),
+    )
+    queueConversationAnswerMock.mockResolvedValue({
+      conversationId: 11,
+      userMessage,
+      assistantMessage: assistantGenerating,
+      answerJob: queuedJob,
+    })
+    getConversationAnswerJobMock.mockResolvedValue(queuedJob)
+    appendUserMessageMock.mockResolvedValue({ created: true, message: userMessage })
+
+    const wrapper = mount(ConversationsPage)
+    await flushPromises()
+    expect(wrapper.find('input[value="agent"]').exists()).toBe(false)
+    expect(wrapper.find('input[value="message"]').exists()).toBe(true)
+    expect(wrapper.find('input[value="answer"]').exists()).toBe(true)
+
+    await wrapper.get('textarea').setValue('只保存这条消息')
+    await wrapper.get('.message-composer').trigger('submit')
+    await flushPromises()
+    expect(appendUserMessageMock).toHaveBeenCalledTimes(1)
+
+    await selectComposerMode(wrapper, 'answer')
+    await wrapper.get('textarea').setValue('解释这份文档')
+    await wrapper.get('.message-composer').trigger('submit')
+    await flushPromises()
+    expect(queueConversationAnswerMock).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('restores active and terminal Agent snapshots without enabling a second execution', async () => {
+    const latePoll = deferred<AgentRun>()
+    getLatestAgentRunMock.mockResolvedValueOnce(processingAgentRun)
+    getAgentRunMock.mockReturnValue(latePoll.promise)
+
+    const wrapper = mount(ConversationsPage)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Agent Run #71')
+    expect(wrapper.text()).toContain('执行中，当前不可取消')
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+
+    getLatestAgentRunMock.mockResolvedValueOnce(succeededAgentRun)
+    const terminalWrapper = mount(ConversationsPage)
+    await flushPromises()
+    expect(terminalWrapper.text()).toContain('Agent 最终回答')
+    expect(terminalWrapper.text()).toContain('研究文档')
+    expect(terminalWrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+    await terminalWrapper.get('textarea').setValue('新问题')
+    expect(terminalWrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+    terminalWrapper.unmount()
+  })
+
+  it.each(['conversation_execution_active', 'conversation_answer_active'])(
+    'reconciles both execution conflict codes without replaying create: %s',
+    async (code) => {
+      createAgentRunMock.mockRejectedValueOnce(
+        new ApiError('conflict', 'busy', { status: 409, code }),
+      )
+      getActiveAgentRunMock.mockResolvedValueOnce(null)
+      getLatestAgentRunMock.mockResolvedValueOnce(null).mockResolvedValueOnce(null)
+      getActiveConversationAnswerJobMock.mockResolvedValueOnce(null)
+      getLatestConversationAnswerJobMock.mockResolvedValue(null)
+
+      const wrapper = mount(ConversationsPage)
+      await flushPromises()
+      await selectComposerMode(wrapper, 'agent')
+      await wrapper.get('textarea').setValue('保留这个问题')
+      await wrapper.get('.message-composer').trigger('submit')
+      await flushPromises()
+
+      expect(createAgentRunMock).toHaveBeenCalledTimes(1)
+      expect(getActiveAgentRunMock).toHaveBeenCalledWith(11, expect.any(AbortSignal))
+      expect(getActiveConversationAnswerJobMock).toHaveBeenCalledWith(11)
+      expect(getLatestAgentRunMock).toHaveBeenCalledTimes(2)
+      expect(getLatestConversationAnswerJobMock).toHaveBeenCalledTimes(2)
+      expect(wrapper.get('textarea').element.value).toBe('保留这个问题')
+      wrapper.unmount()
+    },
+  )
+
+  it('reconciles a legacy Answer create conflict through both active endpoints', async () => {
+    queueConversationAnswerMock.mockRejectedValueOnce(
+      new ApiError('conflict', 'busy', {
+        status: 409,
+        code: 'conversation_answer_active',
+      }),
+    )
+    getActiveConversationAnswerJobMock.mockResolvedValueOnce(null)
+    getActiveAgentRunMock.mockResolvedValueOnce(null)
+    getLatestConversationAnswerJobMock.mockResolvedValue(null)
+    getLatestAgentRunMock.mockResolvedValueOnce(null).mockResolvedValueOnce(null)
+
+    const wrapper = mount(ConversationsPage)
+    await flushPromises()
+    await selectComposerMode(wrapper, 'answer')
+    await wrapper.get('textarea').setValue('保留 RAG 问题')
+    await wrapper.get('.message-composer').trigger('submit')
+    await flushPromises()
+
+    expect(queueConversationAnswerMock).toHaveBeenCalledTimes(1)
+    expect(getActiveConversationAnswerJobMock).toHaveBeenCalledWith(11)
+    expect(getActiveAgentRunMock).toHaveBeenCalledWith(11, expect.any(AbortSignal))
+    expect(wrapper.get('textarea').element.value).toBe('保留 RAG 问题')
+    wrapper.unmount()
+  })
+
+  it('blocks submission until Agent restore resolves', async () => {
+    const lateLatest = deferred<AgentRun | null>()
+    getLatestAgentRunMock.mockReturnValueOnce(lateLatest.promise)
+    appendUserMessageMock.mockResolvedValue({ created: true, message: userMessage })
+
+    const wrapper = mount(ConversationsPage)
+    await flushPromises()
+    await wrapper.get('textarea').setValue('恢复期间不发送')
+    await wrapper.get('.message-composer').trigger('submit')
+    expect(appendUserMessageMock).not.toHaveBeenCalled()
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+
+    lateLatest.resolve(processingAgentRun)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Agent Run #71')
+    expect(appendUserMessageMock).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('fails closed when an active lookup fails and offers manual reconciliation', async () => {
+    createAgentRunMock.mockRejectedValueOnce(
+      new ApiError('conflict', 'busy', {
+        status: 409,
+        code: 'conversation_execution_active',
+      }),
+    )
+    getActiveConversationAnswerJobMock
+      .mockRejectedValueOnce(new ApiError('server', 'lookup failed', { status: 500 }))
+      .mockResolvedValueOnce(null)
+    getActiveAgentRunMock.mockResolvedValue(null)
+    getLatestConversationAnswerJobMock.mockResolvedValue(null)
+    getLatestAgentRunMock.mockResolvedValueOnce(null).mockResolvedValueOnce(null)
+
+    const wrapper = mount(ConversationsPage)
+    await flushPromises()
+    await selectComposerMode(wrapper, 'agent')
+    await wrapper.get('textarea').setValue('保留问题')
+    await wrapper.get('.message-composer').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('重新检查执行状态')
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeDefined()
+    await wrapper.get('.execution-reconcile-button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.execution-reconcile-button').exists()).toBe(false)
+    expect(wrapper.get('button[type="submit"]').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('shows Agent capacity, Request ID, and never auto replays after cooldown', async () => {
+    vi.useFakeTimers()
+    createAgentRunMock.mockRejectedValueOnce(
+      new ApiError('rate-limited', 'agent owner capacity', {
+        status: 429,
+        code: 'agent_run_owner_queue_capacity',
+        requestId: 'agent-capacity-ui-1',
+        retryAfterSeconds: 5,
+      }),
+    )
+    const wrapper = mount(ConversationsPage)
+    await flushPromises()
+    await selectComposerMode(wrapper, 'agent')
+    await wrapper.get('textarea').setValue('解释这份文档')
+    await wrapper.get('.message-composer').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('.capacity-message').text()).toContain('当前账户的 Agent 队列已满')
+    expect(wrapper.get('.capacity-message').text()).toContain('请求编号：agent-capacity-ui-1')
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(createAgentRunMock).toHaveBeenCalledTimes(1)
     wrapper.unmount()
   })
 })

@@ -7,6 +7,8 @@ export type CapacityErrorCode =
   | 'answer_capacity_exhausted'
   | 'answer_job_owner_queue_capacity'
   | 'answer_job_queue_capacity'
+  | 'agent_run_owner_queue_capacity'
+  | 'agent_run_queue_capacity'
 
 export interface CapacityFailure {
   code: CapacityErrorCode
@@ -45,6 +47,14 @@ const presentations: Record<CapacityErrorCode, CapacityPresentation> = {
   answer_job_queue_capacity: {
     title: '系统问答队列暂时已满',
     message: '系统正在处理其他回答任务，请稍后重新提交这个问题。',
+  },
+  agent_run_owner_queue_capacity: {
+    title: '当前账户的 Agent 队列已满',
+    message: '请等待已有 Agent Run 推进后，再提交这个问题。',
+  },
+  agent_run_queue_capacity: {
+    title: '系统 Agent 队列暂时已满',
+    message: '系统正在处理其他 Agent Run，请稍后重新提交这个问题。',
   },
 }
 

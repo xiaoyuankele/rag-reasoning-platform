@@ -10,6 +10,8 @@ describe('capacity error presentation', () => {
     'answer_capacity_exhausted',
     'answer_job_owner_queue_capacity',
     'answer_job_queue_capacity',
+    'agent_run_owner_queue_capacity',
+    'agent_run_queue_capacity',
   ])('识别正式容量 code：%s', (code) => {
     expect(createCapacityFailure(code, 5, 'capacity-1', 2)).toMatchObject({
       code,
