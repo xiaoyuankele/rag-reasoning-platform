@@ -70,8 +70,50 @@ func TestRuntimeContextProviderReusesBoundedM31History(t *testing.T) {
 	if contextSnapshot.CurrentQuestion != "What method was used?" || len(contextSnapshot.History) != 2 ||
 		contextSnapshot.History[0].Content != "recent question" ||
 		contextSnapshot.History[1].Content != "recent answer" ||
+		contextSnapshot.ResponseLanguage != agentdomain.ResponseLanguageEnglish ||
 		!strings.Contains(contextSnapshot.SystemInstruction, "read-only tools") {
 		t.Fatalf("runtime context = %+v", contextSnapshot)
+	}
+}
+
+func TestRuntimeContextProviderResolvesAutoAndForcedLanguages(t *testing.T) {
+	scope, _ := accessdomain.NewOwnerScope(42)
+	config := answerapplication.ConversationHistoryConfig{MaxTurns: 1, MaxTokens: 1000, InputTokenBudget: 4000}
+	for _, test := range []struct {
+		name       string
+		preference agentdomain.ResponseLanguage
+		question   string
+		want       agentdomain.ResponseLanguage
+		marker     string
+	}{
+		{name: "auto English", preference: agentdomain.ResponseLanguageAuto, question: "What changed?", want: agentdomain.ResponseLanguageEnglish, marker: "read-only tools"},
+		{name: "auto Chinese", preference: agentdomain.ResponseLanguageAuto, question: "请总结这份文档。", want: agentdomain.ResponseLanguageChinese, marker: "只读工具"},
+		{name: "forced English", preference: agentdomain.ResponseLanguageEnglish, question: "请总结这份文档。", want: agentdomain.ResponseLanguageEnglish, marker: "read-only tools"},
+		{name: "forced Chinese", preference: agentdomain.ResponseLanguageChinese, question: "What changed?", want: agentdomain.ResponseLanguageChinese, marker: "只读工具"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			provider, err := NewRuntimeContextProvider(frozenContextReaderFunc(func(
+				context.Context, accessdomain.OwnerScope, int64, int64, int,
+			) (conversationdomain.Message, []conversationdomain.Message, error) {
+				return conversationdomain.Message{
+					ID: 9, ConversationID: 7, SequenceNo: 1, Role: conversationdomain.RoleUser,
+					Content: test.question, Status: conversationdomain.MessageStatusCompleted,
+				}, nil, nil
+			}), config)
+			if err != nil {
+				t.Fatalf("NewRuntimeContextProvider() error = %v", err)
+			}
+			got, err := provider.LoadAgentContext(t.Context(), scope, agentdomain.Run{
+				ID: 1, OwnerUserID: scope.OwnerUserID(), ConversationID: 7, UserMessageID: 9,
+				ResponseLanguage: test.preference,
+			})
+			if err != nil {
+				t.Fatalf("LoadAgentContext() error = %v", err)
+			}
+			if got.ResponseLanguage != test.want || !strings.Contains(got.SystemInstruction, test.marker) {
+				t.Fatalf("resolved context = language:%q instruction:%q, want %q / %q", got.ResponseLanguage, got.SystemInstruction, test.want, test.marker)
+			}
+		})
 	}
 }
 

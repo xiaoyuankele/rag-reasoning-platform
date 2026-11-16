@@ -106,4 +106,10 @@ func TestResultValidation(t *testing.T) {
 	if (Result{Answer: "done", ResponseLanguage: ResponseLanguageEnglish, PromptTokens: 0, CompletionTokens: 0, TotalTokens: -1}).IsValid() {
 		t.Fatal("negative token total must be rejected")
 	}
+	if (Result{Answer: "done", ResponseLanguage: ResponseLanguageAuto}).IsValid() {
+		t.Fatal("successful Result must reject unresolved auto language")
+	}
+	if !ResponseLanguageChinese.IsResolved() || !ResponseLanguageEnglish.IsResolved() || ResponseLanguageAuto.IsResolved() {
+		t.Fatal("resolved response language classification is incorrect")
+	}
 }

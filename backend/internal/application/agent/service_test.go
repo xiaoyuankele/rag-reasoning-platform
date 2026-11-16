@@ -4,19 +4,27 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	agentdomain "rag-reasoning-platform/backend/internal/domain/agent"
+	conversationdomain "rag-reasoning-platform/backend/internal/domain/conversation"
 )
 
 type fakeScopedRepository struct {
 	createInput  CreateRunInput
 	createResult QueueResult
 	createErr    error
-	getResult    agentdomain.Run
-	cancelResult agentdomain.Run
+	getResult    RunSnapshot
+	getErr       error
+	activeResult RunSnapshot
+	activeErr    error
+	latestResult RunSnapshot
+	latestErr    error
+	cancelResult RunSnapshot
+	cancelErr    error
 	calls        int
 }
 
@@ -26,20 +34,20 @@ func (f *fakeScopedRepository) CreateRun(_ context.Context, _ accessdomain.Owner
 	return f.createResult, f.createErr
 }
 
-func (f *fakeScopedRepository) GetRunByID(context.Context, accessdomain.OwnerScope, int64) (agentdomain.Run, error) {
-	return f.getResult, nil
+func (f *fakeScopedRepository) GetRunByID(context.Context, accessdomain.OwnerScope, int64) (RunSnapshot, error) {
+	return f.getResult, f.getErr
 }
 
-func (f *fakeScopedRepository) GetActiveRunByConversationID(context.Context, accessdomain.OwnerScope, int64) (agentdomain.Run, error) {
-	return f.getResult, nil
+func (f *fakeScopedRepository) GetActiveRunByConversationID(context.Context, accessdomain.OwnerScope, int64) (RunSnapshot, error) {
+	return f.activeResult, f.activeErr
 }
 
-func (f *fakeScopedRepository) GetLatestRunByConversationID(context.Context, accessdomain.OwnerScope, int64) (agentdomain.Run, error) {
-	return f.getResult, nil
+func (f *fakeScopedRepository) GetLatestRunByConversationID(context.Context, accessdomain.OwnerScope, int64) (RunSnapshot, error) {
+	return f.latestResult, f.latestErr
 }
 
-func (f *fakeScopedRepository) CancelRun(context.Context, accessdomain.OwnerScope, int64) (agentdomain.Run, error) {
-	return f.cancelResult, nil
+func (f *fakeScopedRepository) CancelRun(context.Context, accessdomain.OwnerScope, int64) (RunSnapshot, error) {
+	return f.cancelResult, f.cancelErr
 }
 
 type fakeStepRepository struct {
@@ -107,7 +115,10 @@ func TestNewServiceValidatesDependenciesAndPolicy(t *testing.T) {
 }
 
 func TestServiceQueueNormalizesAndAppliesServerBudget(t *testing.T) {
-	runs := &fakeScopedRepository{createResult: QueueResult{Run: agentdomain.Run{ID: 7}, Created: true}}
+	runs := &fakeScopedRepository{createResult: QueueResult{
+		RunSnapshot: RunSnapshot{Run: agentdomain.Run{ID: 7}, Steps: []agentdomain.Step{}},
+		Created:     true,
+	}}
 	service := testService(t, runs, &fakeStepRepository{})
 	now := time.Date(2026, 11, 15, 8, 0, 0, 0, time.UTC)
 	service.now = func() time.Time { return now }
@@ -160,8 +171,10 @@ func TestServiceQueueRejectsInvalidInputBeforeRepository(t *testing.T) {
 
 func TestServiceQueriesCancelAndListSteps(t *testing.T) {
 	runs := &fakeScopedRepository{
-		getResult:    agentdomain.Run{ID: 8},
-		cancelResult: agentdomain.Run{ID: 8, Status: agentdomain.RunStatusCanceled},
+		getResult:    RunSnapshot{Run: agentdomain.Run{ID: 8}, Steps: []agentdomain.Step{}},
+		activeResult: RunSnapshot{Run: agentdomain.Run{ID: 8}, Steps: []agentdomain.Step{}},
+		latestResult: RunSnapshot{Run: agentdomain.Run{ID: 8}, Steps: []agentdomain.Step{}},
+		cancelResult: RunSnapshot{Run: agentdomain.Run{ID: 8, Status: agentdomain.RunStatusCanceled}, Steps: []agentdomain.Step{}},
 	}
 	service := testService(t, runs, &fakeStepRepository{})
 	scope := testScope(t)
@@ -178,6 +191,52 @@ func TestServiceQueriesCancelAndListSteps(t *testing.T) {
 	steps, err := service.ListSteps(t.Context(), scope, 8)
 	if err != nil || steps == nil || len(steps) != 0 {
 		t.Fatalf("ListSteps() = %#v, %v", steps, err)
+	}
+}
+
+func TestServiceReturnsUnifiedRunSnapshotsAndPreservesLookupErrors(t *testing.T) {
+	snapshot := RunSnapshot{
+		Run:   agentdomain.Run{ID: 8, ConversationID: 3, StepCount: 1},
+		Steps: []agentdomain.Step{{ID: 11, RunID: 8, SequenceNo: 1}},
+	}
+	runs := &fakeScopedRepository{
+		createResult: QueueResult{RunSnapshot: snapshot, Created: true},
+		getResult:    snapshot,
+		activeResult: snapshot,
+		latestResult: snapshot,
+		cancelResult: snapshot,
+	}
+	service := testService(t, runs, &fakeStepRepository{})
+	scope := testScope(t)
+
+	queued, err := service.Queue(t.Context(), scope, QueueInput{
+		ConversationID: 3, Content: "question", ClientRunID: "run-1",
+		ResponseLanguage: agentdomain.ResponseLanguageAuto,
+	})
+	if err != nil || !reflect.DeepEqual(queued.RunSnapshot, snapshot) {
+		t.Fatalf("Queue() snapshot = %+v, %v", queued.RunSnapshot, err)
+	}
+	for name, call := range map[string]func() (RunSnapshot, error){
+		"get":    func() (RunSnapshot, error) { return service.GetByID(t.Context(), scope, 8) },
+		"active": func() (RunSnapshot, error) { return service.GetActiveConversationRun(t.Context(), scope, 3) },
+		"latest": func() (RunSnapshot, error) { return service.GetLatestConversationRun(t.Context(), scope, 3) },
+		"cancel": func() (RunSnapshot, error) { return service.Cancel(t.Context(), scope, 8) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := call()
+			if err != nil || !reflect.DeepEqual(got, snapshot) {
+				t.Fatalf("snapshot = %+v, %v", got, err)
+			}
+		})
+	}
+
+	runs.activeErr = conversationdomain.ErrNotFound
+	if _, err := service.GetActiveConversationRun(t.Context(), scope, 3); !errors.Is(err, conversationdomain.ErrNotFound) {
+		t.Fatalf("active conversation error = %v", err)
+	}
+	runs.latestErr = ErrRunNotFound
+	if _, err := service.GetLatestConversationRun(t.Context(), scope, 3); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("latest no-run error = %v", err)
 	}
 }
 

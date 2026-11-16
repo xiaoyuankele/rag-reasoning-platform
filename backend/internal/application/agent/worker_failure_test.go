@@ -232,6 +232,35 @@ func TestWorkerMapsContextAndModelContractErrors(t *testing.T) {
 			t.Fatalf("invalid Model response fail code = %s", repository.failCode)
 		}
 	})
+
+	for _, test := range []struct {
+		name       string
+		preference agentdomain.ResponseLanguage
+		resolved   agentdomain.ResponseLanguage
+	}{
+		{name: "unresolved auto context", preference: agentdomain.ResponseLanguageAuto, resolved: agentdomain.ResponseLanguageAuto},
+		{name: "forced language mismatch", preference: agentdomain.ResponseLanguageChinese, resolved: agentdomain.ResponseLanguageEnglish},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			run := testWorkerRun()
+			run.ResponseLanguage = test.preference
+			repository := newMemoryExecutionRepository(run, nil, &traceRecorder{})
+			model := &scriptedModel{}
+			contexts := contextProviderFunc(func(context.Context, accessdomain.OwnerScope, agentdomain.Run) (AgentContext, error) {
+				return AgentContext{
+					SystemInstruction: "Use trusted evidence.", CurrentQuestion: "question",
+					ResponseLanguage: test.resolved,
+				}, nil
+			})
+			worker, _ := NewWorker(repository, contexts, model, &fakeToolSet{}, testWorkerPolicy())
+			if handled, err := worker.RunOnce(t.Context()); err != nil || !handled {
+				t.Fatalf("RunOnce() = %t, %v", handled, err)
+			}
+			if repository.failCode != agentdomain.ErrorCodeExecutionFailed || model.callCount() != 0 {
+				t.Fatalf("invalid context fail code = %q, model calls = %d", repository.failCode, model.callCount())
+			}
+		})
+	}
 }
 
 func TestWorkerRejectsDecisionTokenOverflowBeforePersistOrTool(t *testing.T) {

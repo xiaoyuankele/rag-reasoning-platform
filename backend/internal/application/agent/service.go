@@ -120,54 +120,54 @@ func (s *Service) GetByID(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	runID int64,
-) (agentdomain.Run, error) {
+) (RunSnapshot, error) {
 	if !scope.IsValid() {
-		return agentdomain.Run{}, accessdomain.ErrInvalidOwnerScope
+		return RunSnapshot{}, accessdomain.ErrInvalidOwnerScope
 	}
 	if runID <= 0 {
-		return agentdomain.Run{}, ErrInvalidRunID
+		return RunSnapshot{}, ErrInvalidRunID
 	}
-	run, err := s.runs.GetRunByID(ctx, scope, runID)
+	snapshot, err := s.runs.GetRunByID(ctx, scope, runID)
 	if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("get agent run: %w", err)
+		return RunSnapshot{}, fmt.Errorf("get agent run: %w", err)
 	}
-	return run, nil
+	return snapshot, nil
 }
 
 func (s *Service) GetActiveConversationRun(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	conversationID int64,
-) (agentdomain.Run, error) {
+) (RunSnapshot, error) {
 	if !scope.IsValid() {
-		return agentdomain.Run{}, accessdomain.ErrInvalidOwnerScope
+		return RunSnapshot{}, accessdomain.ErrInvalidOwnerScope
 	}
 	if conversationID <= 0 {
-		return agentdomain.Run{}, ErrInvalidConversationID
+		return RunSnapshot{}, ErrInvalidConversationID
 	}
-	run, err := s.runs.GetActiveRunByConversationID(ctx, scope, conversationID)
+	snapshot, err := s.runs.GetActiveRunByConversationID(ctx, scope, conversationID)
 	if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("get active conversation agent run: %w", err)
+		return RunSnapshot{}, fmt.Errorf("get active conversation agent run: %w", err)
 	}
-	return run, nil
+	return snapshot, nil
 }
 
 func (s *Service) GetLatestConversationRun(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	conversationID int64,
-) (agentdomain.Run, error) {
+) (RunSnapshot, error) {
 	if !scope.IsValid() {
-		return agentdomain.Run{}, accessdomain.ErrInvalidOwnerScope
+		return RunSnapshot{}, accessdomain.ErrInvalidOwnerScope
 	}
 	if conversationID <= 0 {
-		return agentdomain.Run{}, ErrInvalidConversationID
+		return RunSnapshot{}, ErrInvalidConversationID
 	}
-	run, err := s.runs.GetLatestRunByConversationID(ctx, scope, conversationID)
+	snapshot, err := s.runs.GetLatestRunByConversationID(ctx, scope, conversationID)
 	if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("get latest conversation agent run: %w", err)
+		return RunSnapshot{}, fmt.Errorf("get latest conversation agent run: %w", err)
 	}
-	return run, nil
+	return snapshot, nil
 }
 
 func (s *Service) ListSteps(
@@ -195,16 +195,16 @@ func (s *Service) Cancel(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	runID int64,
-) (agentdomain.Run, error) {
+) (RunSnapshot, error) {
 	if !scope.IsValid() {
-		return agentdomain.Run{}, accessdomain.ErrInvalidOwnerScope
+		return RunSnapshot{}, accessdomain.ErrInvalidOwnerScope
 	}
 	if runID <= 0 {
-		return agentdomain.Run{}, ErrInvalidRunID
+		return RunSnapshot{}, ErrInvalidRunID
 	}
-	run, err := s.runs.CancelRun(ctx, scope, runID)
+	snapshot, err := s.runs.CancelRun(ctx, scope, runID)
 	if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("cancel agent run: %w", err)
+		return RunSnapshot{}, fmt.Errorf("cancel agent run: %w", err)
 	}
-	return run, nil
+	return snapshot, nil
 }

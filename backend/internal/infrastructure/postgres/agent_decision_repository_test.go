@@ -26,6 +26,15 @@ func testCommitFinalInput(answer string) agentapplication.CommitFinalInput {
 	}
 }
 
+func TestAgentCommitFinalRejectsUnresolvedResponseLanguage(t *testing.T) {
+	repository := newAgentTestRepository(nil, "agent-worker-invalid-final-language")
+	input := testCommitFinalInput("must stay unresolved")
+	input.Result.ResponseLanguage = agentdomain.ResponseLanguageAuto
+	if _, err := repository.CommitFinal(t.Context(), 1, "lease", input); !errors.Is(err, agentapplication.ErrInvalidStep) {
+		t.Fatalf("CommitFinal(auto language) error = %v", err)
+	}
+}
+
 func TestAgentCommitFinalRollsBackEveryWriteAndFencesReplay(t *testing.T) {
 	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
 		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")

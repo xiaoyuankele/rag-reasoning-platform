@@ -3,6 +3,8 @@ package agent
 import (
 	"encoding/json"
 	"testing"
+
+	agentdomain "rag-reasoning-platform/backend/internal/domain/agent"
 )
 
 func TestModelDecisionRequiresExactlyOneBranchAndValidUsage(t *testing.T) {
@@ -38,6 +40,7 @@ func TestAgentContextValidationExcludesUnknownRolesAndEmptyContent(t *testing.T)
 	valid := AgentContext{
 		SystemInstruction: "bounded instruction",
 		CurrentQuestion:   "question",
+		ResponseLanguage:  agentdomain.ResponseLanguageEnglish,
 		History: []ModelMessage{
 			{Role: "user", Content: "previous question"},
 			{Role: "assistant", Content: "previous answer"},
@@ -45,6 +48,9 @@ func TestAgentContextValidationExcludesUnknownRolesAndEmptyContent(t *testing.T)
 	}
 	if !valid.IsValid() {
 		t.Fatal("valid bounded context must be accepted")
+	}
+	if !valid.ResponseLanguage.IsResolved() {
+		t.Fatal("valid runtime context must carry a resolved response language")
 	}
 	invalidRole := valid
 	invalidRole.History = []ModelMessage{{Role: "system", Content: "hidden"}}

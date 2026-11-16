@@ -47,9 +47,16 @@ type CreateRunInput struct {
 	Budget              agentdomain.Budget
 }
 
+// RunSnapshot is one owner-scoped, internally consistent view of a Run and
+// every persisted Step ordered by sequence number.
+type RunSnapshot struct {
+	agentdomain.Run
+	Steps []agentdomain.Step
+}
+
 // QueueResult returns the atomic conversation turn and Agent Run creation.
 type QueueResult struct {
-	Run              agentdomain.Run
+	RunSnapshot
 	UserMessage      conversationdomain.Message
 	AssistantMessage conversationdomain.Message
 	Created          bool
@@ -66,22 +73,22 @@ type ScopedRepository interface {
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
 		runID int64,
-	) (agentdomain.Run, error)
+	) (RunSnapshot, error)
 	GetActiveRunByConversationID(
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
 		conversationID int64,
-	) (agentdomain.Run, error)
+	) (RunSnapshot, error)
 	GetLatestRunByConversationID(
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
 		conversationID int64,
-	) (agentdomain.Run, error)
+	) (RunSnapshot, error)
 	CancelRun(
 		ctx context.Context,
 		scope accessdomain.OwnerScope,
 		runID int64,
-	) (agentdomain.Run, error)
+	) (RunSnapshot, error)
 }
 
 // WorkerRepository owns durable queue claims and fenced Run transitions.

@@ -235,7 +235,8 @@ func (w *Worker) executeRun(ctx context.Context, run agentdomain.Run) error {
 		}
 		return w.failRun(ctx, run, agentdomain.ErrorCodeExecutionFailed, safeExecutionMessage)
 	}
-	if !contextSnapshot.IsValid() {
+	if !contextSnapshot.IsValid() || !contextSnapshot.ResponseLanguage.IsResolved() ||
+		(run.ResponseLanguage.IsResolved() && run.ResponseLanguage != contextSnapshot.ResponseLanguage) {
 		return w.failRun(ctx, run, agentdomain.ErrorCodeExecutionFailed, safeExecutionMessage)
 	}
 
@@ -249,7 +250,7 @@ func (w *Worker) executeRun(ctx context.Context, run agentdomain.Run) error {
 		request := ModelRequest{
 			RunID:               run.ID,
 			RequestedDocumentID: copyOptionalInt64(run.RequestedDocumentID),
-			ResponseLanguage:    run.ResponseLanguage,
+			ResponseLanguage:    contextSnapshot.ResponseLanguage,
 			Context:             cloneAgentContext(contextSnapshot),
 			Tools:               cloneToolDefinitions(w.tools.Definitions()),
 			Observations:        modelObservations(steps),
@@ -329,7 +330,7 @@ func (w *Worker) executeRun(ctx context.Context, run agentdomain.Run) error {
 		_, err = w.repository.CommitFinal(ctx, run.ID, run.LeaseToken, CommitFinalInput{
 			Result: FinalStepResult{
 				Answer:           decision.Final.Text,
-				ResponseLanguage: run.ResponseLanguage,
+				ResponseLanguage: contextSnapshot.ResponseLanguage,
 				Payload:          payload,
 			},
 			PromptTokens:     decision.Usage.PromptTokens,

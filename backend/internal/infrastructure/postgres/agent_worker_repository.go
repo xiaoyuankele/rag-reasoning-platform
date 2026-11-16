@@ -85,7 +85,7 @@ func (r *AgentRepository) ClaimNextRun(ctx context.Context) (agentdomain.Run, er
 		     error_code = NULL,
 		     error_message = NULL,
 		     updated_at = CURRENT_TIMESTAMP,
-		     started_at = CURRENT_TIMESTAMP,
+		     started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
 		     completed_at = NULL,
 		     worker_id = $2,
 		     lease_token = $3,
@@ -294,7 +294,6 @@ func (r *AgentRepository) RequeueRun(
 			     error_message = $4,
 			     next_attempt_at = $2,
 			     updated_at = CURRENT_TIMESTAMP,
-			     started_at = NULL,
 			     completed_at = NULL,
 			     worker_id = NULL,
 			     lease_token = NULL,
@@ -328,7 +327,7 @@ func (r *AgentRepository) CommitFinal(
 	input agentapplication.CommitFinalInput,
 ) (agentdomain.Step, error) {
 	if strings.TrimSpace(input.Result.Answer) == "" ||
-		!input.Result.ResponseLanguage.IsValid() ||
+		!input.Result.ResponseLanguage.IsResolved() ||
 		(len(input.Result.Payload) > 0 && !json.Valid(input.Result.Payload)) ||
 		!agentdomain.TokenUsageIsValid(input.PromptTokens, input.CompletionTokens, input.TotalTokens) {
 		return agentdomain.Step{}, agentapplication.ErrInvalidStep
@@ -565,7 +564,6 @@ func (r *AgentRepository) RequeueExpiredRuns(
 			     error_message = $3,
 			     next_attempt_at = CURRENT_TIMESTAMP,
 			     updated_at = CURRENT_TIMESTAMP,
-			     started_at = NULL,
 			     completed_at = NULL,
 			     worker_id = NULL,
 			     lease_token = NULL,

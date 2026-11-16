@@ -375,6 +375,7 @@ func validContextProvider(t *testing.T) ContextProvider {
 			SystemInstruction: "Use only trusted evidence.",
 			CurrentQuestion:   "What does the paper say?",
 			History:           []ModelMessage{{Role: "user", Content: "Earlier question"}},
+			ResponseLanguage:  agentdomain.ResponseLanguageEnglish,
 		}, nil
 	})
 }
@@ -461,12 +462,65 @@ func TestWorkerRunsDeterministicSearchReadFinalChain(t *testing.T) {
 	if repository.finalInput == nil {
 		t.Fatal("final input was not persisted")
 	}
+	for index, request := range model.requests {
+		if request.ResponseLanguage != agentdomain.ResponseLanguageEnglish ||
+			request.Context.ResponseLanguage != agentdomain.ResponseLanguageEnglish {
+			t.Fatalf("model request %d language = %q / context %q", index, request.ResponseLanguage, request.Context.ResponseLanguage)
+		}
+	}
+	if repository.finalInput.Result.ResponseLanguage != agentdomain.ResponseLanguageEnglish {
+		t.Fatalf("final response language = %q", repository.finalInput.Result.ResponseLanguage)
+	}
 	var payload struct {
 		Sources []FinalSource `json:"sources"`
 	}
 	if err := json.Unmarshal(repository.finalInput.Result.Payload, &payload); err != nil ||
 		len(payload.Sources) != 1 || payload.Sources[0].ContentHash != "sha256:bridge" {
 		t.Fatalf("final source payload = %+v, %v", payload, err)
+	}
+}
+
+func TestWorkerUsesResolvedContextLanguageForModelAndFinal(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		preference agentdomain.ResponseLanguage
+		resolved   agentdomain.ResponseLanguage
+	}{
+		{name: "auto to Chinese", preference: agentdomain.ResponseLanguageAuto, resolved: agentdomain.ResponseLanguageChinese},
+		{name: "auto to English", preference: agentdomain.ResponseLanguageAuto, resolved: agentdomain.ResponseLanguageEnglish},
+		{name: "forced Chinese", preference: agentdomain.ResponseLanguageChinese, resolved: agentdomain.ResponseLanguageChinese},
+		{name: "forced English", preference: agentdomain.ResponseLanguageEnglish, resolved: agentdomain.ResponseLanguageEnglish},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			run := testWorkerRun()
+			run.ResponseLanguage = test.preference
+			repository := newMemoryExecutionRepository(run, nil, &traceRecorder{})
+			model := &scriptedModel{decisions: []ModelDecision{{
+				Final: &ModelFinalAnswer{Text: "resolved answer"},
+				Usage: TokenUsage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+			}}}
+			contexts := contextProviderFunc(func(context.Context, accessdomain.OwnerScope, agentdomain.Run) (AgentContext, error) {
+				return AgentContext{
+					SystemInstruction: "Use trusted evidence.", CurrentQuestion: "question",
+					ResponseLanguage: test.resolved,
+				}, nil
+			})
+			worker, err := NewWorker(repository, contexts, model, &fakeToolSet{}, testWorkerPolicy())
+			if err != nil {
+				t.Fatalf("NewWorker() error = %v", err)
+			}
+			handled, err := worker.RunOnce(t.Context())
+			if err != nil || !handled {
+				t.Fatalf("RunOnce() = %t, %v", handled, err)
+			}
+			if len(model.requests) != 1 || model.requests[0].ResponseLanguage != test.resolved ||
+				model.requests[0].Context.ResponseLanguage != test.resolved {
+				t.Fatalf("model requests = %+v, want resolved language %q", model.requests, test.resolved)
+			}
+			if repository.finalInput == nil || repository.finalInput.Result.ResponseLanguage != test.resolved {
+				t.Fatalf("final input = %+v, want resolved language %q", repository.finalInput, test.resolved)
+			}
+		})
 	}
 }
 

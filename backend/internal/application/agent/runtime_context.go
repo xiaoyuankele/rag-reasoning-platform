@@ -97,8 +97,9 @@ func (p *RuntimeContextProvider) LoadAgentContext(
 		SystemInstruction: runtimeAgentSystemInstruction(language),
 		History:           history,
 		CurrentQuestion:   current.Content,
+		ResponseLanguage:  agentdomain.ResponseLanguage(language),
 	}
-	if !result.IsValid() {
+	if !result.IsValid() || !result.ResponseLanguage.IsResolved() {
 		return AgentContext{}, ErrRuntimeContextConfiguration
 	}
 	return result, nil

@@ -157,11 +157,15 @@ func (r *AgentRepository) CreateRun(
 			existing.ResponseLanguage != input.ResponseLanguage {
 			return agentapplication.QueueResult{}, agentapplication.ErrIdempotencyConflict
 		}
+		snapshot, err := loadAgentRunSnapshot(ctx, tx, scope, existing)
+		if err != nil {
+			return agentapplication.QueueResult{}, err
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return agentapplication.QueueResult{}, fmt.Errorf("commit idempotent agent run lookup: %w", err)
 		}
 		return agentapplication.QueueResult{
-			Run: scopedAgentRun(existing), UserMessage: userMessage, AssistantMessage: assistantMessage, Created: false,
+			RunSnapshot: snapshot, UserMessage: userMessage, AssistantMessage: assistantMessage, Created: false,
 		}, nil
 	}
 	if !errors.Is(existingErr, pgx.ErrNoRows) {
@@ -292,11 +296,19 @@ func (r *AgentRepository) CreateRun(
 	); err != nil {
 		return agentapplication.QueueResult{}, fmt.Errorf("update agent conversation activity: %w", err)
 	}
+	userMessage, assistantMessage, err = loadAgentRunMessages(ctx, tx, run)
+	if err != nil {
+		return agentapplication.QueueResult{}, err
+	}
+	snapshot, err := loadAgentRunSnapshot(ctx, tx, scope, run)
+	if err != nil {
+		return agentapplication.QueueResult{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return agentapplication.QueueResult{}, fmt.Errorf("commit agent run creation: %w", err)
 	}
 	return agentapplication.QueueResult{
-		Run: scopedAgentRun(run), UserMessage: userMessage, AssistantMessage: assistantMessage, Created: true,
+		RunSnapshot: snapshot, UserMessage: userMessage, AssistantMessage: assistantMessage, Created: true,
 	}, nil
 }
 
@@ -304,32 +316,15 @@ func (r *AgentRepository) GetRunByID(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	runID int64,
-) (agentdomain.Run, error) {
-	if !scope.IsValid() {
-		return agentdomain.Run{}, accessdomain.ErrInvalidOwnerScope
-	}
-	run, err := scanAgentRun(r.pool.QueryRow(
-		ctx,
-		`SELECT `+agentRunSelectColumns+`
-		 FROM agent_runs
-		 WHERE id = $1 AND owner_user_id = $2`,
-		runID,
-		scope.OwnerUserID(),
-	))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return agentdomain.Run{}, agentapplication.ErrRunNotFound
-	}
-	if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("get scoped agent run: %w", err)
-	}
-	return scopedAgentRun(run), nil
+) (agentapplication.RunSnapshot, error) {
+	return r.getRunSnapshotByID(ctx, scope, runID)
 }
 
 func (r *AgentRepository) GetActiveRunByConversationID(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	conversationID int64,
-) (agentdomain.Run, error) {
+) (agentapplication.RunSnapshot, error) {
 	return r.getConversationRun(ctx, scope, conversationID, true)
 }
 
@@ -337,7 +332,7 @@ func (r *AgentRepository) GetLatestRunByConversationID(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	conversationID int64,
-) (agentdomain.Run, error) {
+) (agentapplication.RunSnapshot, error) {
 	return r.getConversationRun(ctx, scope, conversationID, false)
 }
 
@@ -346,52 +341,8 @@ func (r *AgentRepository) getConversationRun(
 	scope accessdomain.OwnerScope,
 	conversationID int64,
 	activeOnly bool,
-) (agentdomain.Run, error) {
-	if !scope.IsValid() {
-		return agentdomain.Run{}, accessdomain.ErrInvalidOwnerScope
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("begin scoped conversation agent lookup: %w", err)
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	var lockedConversationID int64
-	if err := tx.QueryRow(
-		ctx,
-		`SELECT id FROM conversations
-		 WHERE id = $1 AND owner_user_id = $2
-		 FOR KEY SHARE`,
-		conversationID,
-		scope.OwnerUserID(),
-	).Scan(&lockedConversationID); errors.Is(err, pgx.ErrNoRows) {
-		return agentdomain.Run{}, agentapplication.ErrRunNotFound
-	} else if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("lock scoped conversation for agent lookup: %w", err)
-	}
-	statusClause := ""
-	if activeOnly {
-		statusClause = " AND status IN ('queued', 'processing')"
-	}
-	run, err := scanAgentRun(tx.QueryRow(
-		ctx,
-		`SELECT `+agentRunSelectColumns+`
-		 FROM agent_runs
-		 WHERE conversation_id = $1 AND owner_user_id = $2`+statusClause+`
-		 ORDER BY id DESC
-		 LIMIT 1`,
-		lockedConversationID,
-		scope.OwnerUserID(),
-	))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return agentdomain.Run{}, agentapplication.ErrRunNotFound
-	}
-	if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("get conversation agent run: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return agentdomain.Run{}, fmt.Errorf("commit conversation agent lookup: %w", err)
-	}
-	return scopedAgentRun(run), nil
+) (agentapplication.RunSnapshot, error) {
+	return r.getConversationRunSnapshot(ctx, scope, conversationID, activeOnly)
 }
 
 // CancelRun only cancels queued work and closes its assistant placeholder.
@@ -399,13 +350,13 @@ func (r *AgentRepository) CancelRun(
 	ctx context.Context,
 	scope accessdomain.OwnerScope,
 	runID int64,
-) (agentdomain.Run, error) {
+) (agentapplication.RunSnapshot, error) {
 	if !scope.IsValid() {
-		return agentdomain.Run{}, accessdomain.ErrInvalidOwnerScope
+		return agentapplication.RunSnapshot{}, accessdomain.ErrInvalidOwnerScope
 	}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("begin agent run cancellation: %w", err)
+		return agentapplication.RunSnapshot{}, fmt.Errorf("begin agent run cancellation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	run, err := scanAgentRun(tx.QueryRow(
@@ -418,19 +369,19 @@ func (r *AgentRepository) CancelRun(
 		scope.OwnerUserID(),
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return agentdomain.Run{}, agentapplication.ErrRunNotFound
+		return agentapplication.RunSnapshot{}, agentapplication.ErrRunNotFound
 	}
 	if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("lock agent run for cancellation: %w", err)
+		return agentapplication.RunSnapshot{}, fmt.Errorf("lock agent run for cancellation: %w", err)
 	}
 	switch run.Status {
 	case agentdomain.RunStatusProcessing:
-		return agentdomain.Run{}, agentapplication.ErrRunProcessingCannotCancel
+		return agentapplication.RunSnapshot{}, agentapplication.ErrRunProcessingCannotCancel
 	case agentdomain.RunStatusSucceeded, agentdomain.RunStatusFailed, agentdomain.RunStatusCanceled:
-		return agentdomain.Run{}, agentapplication.ErrRunTerminalCannotCancel
+		return agentapplication.RunSnapshot{}, agentapplication.ErrRunTerminalCannotCancel
 	case agentdomain.RunStatusQueued:
 	default:
-		return agentdomain.Run{}, fmt.Errorf("cancel agent run with invalid status %q", run.Status)
+		return agentapplication.RunSnapshot{}, fmt.Errorf("cancel agent run with invalid status %q", run.Status)
 	}
 	if err := failActiveAgentSteps(
 		ctx,
@@ -439,7 +390,7 @@ func (r *AgentRepository) CancelRun(
 		agentdomain.ErrorCodeWorkerInterrupted,
 		agentCanceledStepMessage,
 	); err != nil {
-		return agentdomain.Run{}, err
+		return agentapplication.RunSnapshot{}, err
 	}
 	if err := updateAssistantMessage(
 		ctx,
@@ -448,7 +399,7 @@ func (r *AgentRepository) CancelRun(
 		agentCanceledMessage,
 		conversationdomain.MessageStatusInterrupted,
 	); err != nil {
-		return agentdomain.Run{}, fmt.Errorf("interrupt canceled agent assistant: %w", err)
+		return agentapplication.RunSnapshot{}, fmt.Errorf("interrupt canceled agent assistant: %w", err)
 	}
 	canceled, err := scanAgentRun(tx.QueryRow(
 		ctx,
@@ -467,15 +418,19 @@ func (r *AgentRepository) CancelRun(
 		run.ID,
 	))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return agentdomain.Run{}, agentapplication.ErrRunProcessingCannotCancel
+		return agentapplication.RunSnapshot{}, agentapplication.ErrRunProcessingCannotCancel
 	}
 	if err != nil {
-		return agentdomain.Run{}, fmt.Errorf("cancel agent run: %w", err)
+		return agentapplication.RunSnapshot{}, fmt.Errorf("cancel agent run: %w", err)
+	}
+	snapshot, err := loadAgentRunSnapshot(ctx, tx, scope, canceled)
+	if err != nil {
+		return agentapplication.RunSnapshot{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return agentdomain.Run{}, fmt.Errorf("commit agent run cancellation: %w", err)
+		return agentapplication.RunSnapshot{}, fmt.Errorf("commit agent run cancellation: %w", err)
 	}
-	return scopedAgentRun(canceled), nil
+	return snapshot, nil
 }
 
 const agentRunSelectColumns = `
@@ -595,8 +550,11 @@ func loadAgentRunMessages(
 	if err != nil {
 		return conversationdomain.Message{}, conversationdomain.Message{}, fmt.Errorf("load agent assistant message: %w", err)
 	}
-	if userMessage.Role != conversationdomain.RoleUser ||
+	if userMessage.ID != run.UserMessageID || assistantMessage.ID != run.AssistantMessageID ||
+		userMessage.ConversationID != run.ConversationID || assistantMessage.ConversationID != run.ConversationID ||
+		userMessage.Role != conversationdomain.RoleUser ||
 		assistantMessage.Role != conversationdomain.RoleAssistant ||
+		userMessage.Status != conversationdomain.MessageStatusCompleted ||
 		assistantMessage.SequenceNo != userMessage.SequenceNo+1 {
 		return conversationdomain.Message{}, conversationdomain.Message{}, errors.New("agent run messages are inconsistent")
 	}

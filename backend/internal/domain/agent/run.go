@@ -66,6 +66,12 @@ func (l ResponseLanguage) IsValid() bool {
 		l == ResponseLanguageEnglish
 }
 
+// IsResolved reports whether the language is safe to persist in a successful
+// result. Auto is a request preference and must be resolved before execution.
+func (l ResponseLanguage) IsResolved() bool {
+	return l == ResponseLanguageChinese || l == ResponseLanguageEnglish
+}
+
 // ErrorCode is safe to persist and expose. Provider payloads, SQL and secrets
 // must never be stored in this field.
 type ErrorCode string
@@ -134,7 +140,7 @@ type Result struct {
 
 func (r Result) IsValid() bool {
 	return strings.TrimSpace(r.Answer) != "" &&
-		r.ResponseLanguage.IsValid() &&
+		r.ResponseLanguage.IsResolved() &&
 		TokenUsageIsValid(r.PromptTokens, r.CompletionTokens, r.TotalTokens)
 }
 

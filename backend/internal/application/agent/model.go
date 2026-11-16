@@ -39,6 +39,10 @@ type AgentContext struct {
 	SystemInstruction string
 	History           []ModelMessage
 	CurrentQuestion   string
+	// ResponseLanguage is the zh/en value selected once by the M3.1 context
+	// policy. Worker execution requires it even though direct Provider fixtures
+	// may validate context shape without executing a Run.
+	ResponseLanguage agentdomain.ResponseLanguage
 }
 
 func (c AgentContext) IsValid() bool {
