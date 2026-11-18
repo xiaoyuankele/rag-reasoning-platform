@@ -1,9 +1,9 @@
 x-backend-runtime: &backend-runtime
-  # 四种角色复用同一镜像；变化的是 APP_ROLE，而不是代码或镜像版本。
+  # 五种角色复用同一镜像；变化的是 APP_ROLE，而不是代码或镜像版本。
   build:
     context: .
     dockerfile: backend/Dockerfile
-  image: rag-reasoning-platform-backend:local
+  image: ${BACKEND_IMAGE:-rag-reasoning-platform-backend:local}
   init: true
   stop_signal: SIGTERM
   stop_grace_period: 30s
@@ -113,6 +113,40 @@ x-generation-environment: &generation-environment
   CONVERSATION_HISTORY_MAX_TURNS: ${CONVERSATION_HISTORY_MAX_TURNS:-6}
   CONVERSATION_HISTORY_MAX_TOKENS: ${CONVERSATION_HISTORY_MAX_TOKENS:-3000}
 
+x-agent-environment: &agent-environment
+  AGENT_ENABLED: ${AGENT_ENABLED:-false}
+  AGENT_WORKER_ENABLED: ${AGENT_WORKER_ENABLED:-false}
+  DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+  DASHSCOPE_AGENT_ENDPOINT: ${DASHSCOPE_AGENT_ENDPOINT:-https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions}
+  AGENT_MODEL: ${AGENT_MODEL:-qwen3.6-flash}
+  AGENT_MODEL_HTTP_TIMEOUT: ${AGENT_MODEL_HTTP_TIMEOUT:-35s}
+  AGENT_MODEL_MAX_OUTPUT_TOKENS: ${AGENT_MODEL_MAX_OUTPUT_TOKENS:-2048}
+  AGENT_MODEL_TEMPERATURE: ${AGENT_MODEL_TEMPERATURE:-0.1}
+  AGENT_MODEL_MAX_CONCURRENCY: ${AGENT_MODEL_MAX_CONCURRENCY:-10}
+  AGENT_MODEL_MAX_CONCURRENCY_PER_OWNER: ${AGENT_MODEL_MAX_CONCURRENCY_PER_OWNER:-2}
+  AGENT_MODEL_CAPACITY_LEASE_TTL: ${AGENT_MODEL_CAPACITY_LEASE_TTL:-45s}
+  AGENT_MODEL_CAPACITY_WAIT_TIMEOUT: ${AGENT_MODEL_CAPACITY_WAIT_TIMEOUT:-2s}
+  AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-5}
+  AGENT_MAX_TOTAL_TOKENS: ${AGENT_MAX_TOTAL_TOKENS:-48000}
+  AGENT_RUN_TIMEOUT: ${AGENT_RUN_TIMEOUT:-120s}
+  AGENT_MAX_QUEUED_PER_OWNER: ${AGENT_MAX_QUEUED_PER_OWNER:-5}
+  AGENT_MAX_QUEUED_GLOBAL: ${AGENT_MAX_QUEUED_GLOBAL:-500}
+  AGENT_OWNER_IN_FLIGHT_LIMIT: ${AGENT_OWNER_IN_FLIGHT_LIMIT:-1}
+  AGENT_OWNER_BORROWED_LIMIT: ${AGENT_OWNER_BORROWED_LIMIT:-1}
+  AGENT_STARVATION_THRESHOLD: ${AGENT_STARVATION_THRESHOLD:-30s}
+  AGENT_WORKER_CONCURRENCY: ${AGENT_WORKER_CONCURRENCY:-10}
+  AGENT_POLL_INTERVAL: ${AGENT_POLL_INTERVAL:-1s}
+  AGENT_MODEL_TIMEOUT: ${AGENT_MODEL_TIMEOUT:-30s}
+  AGENT_TOOL_TIMEOUT: ${AGENT_TOOL_TIMEOUT:-15s}
+  AGENT_RETRY_DELAY: ${AGENT_RETRY_DELAY:-2s}
+  AGENT_RECOVERY_BATCH_SIZE: ${AGENT_RECOVERY_BATCH_SIZE:-100}
+  AGENT_WORKER_ID: ${AGENT_WORKER_ID:-}
+  AGENT_LEASE_DURATION: ${AGENT_LEASE_DURATION:-60s}
+  AGENT_HEARTBEAT_INTERVAL: ${AGENT_HEARTBEAT_INTERVAL:-15s}
+  ANSWER_INPUT_TOKEN_BUDGET: ${ANSWER_INPUT_TOKEN_BUDGET:-16000}
+  CONVERSATION_HISTORY_MAX_TURNS: ${CONVERSATION_HISTORY_MAX_TURNS:-6}
+  CONVERSATION_HISTORY_MAX_TOKENS: ${CONVERSATION_HISTORY_MAX_TOKENS:-3000}
+
 x-answer-jobs-environment: &answer-jobs-environment
   ANSWER_JOBS_ENABLED: ${ANSWER_JOBS_ENABLED:-false}
   ANSWER_JOB_WORKER_CONCURRENCY: ${ANSWER_JOB_WORKER_CONCURRENCY:-10}
@@ -156,7 +190,7 @@ x-capacity-coordination-environment: &capacity-coordination-environment
   # 不会退化为每个进程各自放行完整并发上限。
   CAPACITY_COORDINATION_ENABLED: ${CAPACITY_COORDINATION_ENABLED:-true}
   CAPACITY_NAMESPACE: ${CAPACITY_NAMESPACE:-rag-capacity}
-  CAPACITY_REDIS_ADDRESS: redis-coordination:6379
+  CAPACITY_REDIS_ADDRESS: ${CAPACITY_REDIS_COMPOSE_ADDRESS:-redis-coordination:6379}
   CAPACITY_REDIS_PASSWORD: ${CAPACITY_REDIS_PASSWORD:-}
   CAPACITY_REDIS_DATABASE: ${CAPACITY_REDIS_DATABASE:-0}
   CAPACITY_OPERATION_TIMEOUT: ${CAPACITY_OPERATION_TIMEOUT:-250ms}
@@ -191,14 +225,15 @@ services:
   backend:
     <<: *backend-runtime
     depends_on: *remote-backend-dependencies
-    container_name: rag_reasoning_backend
+    container_name: ${COMPOSE_CONTAINER_PREFIX:-rag_reasoning}_backend
     environment:
-      <<: [*backend-common-environment, *storage-environment, *document-environment, *embedding-environment, *generation-environment, *answer-jobs-environment, *cache-environment, *capacity-coordination-environment, *auth-environment]
+      <<: [*backend-common-environment, *storage-environment, *document-environment, *embedding-environment, *generation-environment, *agent-environment, *answer-jobs-environment, *cache-environment, *capacity-coordination-environment, *auth-environment]
       APP_ROLE: api
       APP_PORT: 8080
-      DB_MAX_CONNECTIONS: ${API_DB_MAX_CONNECTIONS:-5}
+      DB_MAX_CONNECTIONS: ${API_DB_MAX_CONNECTIONS:-4}
       # API 可以提交向量任务，但绝不在 HTTP 进程内领取任务。
       EMBEDDING_WORKER_ENABLED: "false"
+      AGENT_WORKER_ENABLED: "false"
     ports:
       - "127.0.0.1:${BACKEND_HOST_PORT:-8080}:8080"
     healthcheck:
@@ -234,7 +269,7 @@ services:
       <<: [*backend-common-environment, *embedding-environment, *capacity-coordination-environment]
       APP_ROLE: embedding-worker
       APP_READY_FILE: /tmp/rag-role-ready
-      DB_MAX_CONNECTIONS: ${EMBEDDING_WORKER_DB_MAX_CONNECTIONS:-3}
+      DB_MAX_CONNECTIONS: ${EMBEDDING_WORKER_DB_MAX_CONNECTIONS:-2}
       EMBEDDING_WORKER_ENABLED: "true"
     healthcheck: *worker-healthcheck
     mem_limit: ${EMBEDDING_WORKER_MEM_LIMIT:-512m}
@@ -248,7 +283,7 @@ services:
       <<: [*backend-common-environment, *embedding-environment, *generation-environment, *answer-jobs-environment, *cache-environment, *capacity-coordination-environment]
       APP_ROLE: answer-worker
       APP_READY_FILE: /tmp/rag-role-ready
-      DB_MAX_CONNECTIONS: ${ANSWER_WORKER_DB_MAX_CONNECTIONS:-5}
+      DB_MAX_CONNECTIONS: ${ANSWER_WORKER_DB_MAX_CONNECTIONS:-3}
       EMBEDDING_WORKER_ENABLED: "false"
       ANSWER_ENABLED: "true"
       ANSWER_JOBS_ENABLED: "true"
@@ -256,11 +291,30 @@ services:
     mem_limit: ${ANSWER_WORKER_MEM_LIMIT:-512m}
     cpus: ${ANSWER_WORKER_CPUS:-1.0}
 
+  agent-worker:
+    <<: *backend-runtime
+    depends_on: *remote-backend-dependencies
+    profiles: ["agent"]
+    environment:
+      <<: [*backend-common-environment, *embedding-environment, *generation-environment, *agent-environment, *capacity-coordination-environment]
+      APP_ROLE: agent-worker
+      APP_READY_FILE: /tmp/rag-role-ready
+      DB_MAX_CONNECTIONS: ${AGENT_WORKER_DB_MAX_CONNECTIONS:-4}
+      AGENT_ENABLED: "false"
+      AGENT_WORKER_ENABLED: "true"
+      EMBEDDING_WORKER_ENABLED: "false"
+      SEMANTIC_SEARCH_ENABLED: "false"
+      ANSWER_ENABLED: "false"
+      ANSWER_JOBS_ENABLED: "false"
+    healthcheck: *worker-healthcheck
+    mem_limit: ${AGENT_WORKER_MEM_LIMIT:-512m}
+    cpus: ${AGENT_WORKER_CPUS:-1.0}
+
   postgres:
     # 保持 PostgreSQL 主版本 15，并固定 pgvector 扩展版本，避免 latest 漂移。
     # bookworm 镜像沿用 PostgreSQL 官方数据目录，可继续挂载现有 PG15 数据卷。
     image: pgvector/pgvector:0.8.2-pg15-bookworm
-    container_name: rag_reasoning_postgres
+    container_name: ${COMPOSE_CONTAINER_PREFIX:-rag_reasoning}_postgres
 
     # PostgreSQL 官方镜像使用这三个变量初始化数据库。
     environment:
@@ -299,7 +353,7 @@ services:
   redis:
     # Redis 仅承担 Cache-Aside，不保存权限、任务或正式业务事实。
     image: redis:7-alpine
-    container_name: rag_reasoning_redis
+    container_name: ${COMPOSE_CONTAINER_PREFIX:-rag_reasoning}_redis
 
     # 缓存可以随时重建，因此关闭 RDB/AOF；allkeys-lfu 在达到内存上限时
     # 优先保留访问频率更高的查询，不影响 PostgreSQL 正式数据。
@@ -331,7 +385,7 @@ services:
   redis-coordination:
     # 只保存短期远程模型执行租约，不保存缓存和正式业务数据。
     image: redis:7-alpine
-    container_name: rag_reasoning_redis_coordination
+    container_name: ${COMPOSE_CONTAINER_PREFIX:-rag_reasoning}_redis_coordination
 
     # noeviction 是正确性边界：内存不足时申请失败并触发 503/异步重试，
     # 不能悄悄淘汰仍在执行的租约并放大 Provider 并发。
@@ -362,7 +416,7 @@ services:
   mailpit:
     # Mailpit 只在本地人工注册联调时启动；普通数据库和默认回归不依赖它。
     image: axllent/mailpit:v1.30.0
-    container_name: rag_reasoning_mailpit
+    container_name: ${COMPOSE_CONTAINER_PREFIX:-rag_reasoning}_mailpit
     profiles:
       - mailpit
 

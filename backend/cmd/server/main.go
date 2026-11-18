@@ -170,11 +170,21 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 	}
 
+	var agentConfig config.AgentConfig
+	if rolePlan.needsAgentConfig() {
+		agentConfig, err = config.LoadAgent()
+		if err != nil {
+			return fmt.Errorf("load Agent configuration: %w", err)
+		}
+	}
+	agentPlan := newAgentRuntimePlan(rolePlan, agentConfig)
+
 	if err := validateApplicationRoleFeatures(
 		appConfig.Role,
 		embeddingConfig.WorkerEnabled,
 		generationConfig.Enabled,
 		answerJobsConfig.Enabled,
+		agentConfig.WorkerEnabled,
 	); err != nil {
 		return err
 	}
@@ -207,6 +217,22 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("load capacity coordination configuration: %w", err)
 		}
+	}
+	if err := validateAgentWorkerPrerequisites(
+		agentPlan,
+		agentConfig,
+		embeddingConfig,
+		capacityConfig,
+	); err != nil {
+		return err
+	}
+	answerRuntimeEnabled := (rolePlan.serveHTTP || rolePlan.runAnswerWorker) && generationConfig.Enabled
+	if err := validateSharedAnswerAgentCapacity(
+		agentPlan.enableWorker,
+		agentConfig,
+		generationConfig,
+	); err != nil {
+		return err
 	}
 
 	// Redis 只保存可丢弃的加速副本。即使启动时 Ping 失败，服务仍会启动，
@@ -262,9 +288,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		embeddingConfig.WorkerEnabled
 	needsOnlineEmbedder := (rolePlan.serveHTTP || rolePlan.runAnswerWorker) &&
 		(embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled)
+	needsOnlineEmbedder = needsOnlineEmbedder || agentPlan.enableWorker
 	needsRemoteCapacity := needsWorkerEmbedder ||
 		needsOnlineEmbedder ||
-		((rolePlan.serveHTTP || rolePlan.runAnswerWorker) && generationConfig.Enabled)
+		answerRuntimeEnabled || agentPlan.enableWorker
 
 	// 容量协调不是可丢弃缓存：显式启用后必须在启动时可用，否则不同进程会
 	// 各自放行完整并发上限。运行期故障会拒绝新的远程调用，并由同步 503 或
@@ -422,7 +449,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	var scopedChunkRepository *postgres.ScopedChunkRepository
 	var corpusRevisionRepository *postgres.CorpusRevisionRepository
-	if rolePlan.serveHTTP || rolePlan.runAnswerWorker {
+	if rolePlan.serveHTTP || rolePlan.runAnswerWorker || agentPlan.enableWorker {
 		scopedChunkRepository = postgres.NewScopedChunkRepository(databasePool)
 	}
 	if cacheConfig.Enabled &&
@@ -759,8 +786,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// 2. ANSWER_ENABLED 控制的 AnswerService 内部证据检索。
 	// 因此“创建应用能力”和“是否暴露独立 HTTP 路由”必须分开判断。
 	var semanticSearchService *embeddingapplication.SemanticSearchService
-	if (rolePlan.serveHTTP || rolePlan.runAnswerWorker) &&
-		(embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled) {
+	if ((rolePlan.serveHTTP || rolePlan.runAnswerWorker) &&
+		(embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled)) ||
+		agentPlan.enableWorker {
 		if cacheConfig.Enabled {
 			semanticSearchService, err =
 				embeddingapplication.NewSemanticSearchServiceWithQueryCache(
@@ -903,6 +931,43 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			"max_waiters_per_user", generationConfig.MaxWaitersPerUser,
 			"queue_wait_timeout_ms",
 			generationConfig.QueueWaitTimeout.Milliseconds(),
+		)
+	}
+
+	agentRuntime, err := newAgentComponents(agentComponentInputs{
+		plan:           agentPlan,
+		pool:           databasePool,
+		scopedChunks:   scopedChunkRepository,
+		semanticSearch: semanticSearchService,
+		capacityStore:  capacityStore,
+		capacityConfig: capacityConfig,
+		agentConfig:    agentConfig,
+		logger:         logger,
+		modelFactory:   newAgentModelClient,
+	})
+	if err != nil {
+		return fmt.Errorf("create Agent runtime components: %w", err)
+	}
+	if agentRuntime.startupRecovery != nil {
+		recovered, err := recoverAgentWorkerForStartup(ctx, agentRuntime.startupRecovery)
+		if err != nil {
+			return fmt.Errorf("recover expired Agent runs during startup: %w", err)
+		}
+		logger.Info(
+			"Agent startup recovery completed",
+			"event", "agent_startup_recovery_completed",
+			"recovered_count", recovered,
+		)
+		logger.Info(
+			"Agent Worker pool configured",
+			"event", "agent_worker_pool_configured",
+			"concurrency", agentConfig.WorkerConcurrency,
+			"max_queued_per_owner", agentConfig.MaxQueuedPerOwner,
+			"max_queued_global", agentConfig.MaxQueuedGlobal,
+			"owner_in_flight_limit", agentConfig.OwnerInFlightLimit,
+			"owner_borrowed_limit", agentConfig.OwnerBorrowedLimit,
+			"model_max_concurrency", agentConfig.ModelMaxConcurrency,
+			"model_max_concurrency_per_owner", agentConfig.ModelMaxConcurrencyPerOwner,
 		)
 	}
 
@@ -1239,6 +1304,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if answerJobWorkerPool != nil {
 		startBackgroundWorker(answerJobWorkerPool.Run)
 	}
+	if agentRuntime.workerPool != nil {
+		startBackgroundWorker(agentRuntime.workerPool.Run)
+	}
 	if answerJobCleanupLoop != nil {
 		startBackgroundWorker(answerJobCleanupLoop.Run)
 	}
@@ -1506,6 +1574,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if answerJobHandler != nil {
 		answerJobHandler.RegisterRoutes(protectedRoutes)
 	}
+	registerAgentRoutes(protectedRoutes, agentRuntime.handler)
 
 	users := protectedRoutes.Group("/users")
 	currentUserHandler.RegisterRoutes(users)

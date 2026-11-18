@@ -81,6 +81,11 @@ func TestLoadApplicationRoleAcceptsEveryStableRole(t *testing.T) {
 			value: "answer-worker",
 			want:  ApplicationRoleAnswerWorker,
 		},
+		{
+			name:  "Agent worker",
+			value: " AGENT-WORKER ",
+			want:  ApplicationRoleAgentWorker,
+		},
 	}
 
 	for _, testCase := range testCases {

@@ -21,6 +21,7 @@ func TestNewApplicationRolePlanReturnsExpectedComponents(t *testing.T) {
 				runDocumentWorker:  true,
 				runEmbeddingWorker: true,
 				runAnswerWorker:    true,
+				runAgentWorker:     true,
 			},
 		},
 		{name: "api", role: config.ApplicationRoleAPI, want: applicationRolePlan{serveHTTP: true}},
@@ -38,6 +39,11 @@ func TestNewApplicationRolePlanReturnsExpectedComponents(t *testing.T) {
 			name: "answer worker",
 			role: config.ApplicationRoleAnswerWorker,
 			want: applicationRolePlan{runAnswerWorker: true},
+		},
+		{
+			name: "Agent worker",
+			role: config.ApplicationRoleAgentWorker,
+			want: applicationRolePlan{runAgentWorker: true},
 		},
 	}
 
@@ -60,6 +66,22 @@ func TestNewApplicationRolePlanRejectsUnsupportedRole(t *testing.T) {
 	}
 }
 
+func TestAgentWorkerRoleLoadsOnlyRuntimeAndCapacityDependencies(t *testing.T) {
+	plan, err := newApplicationRolePlan(config.ApplicationRoleAgentWorker)
+	if err != nil {
+		t.Fatalf("newApplicationRolePlan() error = %v", err)
+	}
+	if plan.serveHTTP || plan.runDocumentWorker || plan.runEmbeddingWorker || plan.runAnswerWorker ||
+		!plan.runAgentWorker || plan.needsStorage() || plan.needsDocumentConfig() ||
+		plan.needsAnswerJobsConfig() || plan.needsCacheConfig() ||
+		!plan.needsEmbeddingConfig() || !plan.needsCapacityCoordinationConfig() ||
+		!plan.needsAgentConfig() || !plan.needsGenerationConfig() {
+		t.Fatalf("Agent Worker dependency plan = %+v", plan)
+	}
+	// Generation config is loaded only to compare the shared provider/model
+	// capacity limits. The role plan still never constructs Answer components.
+}
+
 func TestValidateApplicationRoleFeaturesRejectsDisabledDedicatedWorker(t *testing.T) {
 	testCases := []struct {
 		name                   string
@@ -67,6 +89,7 @@ func TestValidateApplicationRoleFeaturesRejectsDisabledDedicatedWorker(t *testin
 		embeddingWorkerEnabled bool
 		answerEnabled          bool
 		answerJobsEnabled      bool
+		agentWorkerEnabled     bool
 	}{
 		{
 			name: "embedding worker disabled",
@@ -82,6 +105,10 @@ func TestValidateApplicationRoleFeaturesRejectsDisabledDedicatedWorker(t *testin
 			role:          config.ApplicationRoleAnswerWorker,
 			answerEnabled: true,
 		},
+		{
+			name: "Agent worker disabled",
+			role: config.ApplicationRoleAgentWorker,
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -91,6 +118,7 @@ func TestValidateApplicationRoleFeaturesRejectsDisabledDedicatedWorker(t *testin
 				testCase.embeddingWorkerEnabled,
 				testCase.answerEnabled,
 				testCase.answerJobsEnabled,
+				testCase.agentWorkerEnabled,
 			)
 			if err == nil {
 				t.Fatal("validateApplicationRoleFeatures() error = nil, want error")
@@ -106,6 +134,7 @@ func TestValidateApplicationRoleFeaturesAcceptsRunnableRoles(t *testing.T) {
 		embeddingWorkerEnabled bool
 		answerEnabled          bool
 		answerJobsEnabled      bool
+		agentWorkerEnabled     bool
 	}{
 		{name: "all keeps feature flags optional", role: config.ApplicationRoleAll},
 		{name: "api keeps feature flags optional", role: config.ApplicationRoleAPI},
@@ -121,6 +150,11 @@ func TestValidateApplicationRoleFeaturesAcceptsRunnableRoles(t *testing.T) {
 			answerEnabled:     true,
 			answerJobsEnabled: true,
 		},
+		{
+			name:               "Agent worker enabled",
+			role:               config.ApplicationRoleAgentWorker,
+			agentWorkerEnabled: true,
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -130,6 +164,7 @@ func TestValidateApplicationRoleFeaturesAcceptsRunnableRoles(t *testing.T) {
 				testCase.embeddingWorkerEnabled,
 				testCase.answerEnabled,
 				testCase.answerJobsEnabled,
+				testCase.agentWorkerEnabled,
 			)
 			if err != nil {
 				t.Fatalf("validateApplicationRoleFeatures() error = %v, want nil", err)

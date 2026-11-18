@@ -23,6 +23,9 @@ const (
 
 	// ApplicationRoleAnswerWorker 只运行持久化异步问答 Worker。
 	ApplicationRoleAnswerWorker ApplicationRole = "answer-worker"
+
+	// ApplicationRoleAgentWorker 只运行持久化 Agent Worker。
+	ApplicationRoleAgentWorker ApplicationRole = "agent-worker"
 )
 
 var (
@@ -57,11 +60,12 @@ func LoadApplicationRole() (ApplicationRole, error) {
 		ApplicationRoleAPI,
 		ApplicationRoleDocumentWorker,
 		ApplicationRoleEmbeddingWorker,
-		ApplicationRoleAnswerWorker:
+		ApplicationRoleAnswerWorker,
+		ApplicationRoleAgentWorker:
 		return role, nil
 	default:
 		return "", fmt.Errorf(
-			"%w: APP_ROLE must be one of all, api, document-worker, embedding-worker, answer-worker: %q",
+			"%w: APP_ROLE must be one of all, api, document-worker, embedding-worker, answer-worker, agent-worker: %q",
 			ErrUnsupportedApplicationRole,
 			rawValue,
 		)
