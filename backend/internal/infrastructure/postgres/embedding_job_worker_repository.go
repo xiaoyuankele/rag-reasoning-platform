@@ -85,7 +85,7 @@ func (r *EmbeddingJobRepository) ClaimNextEmbeddingJob(
 		)
 	}
 
-	transaction, err := r.pool.Begin(ctx)
+	transaction, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return embeddingdomain.Job{}, fmt.Errorf(
 			"begin claim embedding job transaction: %w",
@@ -299,14 +299,9 @@ func selectNextEmbeddingOwner(
 		LIMIT 1
 	`
 
-	var ownerUserID int64
-	err := transaction.QueryRow(
-		ctx,
-		query,
-		maxInFlight,
-		starvationThreshold.Milliseconds(),
-	).Scan(&ownerUserID)
-	return ownerUserID, err
+	const recheck = `SELECT count(*) < $2 FROM embedding_jobs AS j JOIN documents AS d ON d.id = j.document_id
+		WHERE d.owner_user_id = $1 AND j.status = 'processing'`
+	return selectLockedJobOwner(ctx, transaction, query, recheck, maxInFlight, starvationThreshold)
 }
 
 func ensureEmbeddingOwnerSchedule(

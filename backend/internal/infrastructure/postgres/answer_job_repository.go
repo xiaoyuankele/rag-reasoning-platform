@@ -749,7 +749,7 @@ func (r *AnswerJobRepository) ClaimNextAnswerJob(
 		)
 	}
 
-	tx, err := r.pool.Begin(ctx)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return answerapplication.Job{}, fmt.Errorf("begin answer job claim: %w", err)
 	}
@@ -986,14 +986,9 @@ func selectNextAnswerOwner(
 		FOR UPDATE OF schedule SKIP LOCKED
 		LIMIT 1
 	`
-	var ownerID int64
-	err := tx.QueryRow(
-		ctx,
-		query,
-		maxInFlight,
-		starvationThreshold.Milliseconds(),
-	).Scan(&ownerID)
-	return ownerID, err
+	const recheck = `SELECT count(*) < $2 FROM answer_jobs
+		WHERE owner_user_id = $1 AND status = 'processing'`
+	return selectLockedJobOwner(ctx, tx, query, recheck, maxInFlight, starvationThreshold)
 }
 
 func ensureAnswerOwnerSchedule(

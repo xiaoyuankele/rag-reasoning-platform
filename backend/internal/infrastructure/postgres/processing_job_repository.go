@@ -237,7 +237,7 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 		)
 	}
 
-	transaction, err := r.pool.Begin(ctx)
+	transaction, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
 			"begin claim processing job transaction: %w",
@@ -486,14 +486,29 @@ func selectNextProcessingOwner(
 		LIMIT 1
 	`
 
-	var ownerUserID int64
-	err := transaction.QueryRow(
-		ctx,
-		query,
-		maxInFlight,
-		starvationThreshold.Milliseconds(),
-	).Scan(&ownerUserID)
-	return ownerUserID, err
+	const recheck = `SELECT count(*) < $2 FROM document_jobs AS j JOIN documents AS d ON d.id = j.document_id
+		WHERE d.owner_user_id = $1 AND j.status = 'processing'`
+	return selectLockedJobOwner(ctx, transaction, query, recheck, maxInFlight, starvationThreshold)
+}
+
+// A ranked candidate may become full after its statement snapshot but before
+// FOR UPDATE SKIP LOCKED takes its schedule lock. Use a fresh READ COMMITTED
+// statement under that lock, which the caller holds through the claim. If it
+// filled, re-rank at the same limit before considering borrowed slots.
+func selectLockedJobOwner(ctx context.Context, tx pgx.Tx, candidates, recheck string, limit int, starvation time.Duration) (int64, error) {
+	for {
+		var ownerID int64
+		if err := tx.QueryRow(ctx, candidates, limit, starvation.Milliseconds()).Scan(&ownerID); err != nil {
+			return 0, err
+		}
+		var hasSlot bool
+		if err := tx.QueryRow(ctx, recheck, ownerID, limit).Scan(&hasSlot); err != nil {
+			return 0, err
+		}
+		if hasSlot {
+			return ownerID, nil
+		}
+	}
 }
 
 func ensureProcessingOwnerSchedule(
