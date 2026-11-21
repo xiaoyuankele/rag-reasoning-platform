@@ -444,7 +444,7 @@ function Assert-DistinctLeaseTokens {
     }
 }
 
-function Assert-ReplacementDidNotStealEarly {
+function Get-VerifiedTakeoverTiming {
     param(
         [Parameter(Mandatory)]
         [string]$TableName,
@@ -453,14 +453,37 @@ function Assert-ReplacementDidNotStealEarly {
         [int64]$JobID,
 
         [Parameter(Mandatory)]
-        [string]$OriginalWorkerID
+        [string]$OriginalWorkerID,
+
+        [Parameter(Mandatory)]
+        [string]$ReplacementWorkerID
     )
 
-    Start-Sleep -Milliseconds 500
-    $value = Invoke-TestDatabaseScalar -SQL "SELECT COALESCE(worker_id, '') || '|' || attempt_count::TEXT FROM $TableName WHERE id = $JobID AND status = 'processing';"
-    if ($value -ne "$OriginalWorkerID|1") {
-        throw "$TableName job $JobID was replaced before the original lease expired: '$value'"
+    # Read committed events even when B finishes before the host sees it ready.
+    $sql = @"
+SELECT json_build_object(
+    'previous_lease_expires_at', a.final_expires_at,
+    'requeued_at', a.requeued_at,
+    'replacement_claimed_at', b.captured_at,
+    'takeover_delay_ms', EXTRACT(EPOCH FROM (b.captured_at - a.final_expires_at)) * 1000,
+    'valid', a.requeued_at >= a.final_expires_at AND b.captured_at >= a.requeued_at
+)::text
+FROM fault_lease_audit a
+JOIN fault_lease_audit b USING (table_name, job_id)
+WHERE a.table_name = '$TableName' AND a.job_id = $JobID
+  AND a.worker_id = '$OriginalWorkerID' AND a.attempt_count = 1
+  AND b.worker_id = '$ReplacementWorkerID' AND b.attempt_count = 2
+  AND a.lease_token <> b.lease_token;
+"@
+    $value = Invoke-TestDatabaseScalar -SQL $sql
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        throw "$TableName job $JobID has no matching pair of claims"
     }
+    $timing = $value | ConvertFrom-Json
+    if ($timing.valid -ne $true) {
+        throw "$TableName job $JobID has missing or early lease recovery: $value"
+    }
+    return $timing
 }
 
 $scriptDirectory = Split-Path -Parent $PSCommandPath
@@ -572,18 +595,28 @@ CREATE TABLE fault_lease_audit (
     job_id BIGINT NOT NULL,
     worker_id TEXT NOT NULL,
     lease_token TEXT NOT NULL,
-    captured_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    attempt_count INTEGER NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    final_expires_at TIMESTAMPTZ,
+    requeued_at TIMESTAMPTZ
 );
 
 CREATE OR REPLACE FUNCTION capture_fault_lease()
 RETURNS TRIGGER AS $$
 BEGIN
+    IF OLD.status = 'processing' AND NEW.status = 'queued' AND NEW.lease_token IS NULL THEN
+        -- OLD includes the last committed heartbeat. CURRENT_TIMESTAMP is the
+        -- transaction time used by the recovery eligibility predicate.
+        UPDATE fault_lease_audit
+        SET final_expires_at = OLD.lease_expires_at, requeued_at = CURRENT_TIMESTAMP
+        WHERE table_name = TG_TABLE_NAME AND job_id = OLD.id AND lease_token = OLD.lease_token;
+    END IF;
     IF NEW.lease_token IS NOT NULL
        AND NEW.lease_token IS DISTINCT FROM OLD.lease_token THEN
         INSERT INTO fault_lease_audit (
-            table_name, job_id, worker_id, lease_token
+            table_name, job_id, worker_id, lease_token, attempt_count
         ) VALUES (
-            TG_TABLE_NAME, NEW.id, NEW.worker_id, NEW.lease_token
+            TG_TABLE_NAME, NEW.id, NEW.worker_id, NEW.lease_token, NEW.attempt_count
         );
     END IF;
     RETURN NEW;
@@ -640,10 +673,10 @@ FOR EACH ROW EXECUTE FUNCTION capture_fault_lease();
     Kill-Worker -ContainerName $documentWorkerA
     Release-TableLock -ContainerName $chunkLock
     $documentWorkerB = Start-TestWorker -Role "document-worker" -WorkerID "document-b"
-    Assert-ReplacementDidNotStealEarly -TableName "document_jobs" -JobID $documentJobID -OriginalWorkerID $documentWorkerAID
     Wait-TestDatabaseValue -SQL "SELECT status FROM document_jobs WHERE id = $documentJobID;" -ExpectedValue "succeeded" -Description "wait for Document Worker B success"
     Stop-WorkerGracefully -ContainerName $documentWorkerB
     Assert-DistinctLeaseTokens -TableName "document_jobs" -JobID $documentJobID
+    $documentTiming = Get-VerifiedTakeoverTiming -TableName "document_jobs" -JobID $documentJobID -OriginalWorkerID $documentWorkerAID -ReplacementWorkerID "document-b"
     Wait-TestDatabaseValue -SQL "SELECT status FROM documents WHERE id = $documentID;" -ExpectedValue "ready" -Description "verify recovered document state"
     Wait-TestDatabaseValue -SQL "SELECT COUNT(*)::TEXT FROM text_chunks WHERE document_id = $documentID;" -ExpectedValue "1" -Description "verify recovered chunks"
     $documentAttempts = [int](Invoke-TestDatabaseScalar -SQL "SELECT attempt_count FROM document_jobs WHERE id = $documentJobID;")
@@ -651,6 +684,7 @@ FOR EACH ROW EXECUTE FUNCTION capture_fault_lease();
         throw "Document job attempt count is $documentAttempts, want 2"
     }
     $documentResult = [ordered]@{
+        takeover_timing = $documentTiming
         job_id = $documentJobID
         first_exit_code = 137
         attempt_count = $documentAttempts
@@ -671,17 +705,18 @@ FOR EACH ROW EXECUTE FUNCTION capture_fault_lease();
     Wait-ProviderCount -Kind "embedding" -ExpectedCount 1
     Kill-Worker -ContainerName $embeddingWorkerA
     $embeddingWorkerB = Start-TestWorker -Role "embedding-worker" -WorkerID "embedding-b"
-    Assert-ReplacementDidNotStealEarly -TableName "embedding_jobs" -JobID $embeddingJobID -OriginalWorkerID $embeddingWorkerAID
     Wait-TestDatabaseValue -SQL "SELECT status FROM embedding_jobs WHERE id = $embeddingJobID;" -ExpectedValue "succeeded" -Description "wait for Embedding Worker B success"
     Wait-ProviderCount -Kind "embedding" -ExpectedCount 2
     Stop-WorkerGracefully -ContainerName $embeddingWorkerB
     Assert-DistinctLeaseTokens -TableName "embedding_jobs" -JobID $embeddingJobID
+    $embeddingTiming = Get-VerifiedTakeoverTiming -TableName "embedding_jobs" -JobID $embeddingJobID -OriginalWorkerID $embeddingWorkerAID -ReplacementWorkerID "embedding-b"
     Wait-TestDatabaseValue -SQL "SELECT COUNT(*)::TEXT FROM chunk_embeddings WHERE chunk_id = $embeddingChunkID AND embedding_job_id = $embeddingJobID;" -ExpectedValue "1" -Description "verify recovered vector"
     $embeddingAttempts = [int](Invoke-TestDatabaseScalar -SQL "SELECT attempt_count FROM embedding_jobs WHERE id = $embeddingJobID;")
     if ($embeddingAttempts -ne 2) {
         throw "Embedding job attempt count is $embeddingAttempts, want 2"
     }
     $embeddingResult = [ordered]@{
+        takeover_timing = $embeddingTiming
         job_id = $embeddingJobID
         first_exit_code = 137
         attempt_count = $embeddingAttempts
@@ -701,17 +736,18 @@ FOR EACH ROW EXECUTE FUNCTION capture_fault_lease();
     Wait-ProviderCount -Kind "generation" -ExpectedCount 1
     Kill-Worker -ContainerName $answerWorkerA
     $answerWorkerB = Start-TestWorker -Role "answer-worker" -WorkerID "answer-b"
-    Assert-ReplacementDidNotStealEarly -TableName "answer_jobs" -JobID $answerJobID -OriginalWorkerID $answerWorkerAID
     Wait-TestDatabaseValue -SQL "SELECT status FROM answer_jobs WHERE id = $answerJobID;" -ExpectedValue "succeeded" -Description "wait for Answer Worker B success"
     Wait-ProviderCount -Kind "generation" -ExpectedCount 2
     Stop-WorkerGracefully -ContainerName $answerWorkerB
     Assert-DistinctLeaseTokens -TableName "answer_jobs" -JobID $answerJobID
+    $answerTiming = Get-VerifiedTakeoverTiming -TableName "answer_jobs" -JobID $answerJobID -OriginalWorkerID $answerWorkerAID -ReplacementWorkerID "answer-b"
     Wait-TestDatabaseValue -SQL "SELECT CASE WHEN answer_text = 'fault recovery answer [1]' AND jsonb_array_length(sources) = 1 THEN 't' ELSE 'f' END FROM answer_jobs WHERE id = $answerJobID;" -ExpectedValue "t" -Description "verify recovered answer snapshot"
     $answerAttempts = [int](Invoke-TestDatabaseScalar -SQL "SELECT attempt_count FROM answer_jobs WHERE id = $answerJobID;")
     if ($answerAttempts -ne 2) {
         throw "Answer job attempt count is $answerAttempts, want 2"
     }
     $answerResult = [ordered]@{
+        takeover_timing = $answerTiming
         job_id = $answerJobID
         first_exit_code = 137
         attempt_count = $answerAttempts
