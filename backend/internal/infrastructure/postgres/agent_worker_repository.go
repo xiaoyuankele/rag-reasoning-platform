@@ -27,7 +27,7 @@ func (r *AgentRepository) ClaimNextRun(ctx context.Context) (agentdomain.Run, er
 	if err != nil {
 		return agentdomain.Run{}, fmt.Errorf("create agent run lease token: %w", err)
 	}
-	tx, err := r.pool.Begin(ctx)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return agentdomain.Run{}, fmt.Errorf("begin agent run claim: %w", err)
 	}
@@ -164,15 +164,25 @@ func selectNextAgentOwner(
 		FOR UPDATE OF schedule SKIP LOCKED
 		LIMIT 1
 	`
-	var ownerID int64
-	err := tx.QueryRow(
-		ctx,
-		query,
-		maxInFlight,
-		starvationThreshold.Milliseconds(),
-		maxAttempts,
-	).Scan(&ownerID)
-	return ownerID, err
+	for {
+		var ownerID int64
+		if err := tx.QueryRow(ctx, query, maxInFlight, starvationThreshold.Milliseconds(), maxAttempts).Scan(&ownerID); err != nil {
+			return 0, err
+		}
+		// Another claimer may have committed between the candidate snapshot
+		// and our schedule row lock. Count again in a fresh READ COMMITTED
+		// statement while holding that lock through the Run transition.
+		var hasSlot bool
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) < $2 FROM agent_runs
+			WHERE owner_user_id = $1 AND status = 'processing'`, ownerID, maxInFlight).Scan(&hasSlot); err != nil {
+			return 0, err
+		}
+		if hasSlot {
+			return ownerID, nil
+		}
+		// Re-rank with the same limit so other owners get their base slots
+		// before ClaimNextRun considers the borrowing pass.
+	}
 }
 
 func (r *AgentRepository) GetQueueStats(ctx context.Context) (agentdomain.QueueStats, error) {

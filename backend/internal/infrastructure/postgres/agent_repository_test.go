@@ -487,7 +487,7 @@ func TestAgentQueueClaimsOwnersFairlyAndBorrowsIdleCapacity(t *testing.T) {
 	ownerA := answerJobTestOwnerScope(t, ctx, pool, "agent-fair-a")
 	ownerB := answerJobTestOwnerScope(t, ctx, pool, "agent-fair-b")
 	repository := newAgentTestRepository(pool, "agent-worker-fair")
-	for index := range 2 {
+	for index := range 3 {
 		conversation := createAgentTestConversation(t, ctx, pool, ownerA, fmt.Sprintf("owner A %d", index))
 		queueAgentTestRun(t, ctx, repository, ownerA, conversation.ID, fmt.Sprintf("owner-a-%d", index))
 	}
@@ -512,8 +512,117 @@ func TestAgentQueueClaimsOwnersFairlyAndBorrowsIdleCapacity(t *testing.T) {
 	if third.OwnerUserID != ownerA.OwnerUserID() {
 		t.Fatalf("borrowed run owner = %d, want owner A %d", third.OwnerUserID, ownerA.OwnerUserID())
 	}
+	if _, err := repository.ClaimNextRun(ctx); !errors.Is(err, agentapplication.ErrNoQueuedRun) {
+		t.Fatalf("claim above borrowed limit: %v", err)
+	}
 	stats, err := repository.GetQueueStats(ctx)
-	if err != nil || stats.QueuedCount != 0 || stats.ProcessingCount != 3 || stats.MaxOwnerProcessingCount != 2 {
+	if err != nil || stats.QueuedCount != 1 || stats.ProcessingCount != 3 || stats.MaxOwnerProcessingCount != 2 {
 		t.Fatalf("agent queue stats = %+v, %v", stats, err)
+	}
+}
+
+func TestAgentConcurrentClaimRechecksOwnerLimit(t *testing.T) {
+	if os.Getenv("RUN_DATABASE_TESTS") != "1" {
+		t.Skip("set RUN_DATABASE_TESTS=1 to run PostgreSQL integration tests")
+	}
+	t.Run("fixed limit", func(t *testing.T) { testOverlappingAgentClaims(t, false) })
+	t.Run("base slots before borrowing", func(t *testing.T) { testOverlappingAgentClaims(t, true) })
+}
+
+func testOverlappingAgentClaims(t *testing.T, allowBorrowing bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	pool := openIsolatedDocumentTestPool(t, ctx)
+	owner := answerJobTestOwnerScope(t, ctx, pool, "agent-overlap")
+	borrowedLimit := 1
+	if allowBorrowing {
+		borrowedLimit = 2
+	}
+	newClaimer := func(p *pgxpool.Pool) *postgresrepository.AgentRepository {
+		return postgresrepository.NewAgentRepository(p,
+			agentdomain.AdmissionLimits{MaxQueuedRunsPerOwner: 2, MaxQueuedRunsGlobal: 3},
+			agentdomain.SchedulingPolicy{MaxInFlightPerOwner: 1, MaxBorrowedInFlightPerOwner: borrowedLimit, StarvationThreshold: time.Second})
+	}
+	winner := newClaimer(pool)
+	for _, name := range []string{"first", "second"} {
+		conversation := createAgentTestConversation(t, ctx, pool, owner, name)
+		queueAgentTestRun(t, ctx, winner, owner, conversation.ID, name)
+	}
+	var otherRunID int64
+	if allowBorrowing {
+		other := answerJobTestOwnerScope(t, ctx, pool, "agent-overlap-other")
+		conversation := createAgentTestConversation(t, ctx, pool, other, "other")
+		otherRunID = queueAgentTestRun(t, ctx, winner, other, conversation.ID, "other").Run.ID
+	}
+
+	// Only the late claimer sees this session-local view. Pause its candidate
+	// statement after taking its snapshot but before it can lock the schedule.
+	cfg := pool.Config()
+	cfg.MaxConns = 1
+	latePool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer latePool.Close()
+	if _, err := latePool.Exec(ctx, `CREATE TEMP VIEW agent_owner_schedules AS
+		SELECT * FROM agent_owner_schedules
+		WHERE EXISTS (SELECT FROM pg_advisory_xact_lock('agent_runs'::regclass::oid::bigint))`); err != nil {
+		t.Fatal(err)
+	}
+	barrier, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer barrier.Rollback(context.Background())
+	if _, err := barrier.Exec(ctx, `SELECT pg_advisory_xact_lock('agent_runs'::regclass::oid::bigint)`); err != nil {
+		t.Fatal(err)
+	}
+	type claimResult struct {
+		run agentdomain.Run
+		err error
+	}
+	lateClaim := make(chan claimResult, 1)
+	go func() {
+		run, err := newClaimer(latePool).ClaimNextRun(ctx)
+		lateClaim <- claimResult{run: run, err: err}
+	}()
+	for {
+		var waiting bool
+		if err := barrier.QueryRow(ctx, `SELECT EXISTS (SELECT FROM pg_locks
+			WHERE locktype = 'advisory' AND objid = 'agent_runs'::regclass::oid AND NOT granted)`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case result := <-lateClaim:
+			t.Fatalf("late claim returned before the barrier: %v", result.err)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if first, err := winner.ClaimNextRun(ctx); err != nil || first.OwnerUserID != owner.OwnerUserID() {
+		t.Fatalf("first claim owner=%d, err=%v", first.OwnerUserID, err)
+	}
+	if err := barrier.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	late := <-lateClaim
+	var processing, queued int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FILTER (WHERE status='processing'),
+		COUNT(*) FILTER (WHERE status='queued' AND attempt_count=0)
+		FROM agent_runs WHERE owner_user_id=$1`, owner.OwnerUserID()).Scan(&processing, &queued); err != nil {
+		t.Fatal(err)
+	}
+	if processing != 1 || queued != 1 {
+		t.Fatalf("late claim error=%v, committed processing=%d, untouched queued=%d; want 1 processing and 1 queued", late.err, processing, queued)
+	}
+	if allowBorrowing {
+		if late.err != nil || late.run.ID != otherRunID {
+			t.Fatalf("late claim run=%d err=%v; want other owner's base slot (run %d)", late.run.ID, late.err, otherRunID)
+		}
+	} else if !errors.Is(late.err, agentapplication.ErrNoQueuedRun) {
+		t.Fatalf("late claim error=%v; want no queued run", late.err)
 	}
 }
