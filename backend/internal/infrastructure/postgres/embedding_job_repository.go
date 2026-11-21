@@ -2,8 +2,11 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,7 +17,21 @@ import (
 
 // EmbeddingJobRepository 使用 PostgreSQL 保存向量任务。
 type EmbeddingJobRepository struct {
-	pool *pgxpool.Pool
+	pool             *pgxpool.Pool
+	schedulingPolicy embeddingdomain.JobSchedulingPolicy
+	leasePolicy      embeddingdomain.JobLeasePolicy
+	newLeaseToken    func() (string, error)
+}
+
+var defaultEmbeddingJobSchedulingPolicy = embeddingdomain.JobSchedulingPolicy{
+	MaxInFlightPerOwner:         1,
+	MaxBorrowedInFlightPerOwner: 2,
+	StarvationThreshold:         2 * time.Minute,
+}
+
+var defaultEmbeddingJobLeasePolicy = embeddingdomain.JobLeasePolicy{
+	WorkerID:      "embedding-worker",
+	LeaseDuration: time.Minute,
 }
 
 var _ embeddingdomain.JobCreator = (*EmbeddingJobRepository)(nil)
@@ -24,7 +41,46 @@ var _ embeddingdomain.JobFinder = (*EmbeddingJobRepository)(nil)
 func NewEmbeddingJobRepository(
 	pool *pgxpool.Pool,
 ) *EmbeddingJobRepository {
-	return &EmbeddingJobRepository{pool: pool}
+	return NewEmbeddingJobRepositoryWithSchedulingPolicy(
+		pool,
+		defaultEmbeddingJobSchedulingPolicy,
+	)
+}
+
+// NewEmbeddingJobRepositoryWithSchedulingPolicy 创建使用指定 Owner 公平策略的仓储。
+func NewEmbeddingJobRepositoryWithSchedulingPolicy(
+	pool *pgxpool.Pool,
+	policy embeddingdomain.JobSchedulingPolicy,
+) *EmbeddingJobRepository {
+	return NewEmbeddingJobRepositoryWithPolicies(
+		pool,
+		policy,
+		defaultEmbeddingJobLeasePolicy,
+	)
+}
+
+// NewEmbeddingJobRepositoryWithPolicies 创建同时使用 Owner 公平调度和
+// 持久化任务租约的仓储。租约策略由领取、续租和终态 fencing 共同使用。
+func NewEmbeddingJobRepositoryWithPolicies(
+	pool *pgxpool.Pool,
+	schedulingPolicy embeddingdomain.JobSchedulingPolicy,
+	leasePolicy embeddingdomain.JobLeasePolicy,
+) *EmbeddingJobRepository {
+	return &EmbeddingJobRepository{
+		pool:             pool,
+		schedulingPolicy: schedulingPolicy,
+		leasePolicy:      leasePolicy,
+		newLeaseToken:    newEmbeddingJobLeaseToken,
+	}
+}
+
+// newEmbeddingJobLeaseToken 生成不可预测的 fencing token。
+func newEmbeddingJobLeaseToken() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("read embedding job lease randomness: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
 }
 
 // CreateEmbeddingJob 为文档创建 queued 状态的向量任务。
@@ -34,7 +90,49 @@ func (r *EmbeddingJobRepository) CreateEmbeddingJob(
 	modelName string,
 	dimensions int,
 ) (embeddingdomain.Job, error) {
-	const query = `
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf(
+			"begin embedding job transaction: %w",
+			err,
+		)
+	}
+	defer func() {
+		_ = transaction.Rollback(context.Background())
+	}()
+
+	// 系统级创建入口也必须登记 Owner，防止测试、维护命令或未来内部调用
+	// 创建出调度器永远看不到的 queued 任务。
+	const lockDocumentQuery = `
+		SELECT owner_user_id
+		FROM documents
+		WHERE id = $1
+		FOR SHARE
+	`
+	var ownerUserID int64
+	err = transaction.QueryRow(
+		ctx,
+		lockDocumentQuery,
+		documentID,
+	).Scan(&ownerUserID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return embeddingdomain.Job{}, documentdomain.ErrNotFound
+	}
+	if err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf(
+			"lock document before creating embedding job: %w",
+			err,
+		)
+	}
+	if err := ensureEmbeddingOwnerSchedule(
+		ctx,
+		transaction,
+		ownerUserID,
+	); err != nil {
+		return embeddingdomain.Job{}, err
+	}
+
+	const insertJobQuery = `
 		INSERT INTO embedding_jobs (
 			document_id,
 			model_name,
@@ -59,9 +157,9 @@ func (r *EmbeddingJobRepository) CreateEmbeddingJob(
 	`
 
 	createdJob, err := scanEmbeddingJob(
-		r.pool.QueryRow(
+		transaction.QueryRow(
 			ctx,
-			query,
+			insertJobQuery,
 			documentID,
 			modelName,
 			dimensions,
@@ -77,6 +175,12 @@ func (r *EmbeddingJobRepository) CreateEmbeddingJob(
 	if err != nil {
 		return embeddingdomain.Job{}, fmt.Errorf(
 			"create embedding job: %w",
+			err,
+		)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return embeddingdomain.Job{}, fmt.Errorf(
+			"commit embedding job: %w",
 			err,
 		)
 	}

@@ -18,6 +18,7 @@ type ChunkRepository struct {
 }
 
 var _ document.ChunkRepository = (*ChunkRepository)(nil)
+var _ document.LeasedChunkReplacer = (*ChunkRepository)(nil)
 var _ document.ChunkPageLister = (*ChunkRepository)(nil)
 var _ document.ChunkSearcher = (*ChunkRepository)(nil)
 
@@ -31,6 +32,35 @@ func NewChunkRepository(pool *pgxpool.Pool) *ChunkRepository {
 // ReplaceForDocument 在同一事务中删除旧文本块并写入新文本块。
 func (r *ChunkRepository) ReplaceForDocument(
 	ctx context.Context,
+	documentID int64,
+	chunks []document.ChunkInput,
+) error {
+	return r.replaceForDocument(ctx, nil, "", documentID, chunks)
+}
+
+// ReplaceForProcessingJob 只允许仍持有有效任务租约的 Worker 替换 chunks。
+// 任务行和文档行在同一事务内锁定，使过期恢复、新 Worker 领取和旧 Worker
+// 写入之间形成明确顺序。
+func (r *ChunkRepository) ReplaceForProcessingJob(
+	ctx context.Context,
+	jobID int64,
+	leaseToken string,
+	documentID int64,
+	chunks []document.ChunkInput,
+) error {
+	return r.replaceForDocument(
+		ctx,
+		&jobID,
+		leaseToken,
+		documentID,
+		chunks,
+	)
+}
+
+func (r *ChunkRepository) replaceForDocument(
+	ctx context.Context,
+	jobID *int64,
+	leaseToken string,
 	documentID int64,
 	chunks []document.ChunkInput,
 ) error {
@@ -56,18 +86,44 @@ func (r *ChunkRepository) ReplaceForDocument(
 	}()
 
 	// 锁定文档可以同时完成存在性检查，并防止替换过程中被并发删除。
+	// Worker 路径额外锁定任务并校验 lease_token 和到期时间。
 	var lockedDocumentID int64
-	err = transaction.QueryRow(
-		ctx,
-		`
+	if jobID == nil {
+		err = transaction.QueryRow(
+			ctx,
+			`
 			SELECT id
 			FROM documents
 			WHERE id = $1
 			FOR UPDATE
 		`,
-		documentID,
-	).Scan(&lockedDocumentID)
+			documentID,
+		).Scan(&lockedDocumentID)
+	} else {
+		err = transaction.QueryRow(
+			ctx,
+			`
+			SELECT source_document.id
+			FROM document_jobs AS job
+			JOIN documents AS source_document
+			  ON source_document.id = job.document_id
+			WHERE job.id = $1
+			  AND job.lease_token = $2
+			  AND job.status = 'processing'
+			  AND job.lease_expires_at > CURRENT_TIMESTAMP
+			  AND source_document.id = $3
+			  AND source_document.status = 'processing'
+			FOR UPDATE OF job, source_document
+		`,
+			*jobID,
+			leaseToken,
+			documentID,
+		).Scan(&lockedDocumentID)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
+		if jobID != nil {
+			return document.ErrProcessingJobLeaseLost
+		}
 		return document.ErrNotFound
 	}
 	if err != nil {
@@ -306,25 +362,30 @@ func (r *ChunkRepository) Search(
 	ctx context.Context,
 	options document.SearchOptions,
 ) (document.SearchResult, error) {
-	queryPattern := literalSubstringPattern(options.Query)
+	matchClause, matchArguments, err := keywordMatchClause(options, 2)
+	if err != nil {
+		return document.SearchResult{}, fmt.Errorf("build keyword match clause: %w", err)
+	}
+	documentIDPlaceholder := 2 + len(matchArguments)
 
-	const countQuery = `
+	countQuery := fmt.Sprintf(`
 		SELECT COUNT(*)
 		FROM text_chunks AS chunk
 		JOIN documents AS source_document
 			ON source_document.id = chunk.document_id
 		WHERE source_document.status = $1
-		  AND chunk.content ILIKE $2 ESCAPE E'\\'
-		  AND ($3::BIGINT IS NULL OR chunk.document_id = $3)
-	`
+		  AND %s
+		  AND ($%d::BIGINT IS NULL OR chunk.document_id = $%d)
+	`, matchClause, documentIDPlaceholder, documentIDPlaceholder)
+	countArguments := []any{document.StatusReady}
+	countArguments = append(countArguments, matchArguments...)
+	countArguments = append(countArguments, options.DocumentID)
 
 	var total int64
 	if err := r.pool.QueryRow(
 		ctx,
 		countQuery,
-		document.StatusReady,
-		queryPattern,
-		options.DocumentID,
+		countArguments...,
 	).Scan(&total); err != nil {
 		return document.SearchResult{}, fmt.Errorf(
 			"count matching document chunks: %w",
@@ -341,7 +402,9 @@ func (r *ChunkRepository) Search(
 		}, nil
 	}
 
-	const searchQuery = `
+	limitPlaceholder := documentIDPlaceholder + 1
+	offsetPlaceholder := documentIDPlaceholder + 2
+	searchQuery := fmt.Sprintf(`
 		SELECT
 			chunk.id,
 			chunk.document_id,
@@ -356,25 +419,23 @@ func (r *ChunkRepository) Search(
 		JOIN documents AS source_document
 			ON source_document.id = chunk.document_id
 		WHERE source_document.status = $1
-		  AND chunk.content ILIKE $2 ESCAPE E'\\'
-		  AND ($3::BIGINT IS NULL OR chunk.document_id = $3)
+		  AND %s
+		  AND ($%d::BIGINT IS NULL OR chunk.document_id = $%d)
 		ORDER BY
 			source_document.created_at DESC,
 			source_document.id DESC,
 			chunk.chunk_index ASC,
 			chunk.id ASC
-		LIMIT $4
-		OFFSET $5
-	`
+		LIMIT $%d
+		OFFSET $%d
+	`, matchClause, documentIDPlaceholder, documentIDPlaceholder, limitPlaceholder, offsetPlaceholder)
+	searchArguments := append([]any(nil), countArguments...)
+	searchArguments = append(searchArguments, options.Limit, options.Offset)
 
 	rows, err := r.pool.Query(
 		ctx,
 		searchQuery,
-		document.StatusReady,
-		queryPattern,
-		options.DocumentID,
-		options.Limit,
-		options.Offset,
+		searchArguments...,
 	)
 	if err != nil {
 		return document.SearchResult{}, fmt.Errorf(
@@ -405,6 +466,46 @@ func (r *ChunkRepository) Search(
 		Hits:  hits,
 		Total: total,
 	}, nil
+}
+
+// keywordMatchClause 只动态生成由服务端控制的 SQL 结构，关键词本身仍然
+// 通过占位符传入，避免把用户输入拼进 SQL。all 使用 AND，any 使用 OR。
+func keywordMatchClause(
+	options document.SearchOptions,
+	firstPlaceholder int,
+) (string, []any, error) {
+	terms := options.Terms
+	operator := options.Operator
+	if options.Query != "" {
+		if len(terms) > 0 {
+			return "", nil, fmt.Errorf("query and terms cannot be used together")
+		}
+		terms = []string{options.Query}
+		operator = document.SearchOperatorAll
+	}
+	if len(terms) == 0 {
+		return "", nil, fmt.Errorf("search terms must not be empty")
+	}
+	if !operator.IsValid() {
+		return "", nil, fmt.Errorf("invalid search operator %q", operator)
+	}
+
+	separator := " AND "
+	if operator == document.SearchOperatorAny {
+		separator = " OR "
+	}
+
+	clauses := make([]string, 0, len(terms))
+	arguments := make([]any, 0, len(terms))
+	for index, term := range terms {
+		clauses = append(
+			clauses,
+			fmt.Sprintf("chunk.content ILIKE $%d ESCAPE E'\\\\'", firstPlaceholder+index),
+		)
+		arguments = append(arguments, literalSubstringPattern(term))
+	}
+
+	return "(" + strings.Join(clauses, separator) + ")", arguments, nil
 }
 
 // literalSubstringPattern 把用户关键词转换成 ILIKE 字面子串模式。

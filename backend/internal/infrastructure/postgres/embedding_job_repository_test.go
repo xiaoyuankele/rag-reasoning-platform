@@ -241,6 +241,7 @@ func TestEmbeddingJobRepositoryRequeue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create embedding job: %v", err)
 	}
+	const leaseToken = "embedding-requeue-test-lease"
 
 	// 本测试只验证 requeue。直接精确设置当前测试任务，避免领取到开发库中的其他 queued 任务。
 	if _, err := pool.Exec(
@@ -250,9 +251,14 @@ func TestEmbeddingJobRepositoryRequeue(t *testing.T) {
 			status = 'processing',
 			attempt_count = attempt_count + 1,
 			started_at = CURRENT_TIMESTAMP,
-			updated_at = CURRENT_TIMESTAMP
+			updated_at = CURRENT_TIMESTAMP,
+			worker_id = 'embedding-requeue-test',
+			lease_token = $2,
+			lease_expires_at = CURRENT_TIMESTAMP + INTERVAL '1 minute',
+			heartbeat_at = CURRENT_TIMESTAMP
 		WHERE id = $1`,
 		createdJob.ID,
+		leaseToken,
 	); err != nil {
 		t.Fatalf("arrange processing embedding job: %v", err)
 	}
@@ -262,6 +268,7 @@ func TestEmbeddingJobRepositoryRequeue(t *testing.T) {
 	if err := embeddingJobRepository.RequeueEmbeddingJob(
 		ctx,
 		createdJob.ID,
+		leaseToken,
 		nextAttemptAt,
 		retryReason,
 	); err != nil {
@@ -326,10 +333,11 @@ func TestEmbeddingJobRepositoryRequeue(t *testing.T) {
 	err = embeddingJobRepository.RequeueEmbeddingJob(
 		ctx,
 		createdJob.ID,
+		leaseToken,
 		nextAttemptAt,
 		retryReason,
 	)
-	if !errors.Is(err, embeddingdomain.ErrJobNotProcessing) {
-		t.Fatalf("second requeue error = %v, want ErrJobNotProcessing", err)
+	if !errors.Is(err, embeddingdomain.ErrJobLeaseLost) {
+		t.Fatalf("second requeue error = %v, want ErrJobLeaseLost", err)
 	}
 }

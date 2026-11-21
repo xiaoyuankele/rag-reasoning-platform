@@ -45,7 +45,9 @@ func TestAuthRegistrationAndLoginHTTPWithPostgreSQL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open database: %v", err)
 	}
-	defer pool.Close()
+	// Cleanup 按“后注册、先执行”的顺序运行。先注册连接池关闭，
+	// 下面后注册的数据清理就会在连接池仍可用时执行。
+	t.Cleanup(pool.Close)
 	if err := database.Migrate(ctx, pool, migrations.Files); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
@@ -54,8 +56,20 @@ func TestAuthRegistrationAndLoginHTTPWithPostgreSQL(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
-		_, _ = pool.Exec(cleanupContext, "DELETE FROM users WHERE email = $1", destination)
-		_, _ = pool.Exec(cleanupContext, "DELETE FROM verification_challenges WHERE destination = $1", destination)
+		if _, err := pool.Exec(
+			cleanupContext,
+			"DELETE FROM users WHERE email = $1",
+			destination,
+		); err != nil {
+			t.Errorf("delete registration HTTP test user: %v", err)
+		}
+		if _, err := pool.Exec(
+			cleanupContext,
+			"DELETE FROM verification_challenges WHERE destination = $1",
+			destination,
+		); err != nil {
+			t.Errorf("delete registration HTTP verification challenge: %v", err)
+		}
 	})
 
 	challengeRepository := postgresrepository.NewVerificationChallengeRepository(pool)

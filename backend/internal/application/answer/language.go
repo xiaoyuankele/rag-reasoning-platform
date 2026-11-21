@@ -33,18 +33,45 @@ func resolveResponseLanguage(
 	requested ResponseLanguage,
 	query string,
 ) (ResponseLanguage, error) {
+	normalized, err := normalizeResponseLanguagePreference(requested)
+	if err != nil {
+		return "", err
+	}
+
+	switch normalized {
+	case ResponseLanguageAuto:
+		return detectPrimaryResponseLanguage(query), nil
+	case ResponseLanguageChinese, ResponseLanguageEnglish:
+		return normalized, nil
+	}
+	return "", ErrInvalidResponseLanguage
+}
+
+// normalizeResponseLanguagePreference 把缺省值统一为 auto，并保留用户请求的偏好。
+// 与 resolveResponseLanguage 不同，它不会提前把 auto 解析成 zh 或 en。
+func normalizeResponseLanguagePreference(
+	requested ResponseLanguage,
+) (ResponseLanguage, error) {
 	normalized := ResponseLanguage(
 		strings.ToLower(strings.TrimSpace(string(requested))),
 	)
-
+	if normalized == "" {
+		normalized = ResponseLanguageAuto
+	}
 	switch normalized {
-	case "", ResponseLanguageAuto:
-		return detectPrimaryResponseLanguage(query), nil
-	case ResponseLanguageChinese, ResponseLanguageEnglish:
+	case ResponseLanguageAuto,
+		ResponseLanguageChinese,
+		ResponseLanguageEnglish:
 		return normalized, nil
 	default:
 		return "", ErrInvalidResponseLanguage
 	}
+}
+
+// NormalizeResponseLanguagePreference 校验并规范化 HTTP/会话入口的语言偏好。
+// 它不会调用模型，也不会把 auto 提前解析成最终语言。
+func NormalizeResponseLanguagePreference(requested ResponseLanguage) (ResponseLanguage, error) {
+	return normalizeResponseLanguagePreference(requested)
 }
 
 // detectPrimaryResponseLanguage 使用 Unicode 脚本数量判断问题的主要语言。

@@ -399,6 +399,98 @@ func TestDocumentUploadHandlerMapsApplicationErrors(t *testing.T) {
 	}
 }
 
+func TestDocumentUploadHandlerMapsAdmissionErrors(t *testing.T) {
+	testCases := []struct {
+		name       string
+		serviceErr error
+		statusCode int
+		code       string
+		message    string
+	}{
+		{
+			name:       "owner capacity",
+			serviceErr: applicationdocument.ErrUploadOwnerCapacityExhausted,
+			statusCode: http.StatusTooManyRequests,
+			code:       errorCodeUploadOwnerCapacity,
+			message:    "another upload is already in progress for this user",
+		},
+		{
+			name:       "global capacity",
+			serviceErr: applicationdocument.ErrUploadGlobalCapacityExhausted,
+			statusCode: http.StatusServiceUnavailable,
+			code:       errorCodeUploadGlobalCapacity,
+			message:    "upload service is busy; try again later",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &fakeDocumentUploadService{
+				uploadFunc: func(
+					context.Context,
+					accessdomain.OwnerScope,
+					applicationdocument.UploadInput,
+				) (applicationdocument.UploadResult, error) {
+					return applicationdocument.UploadResult{}, testCase.serviceErr
+				},
+			}
+
+			var requestBody bytes.Buffer
+			multipartWriter := multipart.NewWriter(&requestBody)
+			fileWriter, err := multipartWriter.CreateFormFile(
+				"file",
+				"capacity-test.pdf",
+			)
+			if err != nil {
+				t.Fatalf("create multipart file field: %v", err)
+			}
+			if _, err := fileWriter.Write([]byte("%PDF-1.7")); err != nil {
+				t.Fatalf("write multipart file content: %v", err)
+			}
+			if err := multipartWriter.Close(); err != nil {
+				t.Fatalf("close multipart writer: %v", err)
+			}
+
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/documents",
+				&requestBody,
+			)
+			request.Header.Set(
+				"Content-Type",
+				multipartWriter.FormDataContentType(),
+			)
+			response := httptest.NewRecorder()
+			newTestDocumentUploadRouter(service).ServeHTTP(response, request)
+
+			if response.Code != testCase.statusCode {
+				t.Fatalf(
+					"status = %d, want %d; body=%s",
+					response.Code,
+					testCase.statusCode,
+					response.Body.String(),
+				)
+			}
+			if retryAfter := response.Header().Get("Retry-After"); retryAfter != "2" {
+				t.Fatalf("Retry-After = %q, want 2", retryAfter)
+			}
+
+			var actual errorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &actual); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if actual.Code != testCase.code || actual.Error != testCase.message {
+				t.Fatalf(
+					"error response = %+v, want code=%q message=%q",
+					actual,
+					testCase.code,
+					testCase.message,
+				)
+			}
+		})
+	}
+}
+
 // TestDocumentUploadHandlerRejectsOversizedRequestBody 验证 HTTP 层会限制
 // 整个 multipart 请求体，而不只是依赖文件存储层限制文件内容大小。
 func TestDocumentUploadHandlerRejectsOversizedRequestBody(t *testing.T) {

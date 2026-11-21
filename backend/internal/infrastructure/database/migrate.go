@@ -201,8 +201,22 @@ func readMigration(
 		filename:       filename,
 		checksum:       checksum,
 		sourceChecksum: sourceChecksum,
-		sql:            string(normalizedContent),
+		sql:            migrationSQLBody(string(normalizedContent)),
 	}, nil
+}
+
+// Historical scripts can wrap the whole file in BEGIN; ... COMMIT; for direct
+// execution with psql. Skip that wrapper when running them through Migrate,
+// whose transaction must also contain the schema_migrations insert.
+// Checksums still cover the original file contents, including the wrapper.
+func migrationSQLBody(sql string) string {
+	body, hasBegin := strings.CutPrefix(strings.TrimSpace(sql), "BEGIN;")
+	if hasBegin {
+		if body, hasCommit := strings.CutSuffix(body, "COMMIT;"); hasCommit {
+			return body
+		}
+	}
+	return sql
 }
 
 // normalizeMigrationLineEndings 把 Windows CRLF 和旧式 CR 统一成 LF。

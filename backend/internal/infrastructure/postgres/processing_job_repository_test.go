@@ -47,6 +47,7 @@ func TestProcessingJobRepositoryCreate(t *testing.T) {
 
 	documentRepository := newOwnedDocumentFixture(t, ctx, pool)
 	jobRepository := postgresrepository.NewProcessingJobRepository(pool)
+	revisionRepository := postgresrepository.NewCorpusRevisionRepository(pool)
 	uniqueValue := time.Now().UnixNano()
 
 	createdDocument, err := documentRepository.Create(
@@ -154,6 +155,35 @@ func TestProcessingJobRepositoryCreate(t *testing.T) {
 		t.Fatalf(
 			"duplicate CreateProcessingJob() error = %v, want ErrActiveProcessingJobExists",
 			err,
+		)
+	}
+
+	revisionBeforeClaim, err := revisionRepository.GetCorpusRevision(
+		ctx,
+		documentRepository.scope,
+	)
+	if err != nil {
+		t.Fatalf("get corpus revision before processing claim: %v", err)
+	}
+	claimedJob, err := jobRepository.ClaimNextProcessingJob(ctx)
+	if err != nil {
+		t.Fatalf("claim processing job: %v", err)
+	}
+	if claimedJob.ID != createdJob.ID {
+		t.Fatalf("claimed job ID = %d, want %d", claimedJob.ID, createdJob.ID)
+	}
+	revisionAfterClaim, err := revisionRepository.GetCorpusRevision(
+		ctx,
+		documentRepository.scope,
+	)
+	if err != nil {
+		t.Fatalf("get corpus revision after processing claim: %v", err)
+	}
+	if revisionAfterClaim != revisionBeforeClaim+1 {
+		t.Fatalf(
+			"corpus revision after processing claim = %d, want %d",
+			revisionAfterClaim,
+			revisionBeforeClaim+1,
 		)
 	}
 

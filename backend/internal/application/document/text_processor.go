@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
@@ -13,16 +12,6 @@ import (
 var ErrUnsupportedTextDocumentType = errors.New(
 	"text processor supports only Markdown and plain text documents",
 )
-
-// StoredFileOpener 定义文本处理器打开已存储文档所需的最小能力。
-//
-// 应用层不关心文件来自本地磁盘还是其他存储系统。
-type StoredFileOpener interface {
-	Open(
-		ctx context.Context,
-		storagePath string,
-	) (io.ReadCloser, error)
-}
 
 // TextProcessor 负责处理可以直接读取为 UTF-8 文本的文档。
 type TextProcessor struct {

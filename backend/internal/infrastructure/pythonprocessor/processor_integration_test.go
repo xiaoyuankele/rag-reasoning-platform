@@ -41,7 +41,7 @@ func TestProcessorCallsRealPythonCLI(t *testing.T) {
 		sourcePath,
 	)
 
-	resolver := &fakeStoredFilePathResolver{absolutePath: sourcePath}
+	resolver := &fakeStoredFileMaterializer{absolutePath: sourcePath}
 	processor, err := NewProcessor(
 		resolver,
 		pythonExecutable,

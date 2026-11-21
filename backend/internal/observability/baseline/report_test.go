@@ -11,12 +11,18 @@ func TestSummarizeAggregatesEmbeddingAndGenerationEvents(t *testing.T) {
 		"[GIN-debug] GET /health",
 		`{"event":"embedding_job_started","model_name":"text-embedding-v4","dimensions":1024}`,
 		`{"event":"http_request_completed","duration_ms":25}`,
-		`{"event":"embedding_job_succeeded","model_name":"text-embedding-v4","dimensions":1024,"duration_ms":2000,"provider_duration_ms":1200,"provider_call_count":2,"prompt_tokens":15,"total_tokens":20,"generated_vector_count":3}`,
-		`{"event":"embedding_job_requeued","model_name":"text-embedding-v4","dimensions":1024,"duration_ms":1000,"provider_duration_ms":700,"provider_call_count":1,"prompt_tokens":4,"total_tokens":5,"generated_vector_count":1,"error_category":"provider_rate_limit"}`,
+		`{"event":"embedding_job_succeeded","model_name":"text-embedding-v4","dimensions":1024,"attempt_count":2,"duration_ms":2000,"provider_duration_ms":1200,"finalization_duration_ms":100,"provider_call_count":2,"prompt_tokens":15,"total_tokens":20,"generated_vector_count":3,"retry_count":1,"recovered":true}`,
+		`{"event":"embedding_job_requeued","model_name":"text-embedding-v4","dimensions":1024,"attempt_count":1,"duration_ms":1000,"provider_duration_ms":700,"finalization_duration_ms":50,"provider_call_count":1,"prompt_tokens":4,"total_tokens":5,"generated_vector_count":1,"retry_count":0,"recovered":false,"error_category":"provider_rate_limit"}`,
 		`{"event":"answer_generation_started","model_name":"qwen3.6-flash","response_language":"zh","evidence_count":4}`,
 		`{"event":"answer_generation_succeeded","model_name":"qwen3.6-flash","response_language":"zh","evidence_count":4,"provider_duration_ms":900,"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}`,
 		`{"event":"answer_generation_failed","model_name":"qwen3.6-flash","response_language":"en","evidence_count":3,"provider_duration_ms":400,"error_category":"provider_unavailable"}`,
 		`{"event":"answer_generation_skipped","model_name":"qwen3.6-flash","response_language":"zh","evidence_count":0,"skip_reason":"insufficient_evidence"}`,
+		`{"event":"answer_request_admitted","wait_duration_ms":10,"in_flight":1,"max_concurrency":2}`,
+		`{"event":"answer_request_admitted","wait_duration_ms":20,"in_flight":2,"max_concurrency":2}`,
+		`{"event":"answer_request_released","outcome":"succeeded","wait_duration_ms":10,"execution_duration_ms":1000,"in_flight":1,"max_concurrency":2}`,
+		`{"event":"answer_request_rejected","outcome":"capacity_timeout","wait_duration_ms":3000,"in_flight":2,"max_concurrency":2}`,
+		`{"event":"answer_request_released","outcome":"downstream_error","wait_duration_ms":20,"execution_duration_ms":400,"in_flight":0,"max_concurrency":2}`,
+		`{"event":"answer_request_rejected","outcome":"canceled","wait_duration_ms":500,"in_flight":2,"max_concurrency":2}`,
 	}, "\n")
 	generatedAt := time.Date(2026, time.August, 15, 12, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 
@@ -25,11 +31,11 @@ func TestSummarizeAggregatesEmbeddingAndGenerationEvents(t *testing.T) {
 		t.Fatalf("Summarize() error = %v, want nil", err)
 	}
 
-	if report.SchemaVersion != 1 ||
+	if report.SchemaVersion != 6 ||
 		report.GeneratedAt != "2026-08-15T04:00:00Z" ||
-		report.ScannedLineCount != 9 ||
-		report.JSONLineCount != 8 ||
-		report.AggregatedEventCount != 5 ||
+		report.ScannedLineCount != 15 ||
+		report.JSONLineCount != 14 ||
+		report.AggregatedEventCount != 11 ||
 		report.IgnoredNonJSONLineCount != 1 ||
 		report.IgnoredJSONEventCount != 3 {
 		t.Fatalf("report metadata = %+v, want stable line counts", report)
@@ -45,11 +51,16 @@ func TestSummarizeAggregatesEmbeddingAndGenerationEvents(t *testing.T) {
 		embedding.PromptTokens != 19 ||
 		embedding.TotalTokens != 25 ||
 		embedding.GeneratedVectorCount != 4 ||
-		embedding.PersistedVectorCount != 3 {
+		embedding.PersistedVectorCount != 3 ||
+		embedding.RetriedJobCount != 1 ||
+		embedding.RecoveredJobCount != 1 ||
+		embedding.RetryExhaustedCount != 0 ||
+		embedding.RecoveryRate != 1 {
 		t.Fatalf("embedding summary = %+v, want accumulated attempts and cost", embedding)
 	}
 	assertDurationSummary(t, embedding.WorkerDuration, 2, 3000, 1500, 1000, 1000, 2000, 2000)
 	assertDurationSummary(t, embedding.ProviderDuration, 2, 1900, 950, 700, 700, 1200, 1200)
+	assertDurationSummary(t, embedding.FinalizationDuration, 2, 150, 75, 50, 50, 100, 100)
 
 	generation := report.Generation
 	if generation.Events["answer_generation_succeeded"] != 1 ||
@@ -68,6 +79,61 @@ func TestSummarizeAggregatesEmbeddingAndGenerationEvents(t *testing.T) {
 		t.Fatalf("generation summary = %+v, want calls, skips and cost", generation)
 	}
 	assertDurationSummary(t, generation.ProviderDuration, 2, 1300, 650, 400, 400, 900, 900)
+
+	admission := report.AnswerAdmission
+	if admission.Events["answer_request_admitted"] != 2 ||
+		admission.Events["answer_request_rejected"] != 2 ||
+		admission.Events["answer_request_released"] != 2 ||
+		admission.Outcomes["succeeded"] != 1 ||
+		admission.Outcomes["downstream_error"] != 1 ||
+		admission.Outcomes["capacity_timeout"] != 1 ||
+		admission.Outcomes["canceled"] != 1 ||
+		admission.CapacityTimeoutCount != 1 ||
+		admission.CanceledWaitCount != 1 ||
+		admission.MaxObservedInFlight != 2 {
+		t.Fatalf("answer admission summary = %+v, want event and outcome counts", admission)
+	}
+	assertDurationSummary(t, admission.WaitDuration, 4, 3530, 882.5, 10, 20, 3000, 3000)
+	assertDurationSummary(t, admission.ExecutionDuration, 2, 1400, 700, 400, 400, 1000, 1000)
+}
+
+func TestSummarizeTracksOwnerFairAnswerCapacity(t *testing.T) {
+	input := strings.Join([]string{
+		`{"event":"answer_request_admitted","wait_duration_ms":5,"in_flight":10,"max_concurrency":10,"owner_in_flight":2,"owner_max_concurrency":2,"waiting":12,"max_waiting":500,"owner_waiting":4,"owner_max_waiting":5}`,
+		`{"event":"answer_request_rejected","outcome":"owner_capacity_exhausted","wait_duration_ms":0,"in_flight":10,"max_concurrency":10,"owner_in_flight":2,"owner_max_concurrency":2,"waiting":12,"max_waiting":500,"owner_waiting":5,"owner_max_waiting":5}`,
+		`{"event":"answer_request_rejected","outcome":"global_capacity_exhausted","wait_duration_ms":0,"in_flight":10,"max_concurrency":10,"owner_in_flight":0,"owner_max_concurrency":2,"waiting":500,"max_waiting":500,"owner_waiting":0,"owner_max_waiting":5}`,
+	}, "\n")
+
+	report, err := Summarize(strings.NewReader(input), time.Time{})
+	if err != nil {
+		t.Fatalf("Summarize() error = %v, want nil", err)
+	}
+	summary := report.AnswerAdmission
+	if summary.OwnerCapacityCount != 1 ||
+		summary.GlobalCapacityCount != 1 ||
+		summary.MaxObservedInFlight != 10 ||
+		summary.MaxObservedWaiting != 500 ||
+		summary.MaxOwnerInFlight != 2 ||
+		summary.MaxOwnerWaiting != 5 {
+		t.Fatalf("answer admission summary = %+v, want owner-fair capacity maxima", summary)
+	}
+}
+
+func TestSummarizeTracksEmbeddingRetryExhaustion(t *testing.T) {
+	input := `{"event":"embedding_job_failed","model_name":"text-embedding-v4","dimensions":1024,"attempt_count":3,"duration_ms":800,"provider_duration_ms":700,"finalization_duration_ms":20,"provider_call_count":1,"prompt_tokens":0,"total_tokens":0,"generated_vector_count":0,"retry_count":2,"recovered":false,"error_category":"timeout"}`
+
+	report, err := Summarize(strings.NewReader(input), time.Time{})
+	if err != nil {
+		t.Fatalf("Summarize() error = %v, want nil", err)
+	}
+
+	embedding := report.Embedding
+	if embedding.RetriedJobCount != 1 ||
+		embedding.RecoveredJobCount != 0 ||
+		embedding.RetryExhaustedCount != 1 ||
+		embedding.RecoveryRate != 0 {
+		t.Fatalf("embedding retry summary = %+v, want one exhausted retry", embedding)
+	}
 }
 
 func TestSummarizeRejectsMalformedStructuredLog(t *testing.T) {
@@ -85,6 +151,23 @@ func TestSummarizeRejectsIncompleteCostEvent(t *testing.T) {
 	_, err := Summarize(strings.NewReader(input), time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "provider_duration_ms") {
 		t.Fatalf("Summarize() error = %v, want missing duration error", err)
+	}
+}
+
+func TestSummarizeRejectsInconsistentEmbeddingRecoveryFlag(t *testing.T) {
+	input := `{"event":"embedding_job_succeeded","model_name":"model","dimensions":2,"attempt_count":1,"duration_ms":10,"provider_duration_ms":5,"provider_call_count":1,"prompt_tokens":1,"total_tokens":1,"generated_vector_count":1,"retry_count":0,"recovered":true}`
+
+	_, err := Summarize(strings.NewReader(input), time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "recovered flag") {
+		t.Fatalf("Summarize() error = %v, want inconsistent recovery error", err)
+	}
+}
+
+func TestSummarizeRejectsIncompleteAnswerAdmissionEvent(t *testing.T) {
+	input := `{"event":"answer_request_released","outcome":"succeeded","wait_duration_ms":5,"in_flight":0,"max_concurrency":2}`
+	_, err := Summarize(strings.NewReader(input), time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "execution_duration_ms") {
+		t.Fatalf("Summarize() error = %v, want missing execution duration error", err)
 	}
 }
 

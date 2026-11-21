@@ -68,7 +68,9 @@ Gin debug 文本和 JSON 日志可以共存。汇总器会计数并忽略普通�
 ```powershell
 go run ./cmd/observability-report `
     -input  "..\chatgpt\后端\评估\模型成本\2026-08-15\server.jsonl" `
-    -output "..\chatgpt\后端\评估\模型成本\2026-08-15\cost-report.json"
+    -output "..\chatgpt\后端\评估\模型成本\2026-08-15\cost-report.json" `
+    -processing-slow-threshold 60s `
+    -processing-slow-task-limit 20
 ```
 
 也可以使用标准输入/输出：
@@ -97,7 +99,11 @@ Get-Content .\server.jsonl |
 - `provider_call_count`、`prompt_tokens`、`total_tokens` 会累计成功、重试和失败尝试，因为已经发生的调用可能已经计费；
 - `generated_vector_count` 包含后来因事务回滚而没有保留的部分向量；
 - `persisted_vector_count` 只统计 `embedding_job_succeeded` 中已经原子落库的向量；
-- `worker_duration` 是一次 Worker 尝试的总耗时，`provider_duration` 只累计远程 Embed 调用耗时。
+- `retried_job_count` 只统计至少重试一次并已进入 `succeeded`/`failed` 终态的任务；
+- `recovered_job_count` 和 `retry_exhausted_count` 分别表示重试后恢复与重试后仍失败；
+- `recovery_rate` 的分母是上述已知终态重试任务，不包含仍在排队或停机中断的任务；
+- `worker_duration` 是一次 Worker 尝试的总耗时，`provider_duration` 只累计远程 Embed 调用耗时；
+- `finalization_duration` 覆盖向量原子写入与任务终态更新；旧日志没有该字段时不会生成虚假的 0 毫秒样本。
 
 ### 5.3 Generation
 
@@ -107,8 +113,52 @@ Get-Content .\server.jsonl |
   用于解释不同 Top K 批次的 Prompt 成本差异；
 - `provider_duration` 只计算 Generator 调用，不等于完整 HTTP 延迟。
 
+### 5.4 Answer Admission
+
+`answer_admission` 不统计模型费用，而是回答“问答请求是否正在等待、被拒绝或已经释放并发槽位”：
+
+- `events`：`answer_request_admitted`、`answer_request_rejected`、`answer_request_released` 的数量；
+- `outcomes`：终结事件中的 `succeeded`、`downstream_error`、`capacity_timeout`、`canceled` 数量；
+- `capacity_timeout_count`：在配置等待时间内没有取得槽位的请求数；
+- `canceled_wait_count`：等待期间被客户端或上游 context 取消的请求数；
+- `max_observed_in_flight`：这批日志实际观察到的进程内最大并发问答数；
+- `wait_duration`：每个终结请求等待槽位的耗时；
+- `execution_duration`：已取得槽位的请求执行完整问答链路的耗时。
+
+等待耗时只从 `released` 和 `rejected` 读取。`admitted` 事件也含同一份等待耗时，但只用于观察准入瞬间，
+不能再次加入耗时样本。否则每个成功请求会被统计两遍，平均值和分位数都会失真。
+
 耗时统计统一提供 `count`、`total_ms`、`average_ms`、`min_ms`、`p50_ms`、`p95_ms` 和 `max_ms`。
 P50/P95 使用 nearest-rank：先从小到大排序，再取向上取整后的第 50%/95% 位置。
+
+### 5.5 Document Processing
+
+`document_processing` 使用文档解析终结事件定位吞吐和长尾：
+
+- `worker_duration` 对应 `total_ms`，从 Worker 领取任务后开始，不含排队；
+- `end_to_end_duration` 等于 `queue_wait_ms + total_ms`，更接近用户等待解析的时间；
+- `processor_duration` 包含 Go 调用处理器、Python 进程池等待和协议往返；
+- `python_duration` 及 `source_open/text_extract/text_split` 等字段只来自支持阶段指标的 Python 处理器；
+- `chunk_write_duration` 和 `finalization_duration` 分别描述 chunks 替换和 Job/Document 终态回写；
+- `slow_task_bottlenecks` 是阶段最大值的第一轮定位结果，不替代 CPU profile、SQL 分析或 PDF 样本复现。
+
+默认慢任务阈值是 60 秒，目的是隔离当前压力测试中高于约 48 秒 P95 的长尾，而不是承诺 60 秒 SLA。
+不同机器、文件集和 Worker 配置应显式记录命令参数。报告只保留最慢 N 条安全摘要，完整原始日志仍是审计来源。
+
+### 5.6 Asynchronous Answer Jobs
+
+`answer_jobs` 不直接计算模型费用，而是解释持久化异步问答的用户等待和队列压力：
+
+- `queue_wait_duration` 统计每次执行尝试达到可领取时间后的排队；
+- `execution_duration` 统计每次 Worker 尝试；
+- `total_duration` 只统计 `succeeded`/`failed` 终态，避免重排任务重复进入端到端样本；
+- `retried_job_count`、`recovered_job_count`、`retry_exhausted_count` 和 `recovery_rate` 描述有限重试效果；
+- `queue_snapshot_count` 与 `queue_snapshot_missing_count` 用于识别观测缺口；
+- `max_observed_queued`、`max_observed_ready_queued`、`max_observed_processing`、
+  `max_observed_owner_processing` 和 `max_observed_oldest_ready_wait_ms` 描述观测窗口内的队列峰值。
+
+队列快照来自 PostgreSQL 业务事实，不包含 Owner ID 或正文。它是在任务生命周期事件附近的离散采样，不等同于
+连续监控时序；峰值只能解释“至少观察到这么高”，不能证明观测间隔内没有更高的瞬时峰值。
 
 ## 6. 金额换算
 
@@ -127,5 +177,20 @@ Generation 金额 = prompt_tokens / 1,000,000 × 当日输入单价
 2026-08-15 已完成 P5.2.6 第一部分：事件字段、严格 JSONL 汇总器、命令行入口、P50/P95 统计和自动化测试均已就绪。
 汇总器测试只使用合成日志，没有调用真实模型。P4 的 14 次生成、39,982 Token 和端到端耗时继续作为历史质量
 参考，但由于当时记录的是 HTTP 总耗时而不是当前的 provider duration，不能伪装成新口径的第一批结果。
+
+2026-08-22 报告结构升级为 `schema_version=2`，同一命令能够额外汇总问答并发准入、容量超时、取消等待、
+等待/执行耗时和最大观测并发。该扩展同样只读取日志，不会发起远程问答。
+
+2026-08-24 报告结构升级为 `schema_version=3`，增加 Embedding 重试恢复、重试耗尽、恢复率和数据库收尾耗时。
+旧 JSONL 中已有 `attempt_count` 时可以推导恢复结果；缺少收尾耗时的历史事件仍可汇总，但不会进入该耗时样本。
+
+同日 `schema_version=4` 增加文档处理阶段分布、端到端长尾、瓶颈分类和有界慢任务摘要。该分析继续只读取
+JSONL，不访问数据库、不打开 PDF，也不调用模型。
+
+同日 `schema_version=5` 增加问答 Owner 公平准入汇总：分别统计单用户等待预算拒绝、全局等待区拒绝、
+等待超时，以及全局/单用户执行与等待峰值。旧日志没有新增字段时仍可汇总，新增指标保持为零。
+
+同日 `schema_version=6` 增加异步问答任务的排队、执行、端到端、重试恢复和队列压力汇总。该版本仍然只读取
+结构化日志；不会启动 Worker、查询数据库或调用付费模型。历史日志没有异步问答事件时输出空汇总。
 
 下一次真实成本批次需要冻结语料和问题集，并在用户明确同意产生远程费用后执行。

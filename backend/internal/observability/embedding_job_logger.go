@@ -48,7 +48,15 @@ func (l *EmbeddingJobLogger) ObserveEmbeddingJobEvent(
 			slog.Int("prompt_tokens", event.PromptTokens),
 			slog.Int("total_tokens", event.TotalTokens),
 			slog.Int("generated_vector_count", event.GeneratedVectorCount),
+			slog.Int("retry_count", event.RetryCount),
+			slog.Bool("recovered", event.Recovered),
 		)
+		if event.FinalizationDuration != nil {
+			attributes = append(
+				attributes,
+				slog.Int64("finalization_duration_ms", event.FinalizationDuration.Milliseconds()),
+			)
+		}
 	}
 	if event.NextAttemptAt != nil {
 		attributes = append(

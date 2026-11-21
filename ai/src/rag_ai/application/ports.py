@@ -7,14 +7,14 @@ from typing import Protocol
 
 from rag_ai.domain.models import (
     DocumentSource,
-    PageText,
+    ExtractedDocument,
     ProcessingLimits,
     ProcessingResult,
 )
 
 
-class PageTextExtractor(Protocol):
-    """从带固定页码的文档中提取逐页文字的应用层端口。"""
+class DocumentExtractor(Protocol):
+    """一次读取源文档并提取 Application 所需内容的应用层端口。"""
 
     def extract(
         self,
@@ -22,15 +22,8 @@ class PageTextExtractor(Protocol):
         *,
         max_file_bytes: int,
         max_pages: int,
-    ) -> list[PageText]:
-        """按照物理页顺序返回文字，并遵守文件和页数限制。"""
-
-
-class DocumentTitleExtractor(Protocol):
-    """从一份文档中尽力读取可选标题的应用层端口。"""
-
-    def extract_title(self, source_path: Path) -> str | None:
-        """返回已经规范化的标题；无法可靠读取时返回 ``None``。"""
+    ) -> ExtractedDocument:
+        """一次返回页面文字和可选标题，并遵守文件与页数限制。"""
 
 
 class TextSplitter(Protocol):

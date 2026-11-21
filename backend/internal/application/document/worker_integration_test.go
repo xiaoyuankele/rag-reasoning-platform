@@ -99,7 +99,7 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 	}
 	jobRepository := postgresrepository.NewProcessingJobRepository(pool)
 	chunkRepository := postgresrepository.NewChunkRepository(pool)
-	createdDocumentIDs := make([]int64, 0, 2)
+	createdDocumentIDs := make([]int64, 0, 4)
 	defer func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(
 			context.Background(),
@@ -300,6 +300,163 @@ func TestWorkerRunOnceIntegration(t *testing.T) {
 			)
 		}
 	})
+
+	t.Run("worker pool processes two different jobs concurrently", func(t *testing.T) {
+		createdDocuments := make([]documentdomain.Document, 0, 2)
+		createdJobs := make([]documentdomain.ProcessingJob, 0, 2)
+		for index, hashCharacter := range []string{"c", "d"} {
+			createdDocument, createdJob := createWorkerIntegrationJob(
+				t,
+				ctx,
+				documentCreator,
+				ownerScope,
+				jobRepository,
+				fmt.Sprintf("pool-%d", index+1),
+				hashCharacter,
+			)
+			createdDocuments = append(createdDocuments, createdDocument)
+			createdJobs = append(createdJobs, createdJob)
+			createdDocumentIDs = append(createdDocumentIDs, createdDocument.ID)
+		}
+
+		processorStarted := make(chan int64, 2)
+		releaseProcessors := make(chan struct{})
+		processor := &integrationDocumentProcessor{
+			processFunc: func(
+				processContext context.Context,
+				document documentdomain.Document,
+			) (ProcessingResult, error) {
+				processorStarted <- document.ID
+				select {
+				case <-releaseProcessors:
+					return ProcessingResult{
+						Chunks: []documentdomain.ChunkInput{
+							{
+								Index:   0,
+								Content: fmt.Sprintf("pool chunk for %d", document.ID),
+							},
+						},
+					}, nil
+				case <-processContext.Done():
+					return ProcessingResult{}, processContext.Err()
+				}
+			},
+		}
+		worker := NewWorker(
+			jobRepository,
+			documentRepository,
+			processor,
+			chunkRepository,
+			newRecordingProcessingJobEventObserver(),
+			testWorkerProcessingTimeout,
+		)
+		loop, err := NewWorkerLoop(
+			worker,
+			10*time.Millisecond,
+			func(workerErr error) {
+				t.Errorf("worker pool iteration error: %v", workerErr)
+			},
+		)
+		if err != nil {
+			t.Fatalf("NewWorkerLoop() error = %v, want nil", err)
+		}
+		workerPool, err := NewWorkerPool(loop, 2)
+		if err != nil {
+			t.Fatalf("NewWorkerPool() error = %v, want nil", err)
+		}
+
+		poolContext, cancelPool := context.WithCancel(ctx)
+		poolStopped := make(chan struct{})
+		go func() {
+			workerPool.Run(poolContext)
+			close(poolStopped)
+		}()
+		defer func() {
+			cancelPool()
+			select {
+			case <-poolStopped:
+			case <-time.After(2 * time.Second):
+				t.Error("WorkerPool did not stop during test cleanup")
+			}
+		}()
+
+		startedDocumentIDs := make(map[int64]struct{}, 2)
+		for range 2 {
+			select {
+			case documentID := <-processorStarted:
+				startedDocumentIDs[documentID] = struct{}{}
+			case <-time.After(2 * time.Second):
+				t.Fatal("two document processors did not run concurrently")
+			}
+		}
+		if len(startedDocumentIDs) != 2 {
+			t.Fatalf(
+				"concurrent processor document IDs = %v, want two distinct IDs",
+				startedDocumentIDs,
+			)
+		}
+		for _, createdDocument := range createdDocuments {
+			if _, exists := startedDocumentIDs[createdDocument.ID]; !exists {
+				t.Fatalf(
+					"document %d was not processed by the pool",
+					createdDocument.ID,
+				)
+			}
+		}
+
+		close(releaseProcessors)
+		waitForProcessingJobsSucceeded(
+			t,
+			ctx,
+			jobRepository,
+			createdJobs,
+		)
+
+		cancelPool()
+		select {
+		case <-poolStopped:
+		case <-time.After(2 * time.Second):
+			t.Fatal("WorkerPool did not stop after cancellation")
+		}
+	})
+}
+
+func waitForProcessingJobsSucceeded(
+	t *testing.T,
+	ctx context.Context,
+	jobRepository *postgresrepository.ProcessingJobRepository,
+	jobs []documentdomain.ProcessingJob,
+) {
+	t.Helper()
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		allSucceeded := true
+		for _, job := range jobs {
+			foundJob, err := jobRepository.GetProcessingJobByID(ctx, job.ID)
+			if err != nil {
+				t.Fatalf("get pool processing job %d: %v", job.ID, err)
+			}
+			if foundJob.Status != documentdomain.ProcessingJobStatusSucceeded {
+				allSucceeded = false
+			}
+		}
+		if allSucceeded {
+			return
+		}
+
+		select {
+		case <-deadline.C:
+			t.Fatal("WorkerPool jobs did not reach succeeded")
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("WorkerPool test context ended: %v", ctx.Err())
+		}
+	}
 }
 
 func createWorkerIntegrationJob(

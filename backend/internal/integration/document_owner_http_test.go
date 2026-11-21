@@ -121,6 +121,10 @@ func TestDocumentOwnerHTTPWithPostgreSQL(t *testing.T) {
 		documentapplication.NewUploadService(repository, storage),
 		1024*1024,
 	).RegisterRoutes(protectedRoutes)
+	api.NewDocumentPreflightHandler(
+		documentapplication.NewPreflightService(repository, 1024*1024),
+		logger,
+	).RegisterRoutes(protectedRoutes)
 	api.NewDocumentListHandler(
 		documentapplication.NewListService(repository),
 	).RegisterRoutes(protectedRoutes)
@@ -167,6 +171,8 @@ func TestDocumentOwnerHTTPWithPostgreSQL(t *testing.T) {
 	var uploadedDocument struct {
 		ID           int64  `json:"id"`
 		OriginalName string `json:"original_name"`
+		SizeBytes    int64  `json:"size_bytes"`
+		SHA256       string `json:"sha256"`
 		Duplicate    bool   `json:"duplicate"`
 	}
 	if err := json.Unmarshal(uploadResponse.Body.Bytes(), &uploadedDocument); err != nil {
@@ -177,6 +183,79 @@ func TestDocumentOwnerHTTPWithPostgreSQL(t *testing.T) {
 	}
 	if uploadedDocument.Duplicate {
 		t.Fatal("first upload returned duplicate=true, want false")
+	}
+
+	preflightBody := fmt.Sprintf(
+		`{"sha256":%q,"size_bytes":%d}`,
+		uploadedDocument.SHA256,
+		uploadedDocument.SizeBytes,
+	)
+	unauthenticatedPreflight := performDocumentOwnerRequest(
+		router,
+		http.MethodPost,
+		"/documents/preflight",
+		strings.NewReader(preflightBody),
+		"",
+		"application/json",
+	)
+	if unauthenticatedPreflight.Code != http.StatusUnauthorized {
+		t.Fatalf(
+			"unauthenticated preflight status=%d want=401 body=%s",
+			unauthenticatedPreflight.Code,
+			unauthenticatedPreflight.Body.String(),
+		)
+	}
+
+	ownerAPreflight := performDocumentOwnerRequest(
+		router,
+		http.MethodPost,
+		"/documents/preflight",
+		strings.NewReader(preflightBody),
+		ownerACookie,
+		"application/json",
+	)
+	if ownerAPreflight.Code != http.StatusOK {
+		t.Fatalf("owner A preflight status=%d want=200 body=%s", ownerAPreflight.Code, ownerAPreflight.Body.String())
+	}
+	var ownerAPreflightResult struct {
+		Exists   bool `json:"exists"`
+		Document *struct {
+			ID int64 `json:"id"`
+		} `json:"document"`
+	}
+	if err := json.Unmarshal(ownerAPreflight.Body.Bytes(), &ownerAPreflightResult); err != nil {
+		t.Fatalf("decode owner A preflight response: %v", err)
+	}
+	if !ownerAPreflightResult.Exists || ownerAPreflightResult.Document == nil || ownerAPreflightResult.Document.ID != uploadedDocument.ID {
+		t.Fatalf("owner A preflight response=%+v want existing document %d", ownerAPreflightResult, uploadedDocument.ID)
+	}
+
+	ownerBPreflight := performDocumentOwnerRequest(
+		router,
+		http.MethodPost,
+		"/documents/preflight",
+		strings.NewReader(preflightBody),
+		ownerBCookie,
+		"application/json",
+	)
+	if ownerBPreflight.Code != http.StatusOK || ownerBPreflight.Body.String() != `{"exists":false,"document":null}` {
+		t.Fatalf("owner B preflight status=%d body=%s want isolated miss", ownerBPreflight.Code, ownerBPreflight.Body.String())
+	}
+
+	wrongSizePreflight := performDocumentOwnerRequest(
+		router,
+		http.MethodPost,
+		"/documents/preflight",
+		strings.NewReader(fmt.Sprintf(
+			`{"sha256":%q,"size_bytes":%d}`,
+			uploadedDocument.SHA256,
+			uploadedDocument.SizeBytes+1,
+		)),
+		ownerACookie,
+		"application/json",
+	)
+	if wrongSizePreflight.Code != http.StatusOK || wrongSizePreflight.Body.String() != `{"exists":false,"document":null}` {
+		t.Fatalf("wrong-size preflight status=%d body=%s want miss", wrongSizePreflight.Code, wrongSizePreflight.Body.String())
 	}
 
 	var storedOwnerID int64

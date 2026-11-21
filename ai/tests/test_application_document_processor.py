@@ -17,18 +17,21 @@ from rag_ai.application.document_processor import (  # noqa: E402
 from rag_ai.domain.errors import DocumentProcessingError  # noqa: E402
 from rag_ai.domain.models import (  # noqa: E402
     DocumentSource,
+    ExtractionMetrics,
+    ExtractedDocument,
     PageText,
     ProcessingLimits,
+    ProcessingMetrics,
     ProcessingResult,
     TextChunk,
 )
 
 
-class RecordingPageExtractor:
-    """返回固定页面并记录调用参数的测试 Fake。"""
+class RecordingDocumentExtractor:
+    """返回固定文档中间结果并记录调用参数的测试 Fake。"""
 
-    def __init__(self, pages: list[PageText]) -> None:
-        self.pages = pages
+    def __init__(self, result: ExtractedDocument) -> None:
+        self.result = result
         self.calls: list[tuple[Path, int, int]] = []
 
     def extract(
@@ -37,25 +40,11 @@ class RecordingPageExtractor:
         *,
         max_file_bytes: int,
         max_pages: int,
-    ) -> list[PageText]:
-        """记录应用服务传入的来源和限制后返回预设页面。"""
+    ) -> ExtractedDocument:
+        """记录应用服务传入的来源和限制后返回预设中间结果。"""
 
         self.calls.append((source_path, max_file_bytes, max_pages))
-        return self.pages
-
-
-class RecordingTitleExtractor:
-    """返回固定标题并记录被读取的文档路径。"""
-
-    def __init__(self, title: str | None) -> None:
-        self.title = title
-        self.calls: list[Path] = []
-
-    def extract_title(self, source_path: Path) -> str | None:
-        """记录来源路径并返回预设的可选标题。"""
-
-        self.calls.append(source_path)
-        return self.title
+        return self.result
 
 
 class RecordingTextSplitter:
@@ -79,16 +68,26 @@ class RecordingTextSplitter:
 class ProcessDocumentServiceTests(unittest.TestCase):
     def test_process_uses_ports_and_returns_page_sourced_chunks(self) -> None:
         source_path = Path.cwd() / "research.pdf"
-        extractor = RecordingPageExtractor(
-            [
-                PageText(page_number=1, text="  first\npage  "),
-                PageText(page_number=2, text=""),
-                PageText(page_number=3, text="final"),
-            ]
+        extractor = RecordingDocumentExtractor(
+            ExtractedDocument(
+                pages=[
+                    PageText(page_number=1, text="  first\npage  "),
+                    PageText(page_number=2, text=""),
+                    PageText(page_number=3, text="final"),
+                ],
+                detected_title="Maglev research",
+                metrics=ExtractionMetrics(
+                    source_open_ms=11,
+                    metadata_read_ms=2,
+                    text_extract_ms=37,
+                    page_count=3,
+                    slowest_page_number=1,
+                    slowest_page_ms=20,
+                ),
+            )
         )
-        title_extractor = RecordingTitleExtractor("Maglev research")
         splitter = RecordingTextSplitter()
-        service = ProcessDocumentService(extractor, title_extractor, splitter)
+        service = ProcessDocumentService(extractor, splitter)
 
         result = service.process(
             DocumentSource(
@@ -123,15 +122,28 @@ class ProcessDocumentServiceTests(unittest.TestCase):
                     TextChunk(2, "final", 3, 3),
                 ],
                 detected_title="Maglev research",
+                metrics=ProcessingMetrics(
+                    python_total_ms=result.metrics.python_total_ms,
+                    source_open_ms=11,
+                    metadata_read_ms=2,
+                    text_extract_ms=37,
+                    text_split_ms=result.metrics.text_split_ms,
+                    page_count=3,
+                    slowest_page_number=1,
+                    slowest_page_ms=20,
+                ),
             ),
         )
-        self.assertEqual(title_extractor.calls, [source_path])
+
+        self.assertIsNotNone(result.metrics)
+        assert result.metrics is not None
+        self.assertGreaterEqual(result.metrics.python_total_ms, 0)
+        self.assertGreaterEqual(result.metrics.text_split_ms, 0)
 
     def test_process_rejects_unsupported_format_before_using_ports(self) -> None:
-        extractor = RecordingPageExtractor([])
-        title_extractor = RecordingTitleExtractor(None)
+        extractor = RecordingDocumentExtractor(ExtractedDocument(pages=[]))
         splitter = RecordingTextSplitter()
-        service = ProcessDocumentService(extractor, title_extractor, splitter)
+        service = ProcessDocumentService(extractor, splitter)
 
         with self.assertRaises(DocumentProcessingError) as raised:
             service.process(
@@ -147,19 +159,19 @@ class ProcessDocumentServiceTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "unsupported_format")
         self.assertEqual(extractor.calls, [])
-        self.assertEqual(title_extractor.calls, [])
         self.assertEqual(splitter.calls, [])
 
     def test_process_requires_ocr_when_every_page_is_blank(self) -> None:
-        extractor = RecordingPageExtractor(
-            [
-                PageText(page_number=1, text=" \n\t "),
-                PageText(page_number=2, text="\x00"),
-            ]
+        extractor = RecordingDocumentExtractor(
+            ExtractedDocument(
+                pages=[
+                    PageText(page_number=1, text=" \n\t "),
+                    PageText(page_number=2, text="\x00"),
+                ]
+            )
         )
-        title_extractor = RecordingTitleExtractor(None)
         splitter = RecordingTextSplitter()
-        service = ProcessDocumentService(extractor, title_extractor, splitter)
+        service = ProcessDocumentService(extractor, splitter)
 
         with self.assertRaises(DocumentProcessingError) as raised:
             service.process(
@@ -171,7 +183,7 @@ class ProcessDocumentServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.code, "ocr_required")
-        self.assertEqual(title_extractor.calls, [])
+        self.assertEqual(len(extractor.calls), 1)
         self.assertEqual(splitter.calls, [])
 
 

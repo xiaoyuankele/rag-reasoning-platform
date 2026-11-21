@@ -47,19 +47,26 @@ const (
 // 事件只包含排障和成本统计需要的元数据，禁止放入用户问题、Prompt、证据正文和答案。
 // ProviderDuration 只计算 Generator.Generate 的远程调用耗时，不等于整次 HTTP 请求耗时。
 type GenerationEvent struct {
-	Type             GenerationEventType
-	ModelName        string
-	ResponseLanguage ResponseLanguage
-	DocumentID       *int64
-	RequestedTopK    int
-	EvidenceCount    int
-	ProviderDuration time.Duration
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-	SkipReason       GenerationSkipReason
-	ErrorCategory    GenerationErrorCategory
-	Err              error
+	Type                    GenerationEventType
+	ModelName               string
+	ResponseLanguage        ResponseLanguage
+	DocumentID              *int64
+	RequestedTopK           int
+	CandidateEvidenceCount  int
+	EvidenceCount           int
+	EvidenceBudgetTruncated bool
+	HistoryMessageCount     int
+	HistoryTurnCount        int
+	HistoryEstimatedTokens  int
+	HistoryTruncated        bool
+	EstimatedInputTokens    int
+	ProviderDuration        time.Duration
+	PromptTokens            int
+	CompletionTokens        int
+	TotalTokens             int
+	SkipReason              GenerationSkipReason
+	ErrorCategory           GenerationErrorCategory
+	Err                     error
 }
 
 // GenerationEventObserver 隔离 Answer Service 与 slog、监控平台等具体实现。

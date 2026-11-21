@@ -3,6 +3,7 @@ package document
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
@@ -13,9 +14,41 @@ var ErrActiveProcessingJobExists = errors.New(
 	"active document processing job already exists",
 )
 
+// ErrOwnerActiveProcessingJobLimitExceeded 表示当前用户的活动解析任务已经达到上限。
+var ErrOwnerActiveProcessingJobLimitExceeded = errors.New(
+	"owner active document processing job limit exceeded",
+)
+
+// ErrGlobalProcessingJobLimitExceeded 表示系统的活动解析任务已经达到全局上限。
+var ErrGlobalProcessingJobLimitExceeded = errors.New(
+	"global active document processing job limit exceeded",
+)
+
+// ErrInvalidProcessingJobAdmissionLimits 表示内部组装了无效的解析任务容量配置。
+var ErrInvalidProcessingJobAdmissionLimits = errors.New(
+	"document processing job admission limits are invalid",
+)
+
+// ErrInvalidProcessingJobSchedulingPolicy 表示 Worker 收到了无效的 Owner 调度策略。
+var ErrInvalidProcessingJobSchedulingPolicy = errors.New(
+	"document processing job scheduling policy is invalid",
+)
+
 // ErrProcessingJobNotFound 表示指定解析任务不存在。
 var ErrProcessingJobNotFound = errors.New(
 	"document processing job not found",
+)
+
+// ErrProcessingJobProcessingCannotCancel 表示任务已经被 Worker 领取，
+// 第一版不允许用户强制终止正在执行的 Python 文档处理。
+var ErrProcessingJobProcessingCannotCancel = errors.New(
+	"processing document job cannot be canceled",
+)
+
+// ErrProcessingJobTerminalCannotCancel 表示成功或失败的历史任务已经结束，
+// 不能再转换为 canceled。
+var ErrProcessingJobTerminalCannotCancel = errors.New(
+	"terminal document processing job cannot be canceled",
 )
 
 // ErrNoQueuedProcessingJob 表示当前没有可以被 Worker 领取的排队任务。
@@ -31,6 +64,19 @@ var ErrProcessingJobNotProcessing = errors.New(
 	"document processing job is not processing",
 )
 
+// ErrProcessingJobLeaseLost 表示当前 Worker 已不再拥有任务租约。
+//
+// 这通常意味着租约已经过期并被其他 Worker 重新领取。旧 Worker 必须停止
+// 写 chunks 和任务终态，避免陈旧结果覆盖新一次执行。
+var ErrProcessingJobLeaseLost = errors.New(
+	"document processing job lease lost",
+)
+
+// ErrInvalidProcessingJobLeasePolicy 表示 Worker 身份或租约时长无效。
+var ErrInvalidProcessingJobLeasePolicy = errors.New(
+	"document processing job lease policy is invalid",
+)
+
 // ProcessingJobStatus 是文档解析任务状态。
 type ProcessingJobStatus string
 
@@ -39,6 +85,7 @@ const (
 	ProcessingJobStatusProcessing ProcessingJobStatus = "processing"
 	ProcessingJobStatusSucceeded  ProcessingJobStatus = "succeeded"
 	ProcessingJobStatusFailed     ProcessingJobStatus = "failed"
+	ProcessingJobStatusCanceled   ProcessingJobStatus = "canceled"
 )
 
 // IsValid 判断任务状态是否由当前系统支持。
@@ -47,11 +94,64 @@ func (s ProcessingJobStatus) IsValid() bool {
 	case ProcessingJobStatusQueued,
 		ProcessingJobStatusProcessing,
 		ProcessingJobStatusSucceeded,
-		ProcessingJobStatusFailed:
+		ProcessingJobStatusFailed,
+		ProcessingJobStatusCanceled:
 		return true
 	default:
 		return false
 	}
+}
+
+// ProcessingErrorCode 是文档处理失败时可持久化、可统计的稳定分类。
+//
+// 它不包含文件路径、SQL 或第三方响应等底层细节；完整错误只进入后端日志。
+type ProcessingErrorCode string
+
+const (
+	// ProcessingErrorCodeNone 表示本次处理没有业务失败。
+	ProcessingErrorCodeNone ProcessingErrorCode = ""
+
+	// ProcessingErrorCodeDocumentLookup 表示 Worker 领取任务后无法读取文档记录。
+	ProcessingErrorCodeDocumentLookup ProcessingErrorCode = "document_lookup_failed"
+
+	// ProcessingErrorCodeProcessor 表示文档处理器执行失败。
+	ProcessingErrorCodeProcessor ProcessingErrorCode = "processor_failed"
+
+	// ProcessingErrorCodeProcessorTimeout 表示文档处理器超过执行时限。
+	ProcessingErrorCodeProcessorTimeout ProcessingErrorCode = "processor_timeout"
+
+	// ProcessingErrorCodeChunkWrite 表示处理器成功，但文本块写入失败。
+	ProcessingErrorCodeChunkWrite ProcessingErrorCode = "chunk_write_failed"
+
+	// ProcessingErrorCodeFinalization 表示处理结果已经产生，但任务终态回写失败。
+	ProcessingErrorCodeFinalization ProcessingErrorCode = "finalization_failed"
+)
+
+// ProcessingExecutionMetrics 是一次 Worker 执行需要持久化的精简观测数据。
+// QueueWait 和 TotalDuration 由 PostgreSQL 根据任务时间戳计算，Application
+// 只负责提供它能够准确测量的处理器耗时和输入、输出规模。
+type ProcessingExecutionMetrics struct {
+	ProcessorDuration  time.Duration
+	ChunkWriteDuration *time.Duration
+	ProcessorStages    *ProcessorStageMetrics
+	FileBytes          int64
+	ChunkCount         int
+	ErrorCode          ProcessingErrorCode
+}
+
+// ProcessorStageMetrics 是具体文档处理器返回的可选内部阶段指标。
+//
+// 当前 Python PDF 处理器会提供这些数据；Go 文本处理器或旧版 Python
+// 响应可以不提供。可选指针用于区分“没有观测”与“已执行且不足 1ms”。
+type ProcessorStageMetrics struct {
+	TotalDuration        time.Duration
+	SourceOpenDuration   time.Duration
+	MetadataReadDuration time.Duration
+	TextExtractDuration  time.Duration
+	TextSplitDuration    time.Duration
+	PageCount            int
+	SlowestPageNumber    int
+	SlowestPageDuration  time.Duration
 }
 
 // ProcessingJob 表示一次异步文档解析任务。
@@ -65,6 +165,52 @@ type ProcessingJob struct {
 	UpdatedAt    time.Time
 	StartedAt    *time.Time
 	CompletedAt  *time.Time
+	// LeaseToken 只供后台 Worker 执行 fencing，不属于前端任务查询契约。
+	// 非 processing 任务和普通查询结果可以为空。
+	LeaseToken string
+}
+
+// ProcessingJobLeasePolicy 定义一个 Worker 实例如何持有数据库任务。
+// WorkerID 用于排障和观测；LeaseDuration 决定失联多久后允许其他 Worker 接管。
+type ProcessingJobLeasePolicy struct {
+	WorkerID      string
+	LeaseDuration time.Duration
+}
+
+// IsValid 判断租约策略是否具备可持久化的 Worker 身份和正租约时长。
+func (p ProcessingJobLeasePolicy) IsValid() bool {
+	return strings.TrimSpace(p.WorkerID) != "" && p.LeaseDuration > 0
+}
+
+// ProcessingJobAdmissionLimits 是创建解析任务时必须原子执行的容量约束。
+// 活动任务只包含 queued 和 processing；成功或失败的历史任务不占用名额。
+type ProcessingJobAdmissionLimits struct {
+	MaxActiveJobsPerOwner int
+	MaxActiveJobsGlobal   int
+}
+
+// IsValid 判断用户上限和全局上限能否组成有效的准入策略。
+func (l ProcessingJobAdmissionLimits) IsValid() bool {
+	return l.MaxActiveJobsPerOwner > 0 &&
+		l.MaxActiveJobsGlobal >= l.MaxActiveJobsPerOwner
+}
+
+// ProcessingJobSchedulingPolicy 定义 Worker 领取解析任务时的 Owner 公平规则。
+//
+// MaxInFlightPerOwner 是存在多个等待 Owner 时的基础并发上限；
+// MaxBorrowedInFlightPerOwner 是没有其他 Owner 可以获得基础槽位时的绝对上限；
+// StarvationThreshold 控制 queued 任务等待多久后进入防饥饿优先级。
+type ProcessingJobSchedulingPolicy struct {
+	MaxInFlightPerOwner         int
+	MaxBorrowedInFlightPerOwner int
+	StarvationThreshold         time.Duration
+}
+
+// IsValid 判断公平、借用和防饥饿规则能否组成有效策略。
+func (p ProcessingJobSchedulingPolicy) IsValid() bool {
+	return p.MaxInFlightPerOwner > 0 &&
+		p.MaxBorrowedInFlightPerOwner >= p.MaxInFlightPerOwner &&
+		p.StarvationThreshold > 0
 }
 
 // ProcessingJobCreator 定义创建解析任务所需的持久化能力。
@@ -103,6 +249,29 @@ type ScopedProcessingJobFinder interface {
 	) (ProcessingJob, error)
 }
 
+// ScopedLatestProcessingJobFinder 定义按照一批文档 ID 查询各自最新解析任务的能力。
+//
+// 实现只能返回当前 OwnerScope 可见文档关联的任务。文档不存在、没有任务或
+// 属于其他用户都通过“结果中没有该 document_id”表达，避免泄露资源存在性。
+type ScopedLatestProcessingJobFinder interface {
+	FindLatestProcessingJobsByDocumentIDs(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		documentIDs []int64,
+	) ([]ProcessingJob, error)
+}
+
+// ScopedProcessingJobCanceler 定义在所有者边界内取消解析任务的能力。
+// queued 可以取消；canceled 重复取消保持幂等；processing、succeeded 和
+// failed 必须返回对应的稳定领域错误。
+type ScopedProcessingJobCanceler interface {
+	CancelProcessingJob(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		jobID int64,
+	) (ProcessingJob, error)
+}
+
 // ProcessingJobClaimer 定义 Worker 原子领取下一条排队任务所需的能力。
 type ProcessingJobClaimer interface {
 	ClaimNextProcessingJob(
@@ -115,6 +284,18 @@ type ProcessingCompletion struct {
 	// DetectedTitle 是处理器自动识别的可选标题。
 	// Infrastructure 只在文档当前没有标题时采用它，避免覆盖未来的用户标题。
 	DetectedTitle *string
+
+	// Metrics 保存本次成功执行的精简性能指标。
+	Metrics ProcessingExecutionMetrics
+}
+
+// ProcessingFailure 是任务失败收尾需要持久化的安全结果。
+type ProcessingFailure struct {
+	// Message 可以返回给前端，不包含底层错误细节。
+	Message string
+
+	// Metrics 保存本次失败执行已经获得的精简性能指标。
+	Metrics ProcessingExecutionMetrics
 }
 
 // ProcessingJobFinalizer 定义 Worker 完成一次执行后所需的状态回写能力。
@@ -122,23 +303,31 @@ type ProcessingJobFinalizer interface {
 	MarkProcessingJobSucceeded(
 		ctx context.Context,
 		jobID int64,
+		leaseToken string,
 		completion ProcessingCompletion,
 	) error
 
 	MarkProcessingJobFailed(
 		ctx context.Context,
 		jobID int64,
-		errorMessage string,
+		leaseToken string,
+		failure ProcessingFailure,
 	) error
 }
 
-// InterruptedProcessingJobRecoverer 定义应用启动时恢复异常中断任务
-// 所需的持久化能力。
-//
-// 当前系统只运行一个 Worker 实例，因此服务启动时仍处于 processing
-// 的任务可以确定为上一次进程异常退出留下的中断任务。
-type InterruptedProcessingJobRecoverer interface {
-	MarkInterruptedProcessingJobsFailed(
+// ProcessingJobLeaseRenewer 定义 Worker 处理期间续租所需的能力。
+type ProcessingJobLeaseRenewer interface {
+	RenewProcessingJobLease(
+		ctx context.Context,
+		jobID int64,
+		leaseToken string,
+	) error
+}
+
+// ExpiredProcessingJobRecoverer 定义恢复真正过期 processing 任务的能力。
+// 仍有有效租约的其他实例任务绝不能被恢复。
+type ExpiredProcessingJobRecoverer interface {
+	RequeueExpiredProcessingJobs(
 		ctx context.Context,
 		errorMessage string,
 	) (recoveredCount int64, err error)

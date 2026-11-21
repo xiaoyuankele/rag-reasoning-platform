@@ -217,6 +217,112 @@ func TestSearchServiceNormalizesQueryAndCalculatesPagination(t *testing.T) {
 	}
 }
 
+func TestSearchServiceNormalizesMultipleTerms(t *testing.T) {
+	searcher := &fakeChunkSearcher{
+		searchFunc: func(
+			_ context.Context,
+			_ accessdomain.OwnerScope,
+			options documentdomain.SearchOptions,
+		) (documentdomain.SearchResult, error) {
+			want := documentdomain.SearchOptions{
+				Terms:    []string{"磁悬浮", "振动"},
+				Operator: documentdomain.SearchOperatorAll,
+				Limit:    20,
+			}
+			if !reflect.DeepEqual(options, want) {
+				t.Fatalf("Search() options = %+v, want %+v", options, want)
+			}
+			return documentdomain.SearchResult{}, nil
+		},
+	}
+	service := NewSearchService(searcher)
+
+	output, err := service.Search(
+		context.Background(),
+		testOwnerScope(t),
+		SearchInput{
+			Terms:    []string{" 磁悬浮 ", "振动", "磁悬浮"},
+			Page:     1,
+			PageSize: 20,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Search() error = %v, want nil", err)
+	}
+	if output.Query != "" ||
+		!reflect.DeepEqual(output.Terms, []string{"磁悬浮", "振动"}) ||
+		output.Operator != documentdomain.SearchOperatorAll ||
+		output.Within != documentdomain.SearchWithinChunk {
+		t.Fatalf("Search() output metadata = %+v", output)
+	}
+}
+
+func TestSearchServiceRejectsInvalidMultipleTermInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     SearchInput
+		wantedErr error
+	}{
+		{
+			name:      "phrase and terms conflict",
+			input:     SearchInput{Query: "磁悬浮", Terms: []string{"振动", "控制"}},
+			wantedErr: ErrSearchInputConflict,
+		},
+		{
+			name:      "only one unique term",
+			input:     SearchInput{Terms: []string{"Maglev", " maglev "}},
+			wantedErr: ErrInvalidSearchTermCount,
+		},
+		{
+			name:      "too many terms",
+			input:     SearchInput{Terms: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9"}},
+			wantedErr: ErrInvalidSearchTermCount,
+		},
+		{
+			name:      "invalid UTF-8 term",
+			input:     SearchInput{Terms: []string{"valid", string([]byte{0xff})}},
+			wantedErr: ErrSearchTermInvalidUTF8,
+		},
+		{
+			name:      "single term too long",
+			input:     SearchInput{Terms: []string{strings.Repeat("磁", MaxSearchTermRunes+1), "振动"}},
+			wantedErr: ErrSearchTermTooLong,
+		},
+		{
+			name:      "all terms too long",
+			input:     SearchInput{Terms: []string{strings.Repeat("磁", 100), strings.Repeat("振", 100), "控制"}},
+			wantedErr: ErrSearchTermsTooLong,
+		},
+		{
+			name:      "invalid operator",
+			input:     SearchInput{Terms: []string{"磁悬浮", "振动"}, Operator: "xor"},
+			wantedErr: ErrInvalidSearchOperator,
+		},
+		{
+			name:      "unsupported range",
+			input:     SearchInput{Terms: []string{"磁悬浮", "振动"}, Within: "sentence"},
+			wantedErr: ErrInvalidSearchWithin,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			searcher := &fakeChunkSearcher{
+				searchFunc: func(context.Context, accessdomain.OwnerScope, documentdomain.SearchOptions) (documentdomain.SearchResult, error) {
+					t.Fatal("searcher must not be called for invalid multi-term input")
+					return documentdomain.SearchResult{}, nil
+				},
+			}
+			test.input.Page = 1
+			test.input.PageSize = 20
+			_, err := NewSearchService(searcher).Search(context.Background(), testOwnerScope(t), test.input)
+			if !errors.Is(err, test.wantedErr) {
+				t.Fatalf("Search() error = %v, want %v", err, test.wantedErr)
+			}
+		})
+	}
+}
+
 func TestSearchServiceReturnsEmptySlice(t *testing.T) {
 	searcher := &fakeChunkSearcher{
 		searchFunc: func(

@@ -4,8 +4,8 @@ param(
     # 传入相对路径时，始终相对于项目根目录解析。
     [string]$OutputRoot = "",
 
-    # 默认会在备份结束后恢复原本正在运行的 backend 容器。
-    # 维护窗口需要继续停机时才显式使用该开关。
+    # 默认会在备份结束后恢复原本正在运行的 API/Worker 写入服务。
+    # 参数名为兼容旧命令保留；维护窗口需要继续停机时才显式使用该开关。
     [switch]$KeepBackendStopped
 )
 
@@ -100,8 +100,8 @@ if ($outputRootPath -eq $storagePath -or
     throw "OutputRoot must not be inside storage, otherwise the archive could include itself"
 }
 
-$backendWasRunning = $false
-$backendStoppedByScript = $false
+$writerServiceNames = @("backend", "document-worker", "embedding-worker", "answer-worker")
+$writerServicesStoppedByScript = @()
 $containerDumpPath = ""
 $postgresContainerID = ""
 $operationError = $null
@@ -141,17 +141,23 @@ try {
         throw "PostgreSQL must be healthy before backup; current status: $postgresHealth"
     }
 
-    $runningBackendID = Get-NativeText -FilePath "docker" `
-        -ArgumentList @("compose", "ps", "--status", "running", "--quiet", "backend") `
-        -Description "inspect backend state"
-    $backendWasRunning = -not [string]::IsNullOrWhiteSpace($runningBackendID)
+    $runningServiceText = Get-NativeText -FilePath "docker" `
+        -ArgumentList @("compose", "ps", "--status", "running", "--services") `
+        -Description "inspect running Compose services"
+    $runningServices = @(
+        $runningServiceText -split "`r?`n" |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    $writerServicesStoppedByScript = @(
+        $writerServiceNames | Where-Object { $runningServices -contains $_ }
+    )
 
-    if ($backendWasRunning) {
-        Write-Host "Stopping backend to freeze database/file writes..."
+    if ($writerServicesStoppedByScript.Count -gt 0) {
+        Write-Host "Stopping API/Worker writers to freeze database/file writes..."
         Invoke-NativeCommand -FilePath "docker" `
-            -ArgumentList @("compose", "stop", "backend") `
-            -Description "stop backend"
-        $backendStoppedByScript = $true
+            -ArgumentList (@("compose", "stop") + $writerServicesStoppedByScript) `
+            -Description "stop API/Worker writers"
     }
 
     $databaseName = Get-NativeText -FilePath "docker" `
@@ -163,6 +169,23 @@ try {
 
     if ([string]::IsNullOrWhiteSpace($databaseName) -or [string]::IsNullOrWhiteSpace($databaseUser)) {
         throw "POSTGRES_DB and POSTGRES_USER must be available inside the container"
+    }
+
+    $schemaMigrationVersionText = Get-NativeText -FilePath "docker" `
+        -ArgumentList @(
+            "compose", "exec", "-T", "postgres",
+            "psql",
+            "--username", $databaseUser,
+            "--dbname", $databaseName,
+            "--tuples-only",
+            "--no-align",
+            "--command", "SELECT COALESCE(MAX(version), 0) FROM schema_migrations;"
+        ) `
+        -Description "read source schema migration version"
+    [int64]$schemaMigrationVersion = 0
+    if (-not [int64]::TryParse($schemaMigrationVersionText, [ref]$schemaMigrationVersion) -or
+        $schemaMigrationVersion -lt 0) {
+        throw "source schema migration version must be a non-negative integer"
     }
 
     New-Item -ItemType Directory -Force -Path $outputRootPath | Out-Null
@@ -214,7 +237,12 @@ SELECT json_build_object(
     'document_jobs', (SELECT COUNT(*) FROM document_jobs),
     'text_chunks', (SELECT COUNT(*) FROM text_chunks),
     'embedding_jobs', (SELECT COUNT(*) FROM embedding_jobs),
-    'chunk_embeddings', (SELECT COUNT(*) FROM chunk_embeddings)
+    'chunk_embeddings', (SELECT COUNT(*) FROM chunk_embeddings),
+    'users', (SELECT COUNT(*) FROM users),
+    'user_sessions', (SELECT COUNT(*) FROM user_sessions),
+    'conversations', (SELECT COUNT(*) FROM conversations),
+    'conversation_messages', (SELECT COUNT(*) FROM conversation_messages),
+    'answer_jobs', (SELECT COUNT(*) FROM answer_jobs)
 )::text;
 "@
     $tableCountsJSON = Get-NativeText -FilePath "docker" `
@@ -247,17 +275,23 @@ SELECT json_build_object(
     $gitCommit = Get-NativeText -FilePath "git" `
         -ArgumentList @("rev-parse", "HEAD") `
         -Description "read Git commit"
+    $gitWorktreeStatus = Get-NativeText -FilePath "git" `
+        -ArgumentList @("status", "--porcelain", "--untracked-files=normal") `
+        -Description "inspect Git worktree state"
+    $gitWorktreeDirty = -not [string]::IsNullOrWhiteSpace($gitWorktreeStatus)
 
     # manifest.json 最后写入。没有 manifest 的目录一律视为未完成备份。
     $manifest = [ordered]@{
-        format_version = 1
+        format_version = 3
         status = "complete"
         backup_id = $backupID
         created_at_utc = $createdAt.ToString("o")
         git_commit = $gitCommit
+        git_worktree_dirty = $gitWorktreeDirty
         database = [ordered]@{
             name = $databaseName
             user = $databaseUser
+            schema_migration_version = $schemaMigrationVersion
             dump_file = $databaseDump.Name
             size_bytes = [int64]$databaseDump.Length
             sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $databaseDumpPath).Hash.ToLowerInvariant()
@@ -287,11 +321,11 @@ finally {
         }
     }
 
-    if ($backendStoppedByScript -and -not $KeepBackendStopped) {
-        Write-Host "Restarting backend because it was running before backup..."
-        & docker compose start backend
+    if ($writerServicesStoppedByScript.Count -gt 0 -and -not $KeepBackendStopped) {
+        Write-Host "Restarting API/Worker writers that were running before backup..."
+        & docker compose start @writerServicesStoppedByScript
         if ($LASTEXITCODE -ne 0) {
-            $restartError = "backup finished, but backend could not be restarted"
+            $restartError = "backup finished, but one or more API/Worker writers could not be restarted"
         }
     }
 

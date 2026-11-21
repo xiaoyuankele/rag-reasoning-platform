@@ -11,11 +11,24 @@ function escapeRegularExpression(value: string): string {
  * 把后端返回的纯文本切成普通片段和命中片段。
  * 组件继续使用 Vue 文本插值渲染，不把文档内容写入 innerHTML。
  */
-export function highlightKeyword(content: string, rawQuery: string): HighlightedTextSegment[] {
-  const query = rawQuery.trim()
-  if (!query) return [{ text: content, highlighted: false }]
+export function highlightKeywords(
+  content: string,
+  rawKeywords: string[],
+): HighlightedTextSegment[] {
+  const seenKeywords = new Set<string>()
+  const keywords = rawKeywords
+    .map((keyword) => keyword.trim())
+    .filter((keyword) => {
+      if (!keyword) return false
+      const key = keyword.toLocaleLowerCase()
+      if (seenKeywords.has(key)) return false
+      seenKeywords.add(key)
+      return true
+    })
+    .sort((left, right) => [...right].length - [...left].length)
+  if (keywords.length === 0) return [{ text: content, highlighted: false }]
 
-  const matcher = new RegExp(escapeRegularExpression(query), 'giu')
+  const matcher = new RegExp(keywords.map(escapeRegularExpression).join('|'), 'giu')
   const segments: HighlightedTextSegment[] = []
   let cursor = 0
 
@@ -37,4 +50,8 @@ export function highlightKeyword(content: string, rawQuery: string): Highlighted
   }
 
   return segments
+}
+
+export function highlightKeyword(content: string, rawQuery: string): HighlightedTextSegment[] {
+  return highlightKeywords(content, [rawQuery])
 }

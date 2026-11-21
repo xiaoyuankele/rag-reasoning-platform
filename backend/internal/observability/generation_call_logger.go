@@ -32,7 +32,14 @@ func (l *GenerationCallLogger) ObserveGenerationEvent(
 		slog.String("model_name", event.ModelName),
 		slog.String("response_language", string(event.ResponseLanguage)),
 		slog.Int("requested_top_k", event.RequestedTopK),
+		slog.Int("candidate_evidence_count", event.CandidateEvidenceCount),
 		slog.Int("evidence_count", event.EvidenceCount),
+		slog.Bool("evidence_budget_truncated", event.EvidenceBudgetTruncated),
+		slog.Int("history_message_count", event.HistoryMessageCount),
+		slog.Int("history_turn_count", event.HistoryTurnCount),
+		slog.Int("history_estimated_tokens", event.HistoryEstimatedTokens),
+		slog.Bool("history_truncated", event.HistoryTruncated),
+		slog.Int("estimated_input_tokens", event.EstimatedInputTokens),
 	}
 
 	if requestID, ok := RequestIDFromContext(ctx); ok {

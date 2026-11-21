@@ -38,6 +38,7 @@ func TestEmbeddingJobLoggerWritesRetryAndCostFields(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(&output, nil))
 	observer := NewEmbeddingJobLogger(logger)
 	nextAttemptAt := time.Date(2026, time.August, 15, 10, 1, 0, 0, time.UTC)
+	finalizationDuration := 15 * time.Millisecond
 	providerError := errors.New("provider rate limited")
 
 	observer.ObserveEmbeddingJobEvent(
@@ -52,10 +53,12 @@ func TestEmbeddingJobLoggerWritesRetryAndCostFields(t *testing.T) {
 			Status:               embeddingdomain.JobStatusQueued,
 			Duration:             2500 * time.Millisecond,
 			ProviderDuration:     2 * time.Second,
+			FinalizationDuration: &finalizationDuration,
 			ProviderCallCount:    2,
 			PromptTokens:         40,
 			TotalTokens:          40,
 			GeneratedVectorCount: 5,
+			RetryCount:           1,
 			NextAttemptAt:        &nextAttemptAt,
 			ErrorCategory:        embeddingapplication.JobErrorCategoryProviderRateLimit,
 			Err:                  providerError,
@@ -76,8 +79,13 @@ func TestEmbeddingJobLoggerWritesRetryAndCostFields(t *testing.T) {
 	assertNumericLogField(t, entry, "embedding_job_id", 27)
 	assertNumericLogField(t, entry, "document_id", 31)
 	assertNumericLogField(t, entry, "provider_call_count", 2)
+	assertNumericLogField(t, entry, "finalization_duration_ms", 15)
 	assertNumericLogField(t, entry, "prompt_tokens", 40)
 	assertNumericLogField(t, entry, "generated_vector_count", 5)
+	assertNumericLogField(t, entry, "retry_count", 1)
+	if recovered, ok := entry["recovered"].(bool); !ok || recovered {
+		t.Fatalf("recovered = %#v, want false", entry["recovered"])
+	}
 	if entry["error"] != providerError.Error() {
 		t.Fatalf("error = %#v, want %q", entry["error"], providerError.Error())
 	}

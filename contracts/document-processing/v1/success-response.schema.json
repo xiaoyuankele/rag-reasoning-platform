@@ -23,6 +23,68 @@
     "status": {
       "const": "succeeded"
     },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "python_total_ms",
+        "source_open_ms",
+        "metadata_read_ms",
+        "text_extract_ms",
+        "text_split_ms",
+        "page_count",
+        "slowest_page_number",
+        "slowest_page_ms"
+      ],
+      "properties": {
+        "python_total_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "source_open_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "metadata_read_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "text_extract_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "text_split_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "page_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "slowest_page_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "slowest_page_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
     "chunks": {
       "type": "array",
       "minItems": 1,

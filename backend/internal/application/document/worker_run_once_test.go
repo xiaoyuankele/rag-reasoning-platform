@@ -50,8 +50,10 @@ type fakeWorkerChunkReplacer struct {
 	replaceCalls int
 }
 
-func (f *fakeWorkerChunkReplacer) ReplaceForDocument(
+func (f *fakeWorkerChunkReplacer) ReplaceForProcessingJob(
 	ctx context.Context,
+	_ int64,
+	_ string,
 	documentID int64,
 	chunks []documentdomain.ChunkInput,
 ) error {
@@ -61,6 +63,124 @@ func (f *fakeWorkerChunkReplacer) ReplaceForDocument(
 	}
 
 	return f.replaceFunc(ctx, documentID, chunks)
+}
+
+func TestWorkerRunOnceRenewsLeaseWhileProcessorIsRunning(t *testing.T) {
+	renewed := make(chan struct{}, 2)
+	job := documentdomain.ProcessingJob{
+		ID:           91,
+		DocumentID:   41,
+		Status:       documentdomain.ProcessingJobStatusProcessing,
+		AttemptCount: 1,
+		LeaseToken:   "lease-91",
+	}
+	jobs := &fakeProcessingJobClaimer{
+		claimNextFunc: func(context.Context) (documentdomain.ProcessingJob, error) {
+			return job, nil
+		},
+		renewLeaseFunc: func(_ context.Context, jobID int64, token string) error {
+			if jobID != job.ID || token != job.LeaseToken {
+				return errors.New("renew lease received unexpected job or token")
+			}
+			select {
+			case renewed <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	}
+	documents := &fakeWorkerDocumentFinder{
+		getByIDFunc: func(context.Context, int64) (documentdomain.Document, error) {
+			return documentdomain.Document{ID: job.DocumentID}, nil
+		},
+	}
+	processor := &fakeDocumentProcessor{
+		processFunc: func(ctx context.Context, _ documentdomain.Document) (ProcessingResult, error) {
+			// 不使用 Sleep 猜测调度次数。处理器等待两个真实续租信号后再返回，
+			// 直接建立“处理仍在运行 → 心跳持续执行”的因果关系。
+			for renewal := 0; renewal < 2; renewal++ {
+				select {
+				case <-renewed:
+				case <-ctx.Done():
+					return ProcessingResult{}, ctx.Err()
+				case <-time.After(time.Second):
+					return ProcessingResult{}, errors.New(
+						"timed out waiting for processing job lease renewal",
+					)
+				}
+			}
+			return ProcessingResult{}, nil
+		},
+	}
+
+	worker, err := NewWorkerWithHeartbeatInterval(
+		jobs,
+		documents,
+		processor,
+		&fakeWorkerChunkReplacer{},
+		newRecordingProcessingJobEventObserver(),
+		time.Second,
+		5*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("NewWorkerWithHeartbeatInterval() error = %v", err)
+	}
+	if handled, runErr := worker.RunOnce(context.Background()); runErr != nil || !handled {
+		t.Fatalf("RunOnce() handled=%t error=%v, want true/nil", handled, runErr)
+	}
+	if jobs.renewLeaseCalls < 2 {
+		t.Fatalf("RenewProcessingJobLease() calls = %d, want at least 2", jobs.renewLeaseCalls)
+	}
+}
+
+func TestWorkerRunOnceStopsWhenLeaseRenewalFails(t *testing.T) {
+	leaseFailure := errors.New("lease database unavailable")
+	job := documentdomain.ProcessingJob{
+		ID:           92,
+		DocumentID:   42,
+		Status:       documentdomain.ProcessingJobStatusProcessing,
+		AttemptCount: 1,
+		LeaseToken:   "lease-92",
+	}
+	jobs := &fakeProcessingJobClaimer{
+		claimNextFunc: func(context.Context) (documentdomain.ProcessingJob, error) {
+			return job, nil
+		},
+		renewLeaseFunc: func(context.Context, int64, string) error {
+			return leaseFailure
+		},
+	}
+	documents := &fakeWorkerDocumentFinder{
+		getByIDFunc: func(context.Context, int64) (documentdomain.Document, error) {
+			return documentdomain.Document{ID: job.DocumentID}, nil
+		},
+	}
+	processor := &fakeDocumentProcessor{
+		processFunc: func(ctx context.Context, _ documentdomain.Document) (ProcessingResult, error) {
+			<-ctx.Done()
+			return ProcessingResult{}, ctx.Err()
+		},
+	}
+
+	worker, err := NewWorkerWithHeartbeatInterval(
+		jobs,
+		documents,
+		processor,
+		&fakeWorkerChunkReplacer{},
+		newRecordingProcessingJobEventObserver(),
+		time.Second,
+		5*time.Millisecond,
+	)
+	if err != nil {
+		t.Fatalf("NewWorkerWithHeartbeatInterval() error = %v", err)
+	}
+	handled, runErr := worker.RunOnce(context.Background())
+	if !handled || !errors.Is(runErr, leaseFailure) {
+		t.Fatalf("RunOnce() handled=%t error=%v, want true/lease failure", handled, runErr)
+	}
+	if jobs.markSucceededCalls != 0 || jobs.markFailedCalls != 0 {
+		t.Fatal("lost lease must not finalize the job")
+	}
 }
 
 func TestWorkerRunOnceReturnsIdleWhenQueueIsEmpty(t *testing.T) {
@@ -138,11 +258,22 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 	expectedDocument := documentdomain.Document{
 		ID:          expectedJob.DocumentID,
 		StoragePath: "documents/example.pdf",
+		SizeBytes:   4096,
 		Status:      documentdomain.StatusProcessing,
 	}
 	expectedChunks := []documentdomain.ChunkInput{
 		{Index: 0, Content: "first normalized chunk"},
 		{Index: 1, Content: "second normalized chunk"},
+	}
+	expectedProcessorStages := &documentdomain.ProcessorStageMetrics{
+		TotalDuration:        75 * time.Millisecond,
+		SourceOpenDuration:   5 * time.Millisecond,
+		MetadataReadDuration: time.Millisecond,
+		TextExtractDuration:  60 * time.Millisecond,
+		TextSplitDuration:    4 * time.Millisecond,
+		PageCount:            3,
+		SlowestPageNumber:    2,
+		SlowestPageDuration:  30 * time.Millisecond,
 	}
 	detectedTitle := "Maglev control study"
 	jobs := &fakeProcessingJobClaimer{
@@ -169,6 +300,39 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 					"completion detected title = %v, want %q",
 					completion.DetectedTitle,
 					detectedTitle,
+				)
+			}
+			if completion.Metrics.FileBytes != expectedDocument.SizeBytes {
+				t.Fatalf(
+					"completion file bytes = %d, want %d",
+					completion.Metrics.FileBytes,
+					expectedDocument.SizeBytes,
+				)
+			}
+			if completion.Metrics.ChunkCount != len(expectedChunks) {
+				t.Fatalf(
+					"completion chunk count = %d, want %d",
+					completion.Metrics.ChunkCount,
+					len(expectedChunks),
+				)
+			}
+			if completion.Metrics.ErrorCode != documentdomain.ProcessingErrorCodeNone {
+				t.Fatalf(
+					"completion error code = %q, want empty",
+					completion.Metrics.ErrorCode,
+				)
+			}
+			if completion.Metrics.ChunkWriteDuration == nil {
+				t.Fatal("completion chunk write duration is nil")
+			}
+			if !reflect.DeepEqual(
+				completion.Metrics.ProcessorStages,
+				expectedProcessorStages,
+			) {
+				t.Fatalf(
+					"completion processor stages = %+v, want %+v",
+					completion.Metrics.ProcessorStages,
+					expectedProcessorStages,
 				)
 			}
 			return nil
@@ -204,6 +368,7 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 			return ProcessingResult{
 				DetectedTitle: &detectedTitle,
 				Chunks:        expectedChunks,
+				Metrics:       expectedProcessorStages,
 			}, nil
 		},
 	}
@@ -289,8 +454,38 @@ func TestWorkerRunOnceMarksSuccessfulProcessing(t *testing.T) {
 	if events.events[1].Err != nil {
 		t.Fatalf("succeeded event error = %v, want nil", events.events[1].Err)
 	}
-	if events.events[1].Duration < 0 {
-		t.Fatalf("succeeded event duration = %s, want non-negative", events.events[1].Duration)
+	if events.events[1].TotalDuration < 0 {
+		t.Fatalf("succeeded event duration = %s, want non-negative", events.events[1].TotalDuration)
+	}
+	if events.events[1].FileBytes != expectedDocument.SizeBytes {
+		t.Fatalf(
+			"succeeded event file bytes = %d, want %d",
+			events.events[1].FileBytes,
+			expectedDocument.SizeBytes,
+		)
+	}
+	if events.events[1].ChunkCount != len(expectedChunks) {
+		t.Fatalf(
+			"succeeded event chunk count = %d, want %d",
+			events.events[1].ChunkCount,
+			len(expectedChunks),
+		)
+	}
+	if events.events[1].ChunkWriteDuration == nil {
+		t.Fatal("succeeded event chunk write duration is nil")
+	}
+	if events.events[1].FinalizeDuration == nil {
+		t.Fatal("succeeded event finalize duration is nil")
+	}
+	if !reflect.DeepEqual(
+		events.events[1].ProcessorStages,
+		expectedProcessorStages,
+	) {
+		t.Fatalf(
+			"succeeded event processor stages = %+v, want %+v",
+			events.events[1].ProcessorStages,
+			expectedProcessorStages,
+		)
 	}
 }
 
@@ -382,7 +577,7 @@ func TestWorkerRunOnceMarksFailedProcessing(t *testing.T) {
 		markFailedFunc: func(
 			_ context.Context,
 			jobID int64,
-			errorMessage string,
+			failure documentdomain.ProcessingFailure,
 		) error {
 			if jobID != expectedJob.ID {
 				t.Fatalf(
@@ -391,11 +586,18 @@ func TestWorkerRunOnceMarksFailedProcessing(t *testing.T) {
 					expectedJob.ID,
 				)
 			}
-			if errorMessage != safeProcessingFailureMessage {
+			if failure.Message != safeProcessingFailureMessage {
 				t.Fatalf(
 					"failure message = %q, want %q",
-					errorMessage,
+					failure.Message,
 					safeProcessingFailureMessage,
+				)
+			}
+			if failure.Metrics.ErrorCode != documentdomain.ProcessingErrorCodeProcessor {
+				t.Fatalf(
+					"failure error code = %q, want %q",
+					failure.Metrics.ErrorCode,
+					documentdomain.ProcessingErrorCodeProcessor,
 				)
 			}
 			return nil
@@ -495,7 +697,7 @@ func TestWorkerRunOnceMarksTimedOutProcessingFailed(t *testing.T) {
 		markFailedFunc: func(
 			ctx context.Context,
 			jobID int64,
-			errorMessage string,
+			failure documentdomain.ProcessingFailure,
 		) error {
 			// 数据库收尾必须使用仍然有效的父 context，不能使用
 			// 已经发生 DeadlineExceeded 的 processContext。
@@ -512,11 +714,18 @@ func TestWorkerRunOnceMarksTimedOutProcessingFailed(t *testing.T) {
 					expectedJob.ID,
 				)
 			}
-			if errorMessage != safeProcessingTimeoutMessage {
+			if failure.Message != safeProcessingTimeoutMessage {
 				t.Fatalf(
 					"failure message = %q, want %q",
-					errorMessage,
+					failure.Message,
 					safeProcessingTimeoutMessage,
+				)
+			}
+			if failure.Metrics.ErrorCode != documentdomain.ProcessingErrorCodeProcessorTimeout {
+				t.Fatalf(
+					"failure error code = %q, want %q",
+					failure.Metrics.ErrorCode,
+					documentdomain.ProcessingErrorCodeProcessorTimeout,
 				)
 			}
 			return nil
@@ -615,7 +824,7 @@ func TestWorkerRunOnceMarksFailedWhenChunkReplacementFails(t *testing.T) {
 		markFailedFunc: func(
 			_ context.Context,
 			jobID int64,
-			errorMessage string,
+			failure documentdomain.ProcessingFailure,
 		) error {
 			steps = append(steps, "mark failed")
 			if jobID != expectedJob.ID {
@@ -625,11 +834,18 @@ func TestWorkerRunOnceMarksFailedWhenChunkReplacementFails(t *testing.T) {
 					expectedJob.ID,
 				)
 			}
-			if errorMessage != safeProcessingFailureMessage {
+			if failure.Message != safeProcessingFailureMessage {
 				t.Fatalf(
 					"failure message = %q, want %q",
-					errorMessage,
+					failure.Message,
 					safeProcessingFailureMessage,
+				)
+			}
+			if failure.Metrics.ErrorCode != documentdomain.ProcessingErrorCodeChunkWrite {
+				t.Fatalf(
+					"failure error code = %q, want %q",
+					failure.Metrics.ErrorCode,
+					documentdomain.ProcessingErrorCodeChunkWrite,
 				)
 			}
 			return nil
@@ -745,7 +961,7 @@ func TestWorkerRunOncePreservesChunkAndFailureFinalizationErrors(
 		markFailedFunc: func(
 			context.Context,
 			int64,
-			string,
+			documentdomain.ProcessingFailure,
 		) error {
 			return finalizationError
 		},
@@ -835,7 +1051,7 @@ func TestWorkerRunOncePreservesProcessingAndFailureFinalizationErrors(
 		markFailedFunc: func(
 			context.Context,
 			int64,
-			string,
+			documentdomain.ProcessingFailure,
 		) error {
 			return finalizationError
 		},

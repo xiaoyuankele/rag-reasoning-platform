@@ -280,3 +280,87 @@ func TestLocalStorageResolveAbsolutePathRejectsInvalidPath(t *testing.T) {
 		)
 	}
 }
+
+func TestLocalStorageMaterializeReturnsManagedFileWithoutDeletingIt(t *testing.T) {
+	rootDirectory := t.TempDir()
+	storage, err := NewLocalStorage(rootDirectory, 1024)
+	if err != nil {
+		t.Fatalf("create local storage: %v", err)
+	}
+
+	storedFile, err := storage.Save(
+		context.Background(),
+		"document.pdf",
+		strings.NewReader("%PDF-1.7\n%%EOF"),
+	)
+	if err != nil {
+		t.Fatalf("save PDF: %v", err)
+	}
+
+	localPath, release, err := storage.Materialize(
+		context.Background(),
+		storedFile.StoragePath,
+	)
+	if err != nil {
+		t.Fatalf("Materialize() error = %v, want nil", err)
+	}
+	if !filepath.IsAbs(localPath) {
+		t.Fatalf("materialized path = %q, want absolute", localPath)
+	}
+	if release == nil {
+		t.Fatal("Materialize() release = nil")
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release materialized file: %v", err)
+	}
+
+	// LocalStorage 返回的是正式文件，不是临时下载副本。release 只统一调用
+	// 契约，不能删除仍由 documents 记录管理的文件。
+	if _, err := os.Stat(localPath); err != nil {
+		t.Fatalf("inspect stored file after release: %v", err)
+	}
+}
+
+func TestLocalStorageMaterializeHonorsContextAndPathSafety(t *testing.T) {
+	storage, err := NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("create local storage: %v", err)
+	}
+
+	t.Run("canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		localPath, release, err := storage.Materialize(
+			ctx,
+			"documents/source.pdf",
+		)
+		if localPath != "" || release != nil {
+			t.Fatalf(
+				"Materialize() returned path %q and release %v for canceled context",
+				localPath,
+				release != nil,
+			)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Materialize() error = %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("invalid storage key", func(t *testing.T) {
+		localPath, release, err := storage.Materialize(
+			context.Background(),
+			"../outside.pdf",
+		)
+		if localPath != "" || release != nil {
+			t.Fatalf(
+				"Materialize() returned path %q and release %v for invalid key",
+				localPath,
+				release != nil,
+			)
+		}
+		if !errors.Is(err, ErrInvalidStoragePath) {
+			t.Fatalf("Materialize() error = %v, want ErrInvalidStoragePath", err)
+		}
+	})
+}

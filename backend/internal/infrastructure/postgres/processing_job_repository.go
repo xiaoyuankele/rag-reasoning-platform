@@ -2,8 +2,11 @@ package postgres
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -14,21 +17,75 @@ import (
 
 // ProcessingJobRepository 使用 PostgreSQL 保存解析任务。
 type ProcessingJobRepository struct {
-	pool *pgxpool.Pool
+	pool             *pgxpool.Pool
+	schedulingPolicy document.ProcessingJobSchedulingPolicy
+	leasePolicy      document.ProcessingJobLeasePolicy
+	newLeaseToken    func() (string, error)
+}
+
+var defaultProcessingJobSchedulingPolicy = document.ProcessingJobSchedulingPolicy{
+	MaxInFlightPerOwner:         1,
+	MaxBorrowedInFlightPerOwner: 2,
+	StarvationThreshold:         2 * time.Minute,
+}
+
+var defaultProcessingJobLeasePolicy = document.ProcessingJobLeasePolicy{
+	WorkerID:      "document-worker",
+	LeaseDuration: time.Minute,
 }
 
 var _ document.ProcessingJobCreator = (*ProcessingJobRepository)(nil)
 var _ document.ProcessingJobFinder = (*ProcessingJobRepository)(nil)
 var _ document.ProcessingJobClaimer = (*ProcessingJobRepository)(nil)
 var _ document.ProcessingJobFinalizer = (*ProcessingJobRepository)(nil)
+var _ document.ProcessingJobLeaseRenewer = (*ProcessingJobRepository)(nil)
+var _ document.ExpiredProcessingJobRecoverer = (*ProcessingJobRepository)(nil)
 
 // NewProcessingJobRepository 创建 PostgreSQL 解析任务仓储。
 func NewProcessingJobRepository(
 	pool *pgxpool.Pool,
 ) *ProcessingJobRepository {
+	return NewProcessingJobRepositoryWithSchedulingPolicy(
+		pool,
+		defaultProcessingJobSchedulingPolicy,
+	)
+}
+
+// NewProcessingJobRepositoryWithSchedulingPolicy 创建使用指定 Owner 公平策略的仓储。
+func NewProcessingJobRepositoryWithSchedulingPolicy(
+	pool *pgxpool.Pool,
+	policy document.ProcessingJobSchedulingPolicy,
+) *ProcessingJobRepository {
+	return NewProcessingJobRepositoryWithPolicies(
+		pool,
+		policy,
+		defaultProcessingJobLeasePolicy,
+	)
+}
+
+// NewProcessingJobRepositoryWithPolicies 创建同时使用 Owner 公平调度和
+// 持久化任务租约的仓储。租约策略在领取、续租和 fencing 校验中共享。
+func NewProcessingJobRepositoryWithPolicies(
+	pool *pgxpool.Pool,
+	schedulingPolicy document.ProcessingJobSchedulingPolicy,
+	leasePolicy document.ProcessingJobLeasePolicy,
+) *ProcessingJobRepository {
 	return &ProcessingJobRepository{
-		pool: pool,
+		pool:             pool,
+		schedulingPolicy: schedulingPolicy,
+		leasePolicy:      leasePolicy,
+		newLeaseToken:    newProcessingJobLeaseToken,
 	}
+}
+
+// newProcessingJobLeaseToken 使用密码学安全随机数产生 fencing token。
+// token 不承担用户认证，只需要在并发 Worker 之间不可预测且几乎不碰撞。
+func newProcessingJobLeaseToken() (string, error) {
+	bytes := make([]byte, 16)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", fmt.Errorf("read processing job lease randomness: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
 }
 
 // CreateProcessingJob 为文档创建 queued 状态的解析任务。
@@ -36,7 +93,49 @@ func (r *ProcessingJobRepository) CreateProcessingJob(
 	ctx context.Context,
 	documentID int64,
 ) (document.ProcessingJob, error) {
-	const query = `
+	transaction, err := r.pool.Begin(ctx)
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"begin processing job transaction: %w",
+			err,
+		)
+	}
+	defer func() {
+		_ = transaction.Rollback(context.Background())
+	}()
+
+	// 系统级创建入口仍要补齐 Owner 调度行，保证测试、维护命令和未来内部
+	// 调用不会绕过公平调度。owner_user_id 已由第 12 号迁移设为 NOT NULL。
+	const lockDocumentQuery = `
+		SELECT owner_user_id
+		FROM documents
+		WHERE id = $1
+		FOR SHARE
+	`
+	var ownerUserID int64
+	err = transaction.QueryRow(
+		ctx,
+		lockDocumentQuery,
+		documentID,
+	).Scan(&ownerUserID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return document.ProcessingJob{}, document.ErrNotFound
+	}
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"lock document before creating processing job: %w",
+			err,
+		)
+	}
+	if err := ensureProcessingOwnerSchedule(
+		ctx,
+		transaction,
+		ownerUserID,
+	); err != nil {
+		return document.ProcessingJob{}, err
+	}
+
+	const insertJobQuery = `
 		INSERT INTO document_jobs (document_id)
 		VALUES ($1)
 		RETURNING
@@ -51,7 +150,7 @@ func (r *ProcessingJobRepository) CreateProcessingJob(
 			completed_at
 	`
 
-	row := r.pool.QueryRow(ctx, query, documentID)
+	row := transaction.QueryRow(ctx, insertJobQuery, documentID)
 	createdJob, err := scanProcessingJob(row)
 	if isConstraintViolation(err, "uq_document_jobs_active") {
 		return document.ProcessingJob{},
@@ -64,6 +163,12 @@ func (r *ProcessingJobRepository) CreateProcessingJob(
 	if err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
 			"create document processing job: %w",
+			err,
+		)
+	}
+	if err := transaction.Commit(ctx); err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"commit processing job: %w",
 			err,
 		)
 	}
@@ -107,15 +212,32 @@ func (r *ProcessingJobRepository) GetProcessingJobByID(
 	return foundJob, nil
 }
 
-// ClaimNextProcessingJob 原子领取创建时间最早的 queued 任务。
+// ClaimNextProcessingJob 按 Owner 公平策略原子领取下一条 queued 任务。
 //
-// FOR UPDATE SKIP LOCKED 会跳过已经被其他 Worker 锁定的任务，
-// 防止多个 Worker 同时领取同一条记录。任务和文档的状态更新位于
-// 同一事务中，外部只能同时看到更新前或更新后的状态。
+// 第一遍优先选择尚未达到基础并发上限的 Owner；只有没有此类 Owner 时，
+// 第二遍才允许借用空闲容量。Owner 调度行与任务都使用 FOR UPDATE
+// SKIP LOCKED，防止多个 Worker 同时选择同一个 Owner 或同一条任务。
 func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 	ctx context.Context,
 ) (document.ProcessingJob, error) {
-	transaction, err := r.pool.Begin(ctx)
+	if !r.schedulingPolicy.IsValid() {
+		return document.ProcessingJob{},
+			document.ErrInvalidProcessingJobSchedulingPolicy
+	}
+	if !r.leasePolicy.IsValid() {
+		return document.ProcessingJob{},
+			document.ErrInvalidProcessingJobLeasePolicy
+	}
+
+	leaseToken, err := r.newLeaseToken()
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"create processing job lease token: %w",
+			err,
+		)
+	}
+
+	transaction, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
 			"begin claim processing job transaction: %w",
@@ -126,7 +248,33 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 		_ = transaction.Rollback(context.Background())
 	}()
 
-	const selectQuery = `
+	ownerUserID, err := selectNextProcessingOwner(
+		ctx,
+		transaction,
+		r.schedulingPolicy.MaxInFlightPerOwner,
+		r.schedulingPolicy.StarvationThreshold,
+	)
+	if errors.Is(err, pgx.ErrNoRows) &&
+		r.schedulingPolicy.MaxBorrowedInFlightPerOwner >
+			r.schedulingPolicy.MaxInFlightPerOwner {
+		ownerUserID, err = selectNextProcessingOwner(
+			ctx,
+			transaction,
+			r.schedulingPolicy.MaxBorrowedInFlightPerOwner,
+			r.schedulingPolicy.StarvationThreshold,
+		)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return document.ProcessingJob{}, document.ErrNoQueuedProcessingJob
+	}
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"select next processing job owner: %w",
+			err,
+		)
+	}
+
+	const selectJobQuery = `
 		SELECT
 			j.id,
 			j.document_id,
@@ -141,17 +289,19 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 		INNER JOIN documents AS d ON d.id = j.document_id
 		WHERE j.status = 'queued'
 			AND d.status IN ('uploaded', 'failed')
+			AND d.owner_user_id = $1
 		ORDER BY j.created_at ASC, j.id ASC
 		FOR UPDATE OF j, d SKIP LOCKED
 		LIMIT 1
 	`
 
 	queuedJob, err := scanProcessingJob(
-		transaction.QueryRow(ctx, selectQuery),
+		transaction.QueryRow(ctx, selectJobQuery, ownerUserID),
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return document.ProcessingJob{},
-			document.ErrNoQueuedProcessingJob
+		// Owner 调度行已锁定，正常 Worker 不会并发领取该 Owner；若任务在
+		// 两条语句之间被删除，本轮视为空队列并由下一次轮询重新选择。
+		return document.ProcessingJob{}, document.ErrNoQueuedProcessingJob
 	}
 	if err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
@@ -166,9 +316,28 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 			status = 'processing',
 			attempt_count = attempt_count + 1,
 			error_message = NULL,
+			error_code = NULL,
+			queue_wait_ms = NULL,
+			processor_ms = NULL,
+			chunk_write_ms = NULL,
+			python_total_ms = NULL,
+			source_open_ms = NULL,
+			metadata_read_ms = NULL,
+			text_extract_ms = NULL,
+			text_split_ms = NULL,
+			page_count = NULL,
+			slowest_page_number = NULL,
+			slowest_page_ms = NULL,
+			total_ms = NULL,
+			file_bytes = NULL,
+			chunk_count = NULL,
 			updated_at = CURRENT_TIMESTAMP,
 			started_at = CURRENT_TIMESTAMP,
-			completed_at = NULL
+			completed_at = NULL,
+			worker_id = $2,
+			lease_token = $3,
+			lease_expires_at = CURRENT_TIMESTAMP + ($4::BIGINT * INTERVAL '1 millisecond'),
+			heartbeat_at = CURRENT_TIMESTAMP
 		WHERE id = $1
 			AND status = 'queued'
 		RETURNING
@@ -180,11 +349,19 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 			created_at,
 			updated_at,
 			started_at,
-			completed_at
+			completed_at,
+			lease_token
 	`
 
-	claimedJob, err := scanProcessingJob(
-		transaction.QueryRow(ctx, updateJobQuery, queuedJob.ID),
+	claimedJob, err := scanClaimedProcessingJob(
+		transaction.QueryRow(
+			ctx,
+			updateJobQuery,
+			queuedJob.ID,
+			r.leasePolicy.WorkerID,
+			leaseToken,
+			r.leasePolicy.LeaseDuration.Milliseconds(),
+		),
 	)
 	if err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
@@ -221,6 +398,40 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 		)
 	}
 
+	// 文档进入 processing 后，旧 chunks/embeddings 不再是当前正式语料。
+	// 在同一事务递增版本，确保已经缓存的问答不能继续返回旧证据。
+	if err := bumpOwnerCorpusRevision(ctx, transaction, ownerUserID); err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"invalidate answer cache after processing starts: %w",
+			err,
+		)
+	}
+
+	const updateScheduleQuery = `
+		UPDATE document_processing_owner_schedules
+		SET
+			last_dispatched_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE owner_user_id = $1
+	`
+	scheduleCommandTag, err := transaction.Exec(
+		ctx,
+		updateScheduleQuery,
+		ownerUserID,
+	)
+	if err != nil {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"update processing owner schedule: %w",
+			err,
+		)
+	}
+	if scheduleCommandTag.RowsAffected() != 1 {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"update processing owner schedule: expected 1 updated row, got %d",
+			scheduleCommandTag.RowsAffected(),
+		)
+	}
+
 	if err := transaction.Commit(ctx); err != nil {
 		return document.ProcessingJob{}, fmt.Errorf(
 			"commit claimed processing job: %w",
@@ -231,20 +442,111 @@ func (r *ProcessingJobRepository) ClaimNextProcessingJob(
 	return claimedJob, nil
 }
 
+// selectNextProcessingOwner 锁定一个符合并发上限的 Owner 调度行。
+// 防饥饿 Owner 优先；其余 Owner 按最近派发时间和最老 queued 时间排序。
+func selectNextProcessingOwner(
+	ctx context.Context,
+	transaction pgx.Tx,
+	maxInFlight int,
+	starvationThreshold time.Duration,
+) (int64, error) {
+	const query = `
+		SELECT schedule.owner_user_id
+		FROM document_processing_owner_schedules AS schedule
+		JOIN LATERAL (
+			SELECT MIN(job.created_at) AS oldest_queued_at
+			FROM document_jobs AS job
+			JOIN documents AS source_document
+			  ON source_document.id = job.document_id
+			WHERE source_document.owner_user_id = schedule.owner_user_id
+			  AND source_document.status IN ('uploaded', 'failed')
+			  AND job.status = 'queued'
+		) AS queued_work
+		  ON queued_work.oldest_queued_at IS NOT NULL
+		JOIN LATERAL (
+			SELECT COUNT(*) AS in_flight_count
+			FROM document_jobs AS job
+			JOIN documents AS source_document
+			  ON source_document.id = job.document_id
+			WHERE source_document.owner_user_id = schedule.owner_user_id
+			  AND job.status = 'processing'
+		) AS active_work ON TRUE
+		WHERE active_work.in_flight_count < $1
+		ORDER BY
+			CASE
+				WHEN queued_work.oldest_queued_at <=
+					CURRENT_TIMESTAMP - ($2::BIGINT * INTERVAL '1 millisecond')
+				THEN 0
+				ELSE 1
+			END,
+			schedule.last_dispatched_at ASC NULLS FIRST,
+			queued_work.oldest_queued_at ASC,
+			schedule.owner_user_id ASC
+		FOR UPDATE OF schedule SKIP LOCKED
+		LIMIT 1
+	`
+
+	const recheck = `SELECT count(*) < $2 FROM document_jobs AS j JOIN documents AS d ON d.id = j.document_id
+		WHERE d.owner_user_id = $1 AND j.status = 'processing'`
+	return selectLockedJobOwner(ctx, transaction, query, recheck, maxInFlight, starvationThreshold)
+}
+
+// A ranked candidate may become full after its statement snapshot but before
+// FOR UPDATE SKIP LOCKED takes its schedule lock. Use a fresh READ COMMITTED
+// statement under that lock, which the caller holds through the claim. If it
+// filled, re-rank at the same limit before considering borrowed slots.
+func selectLockedJobOwner(ctx context.Context, tx pgx.Tx, candidates, recheck string, limit int, starvation time.Duration) (int64, error) {
+	for {
+		var ownerID int64
+		if err := tx.QueryRow(ctx, candidates, limit, starvation.Milliseconds()).Scan(&ownerID); err != nil {
+			return 0, err
+		}
+		var hasSlot bool
+		if err := tx.QueryRow(ctx, recheck, ownerID, limit).Scan(&hasSlot); err != nil {
+			return 0, err
+		}
+		if hasSlot {
+			return ownerID, nil
+		}
+	}
+}
+
+func ensureProcessingOwnerSchedule(
+	ctx context.Context,
+	transaction pgx.Tx,
+	ownerUserID int64,
+) error {
+	const query = `
+		INSERT INTO document_processing_owner_schedules (owner_user_id)
+		VALUES ($1)
+		ON CONFLICT (owner_user_id) DO NOTHING
+	`
+	if _, err := transaction.Exec(ctx, query, ownerUserID); err != nil {
+		return fmt.Errorf(
+			"ensure document processing owner schedule: %w",
+			err,
+		)
+	}
+	return nil
+}
+
 // MarkProcessingJobSucceeded 原子地把任务标记为 succeeded，
 // 并把关联文档标记为 ready。
 func (r *ProcessingJobRepository) MarkProcessingJobSucceeded(
 	ctx context.Context,
 	jobID int64,
+	leaseToken string,
 	completion document.ProcessingCompletion,
 ) error {
 	return r.finalizeProcessingJob(
 		ctx,
 		jobID,
+		leaseToken,
 		document.ProcessingJobStatusSucceeded,
 		document.StatusReady,
 		nil,
 		completion.DetectedTitle,
+		completion.Metrics,
 	)
 }
 
@@ -253,32 +555,69 @@ func (r *ProcessingJobRepository) MarkProcessingJobSucceeded(
 func (r *ProcessingJobRepository) MarkProcessingJobFailed(
 	ctx context.Context,
 	jobID int64,
-	errorMessage string,
+	leaseToken string,
+	failure document.ProcessingFailure,
 ) error {
 	return r.finalizeProcessingJob(
 		ctx,
 		jobID,
+		leaseToken,
 		document.ProcessingJobStatusFailed,
 		document.StatusFailed,
-		&errorMessage,
+		&failure.Message,
 		nil,
+		failure.Metrics,
 	)
 }
 
-// MarkInterruptedProcessingJobsFailed 在应用启动时，把上一次进程异常退出
-// 遗留的 processing 任务及其文档原子地标记为 failed。
-//
-// 当前实现建立在单 Worker 实例约束上：新进程启动时，不应存在另一个仍
-// 合法处理任务的实例。未来扩展为多实例时，需要使用 lease/heartbeat
-// 判断任务是否真正失联，不能继续恢复全部 processing 任务。
-func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
+// RenewProcessingJobLease 只允许仍持有有效 fencing token 的 Worker 续租。
+// 已过期租约不能复活，否则可能与已经接管任务的新 Worker 同时写结果。
+func (r *ProcessingJobRepository) RenewProcessingJobLease(
+	ctx context.Context,
+	jobID int64,
+	leaseToken string,
+) error {
+	if !r.leasePolicy.IsValid() {
+		return document.ErrInvalidProcessingJobLeasePolicy
+	}
+
+	const query = `
+		UPDATE document_jobs
+		SET
+			lease_expires_at = CURRENT_TIMESTAMP + ($3::BIGINT * INTERVAL '1 millisecond'),
+			heartbeat_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+		  AND status = 'processing'
+		  AND lease_token = $2
+		  AND lease_expires_at > CURRENT_TIMESTAMP
+	`
+	commandTag, err := r.pool.Exec(
+		ctx,
+		query,
+		jobID,
+		leaseToken,
+		r.leasePolicy.LeaseDuration.Milliseconds(),
+	)
+	if err != nil {
+		return fmt.Errorf("renew processing job lease: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return document.ErrProcessingJobLeaseLost
+	}
+	return nil
+}
+
+// RequeueExpiredProcessingJobs 只恢复租约已经到期（或升级前没有租约）的
+// processing 任务。仍在心跳的其他进程任务不会进入恢复范围。
+func (r *ProcessingJobRepository) RequeueExpiredProcessingJobs(
 	ctx context.Context,
 	errorMessage string,
 ) (int64, error) {
 	transaction, err := r.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf(
-			"begin interrupted processing job recovery transaction: %w",
+			"begin expired processing job recovery transaction: %w",
 			err,
 		)
 	}
@@ -286,14 +625,18 @@ func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
 		_ = transaction.Rollback(context.Background())
 	}()
 
-	// interrupted_jobs 先锁定恢复范围；两个 UPDATE CTE 分别修改文档和任务。
-	// 最终 SELECT 同时返回两张表的更新数量，用于验证事务内状态仍然一致。
+	// SKIP LOCKED 允许多个 Worker 实例同时执行恢复；每条过期任务只会被
+	// 一个事务接管。文档先回到 failed（可重新领取），任务再回到 queued。
 	const recoveryQuery = `
-		WITH interrupted_jobs AS (
+		WITH expired_jobs AS (
 			SELECT id, document_id
 			FROM document_jobs
 			WHERE status = 'processing'
-			FOR UPDATE
+			  AND (
+				lease_expires_at IS NULL
+				OR lease_expires_at <= CURRENT_TIMESTAMP
+			  )
+			FOR UPDATE SKIP LOCKED
 		),
 		updated_documents AS (
 			UPDATE documents AS d
@@ -301,20 +644,26 @@ func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
 				status = 'failed',
 				error_message = $1,
 				updated_at = CURRENT_TIMESTAMP
-			FROM interrupted_jobs AS interrupted
-			WHERE d.id = interrupted.document_id
+			FROM expired_jobs AS expired
+			WHERE d.id = expired.document_id
 				AND d.status = 'processing'
 			RETURNING d.id
 		),
 		updated_jobs AS (
 			UPDATE document_jobs AS j
 			SET
-				status = 'failed',
+				status = 'queued',
 				error_message = $1,
+				error_code = 'worker_lease_expired',
 				updated_at = CURRENT_TIMESTAMP,
-				completed_at = CURRENT_TIMESTAMP
-			FROM interrupted_jobs AS interrupted
-			WHERE j.id = interrupted.id
+				started_at = NULL,
+				completed_at = NULL,
+				worker_id = NULL,
+				lease_token = NULL,
+				lease_expires_at = NULL,
+				heartbeat_at = NULL
+			FROM expired_jobs AS expired
+			WHERE j.id = expired.id
 				AND j.status = 'processing'
 			RETURNING j.id
 		)
@@ -334,22 +683,18 @@ func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
 		&recoveredDocumentCount,
 	); err != nil {
 		return 0, fmt.Errorf(
-			"recover interrupted processing jobs: %w",
+			"recover expired processing jobs: %w",
 			err,
 		)
 	}
 
-	if recoveredJobCount != recoveredDocumentCount {
-		return 0, fmt.Errorf(
-			"recover interrupted processing jobs: updated %d jobs and %d documents",
-			recoveredJobCount,
-			recoveredDocumentCount,
-		)
-	}
+	// 正常数据会一一对应。这里不因文档已经被其他维护流程改成 failed 而
+	// 阻止任务重排，但保留计数变量便于未来增加结构化观测。
+	_ = recoveredDocumentCount
 
 	if err := transaction.Commit(ctx); err != nil {
 		return 0, fmt.Errorf(
-			"commit interrupted processing job recovery: %w",
+			"commit expired processing job recovery: %w",
 			err,
 		)
 	}
@@ -360,10 +705,12 @@ func (r *ProcessingJobRepository) MarkInterruptedProcessingJobsFailed(
 func (r *ProcessingJobRepository) finalizeProcessingJob(
 	ctx context.Context,
 	jobID int64,
+	leaseToken string,
 	jobStatus document.ProcessingJobStatus,
 	documentStatus document.Status,
 	errorMessage *string,
 	detectedTitle *string,
+	metrics document.ProcessingExecutionMetrics,
 ) error {
 	transaction, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -383,6 +730,8 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		INNER JOIN documents AS d ON d.id = j.document_id
 		WHERE j.id = $1
 			AND j.status = 'processing'
+			AND j.lease_token = $2
+			AND j.lease_expires_at > CURRENT_TIMESTAMP
 			AND d.status = 'processing'
 		FOR UPDATE OF j, d
 	`
@@ -392,9 +741,10 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		ctx,
 		lockQuery,
 		jobID,
+		leaseToken,
 	).Scan(&documentID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return document.ErrProcessingJobNotProcessing
+		return document.ErrProcessingJobLeaseLost
 	}
 	if err != nil {
 		return fmt.Errorf(
@@ -408,18 +758,57 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 		SET
 			status = $2,
 			error_message = $3,
+			queue_wait_ms = GREATEST(
+				0,
+				ROUND(EXTRACT(EPOCH FROM (started_at - created_at)) * 1000)::BIGINT
+			),
+			processor_ms = $4,
+			total_ms = GREATEST(
+				0,
+				ROUND(EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - started_at)) * 1000)::BIGINT
+			),
+			file_bytes = $5,
+			chunk_count = $6,
+			error_code = NULLIF($7, ''),
+			chunk_write_ms = $8,
+			python_total_ms = $9,
+			source_open_ms = $10,
+			metadata_read_ms = $11,
+			text_extract_ms = $12,
+			text_split_ms = $13,
+			page_count = $14,
+			slowest_page_number = $15,
+			slowest_page_ms = $16,
 			updated_at = CURRENT_TIMESTAMP,
-			completed_at = CURRENT_TIMESTAMP
+			completed_at = CURRENT_TIMESTAMP,
+			worker_id = NULL,
+			lease_token = NULL,
+			lease_expires_at = NULL,
+			heartbeat_at = NULL
 		WHERE id = $1
 			AND status = 'processing'
 	`
 
+	stageMetrics := newProcessingStageDatabaseMetrics(metrics.ProcessorStages)
 	jobCommandTag, err := transaction.Exec(
 		ctx,
 		updateJobQuery,
 		jobID,
 		jobStatus,
 		errorMessage,
+		durationMilliseconds(metrics.ProcessorDuration),
+		metrics.FileBytes,
+		metrics.ChunkCount,
+		string(metrics.ErrorCode),
+		optionalDurationMilliseconds(metrics.ChunkWriteDuration),
+		stageMetrics.PythonTotalMS,
+		stageMetrics.SourceOpenMS,
+		stageMetrics.MetadataReadMS,
+		stageMetrics.TextExtractMS,
+		stageMetrics.TextSplitMS,
+		stageMetrics.PageCount,
+		stageMetrics.SlowestPageNumber,
+		stageMetrics.SlowestPageMS,
 	)
 	if err != nil {
 		return fmt.Errorf(
@@ -501,6 +890,67 @@ func (r *ProcessingJobRepository) finalizeProcessingJob(
 	return nil
 }
 
+// durationMilliseconds 统一把 Go 耗时转换为数据库使用的非负毫秒数。
+// time.Duration.Milliseconds 会舍去不足一毫秒的部分，这是当前性能基线
+// 所需的精度，也避免为短操作引入微秒级噪声。
+func durationMilliseconds(duration time.Duration) int64 {
+	if duration < 0 {
+		return 0
+	}
+
+	return duration.Milliseconds()
+}
+
+// optionalDurationMilliseconds 保留“未观测”和“已执行但不足 1ms”的区别。
+func optionalDurationMilliseconds(duration *time.Duration) *int64 {
+	if duration == nil {
+		return nil
+	}
+
+	milliseconds := durationMilliseconds(*duration)
+	return &milliseconds
+}
+
+type processingStageDatabaseMetrics struct {
+	PythonTotalMS     *int64
+	SourceOpenMS      *int64
+	MetadataReadMS    *int64
+	TextExtractMS     *int64
+	TextSplitMS       *int64
+	PageCount         *int
+	SlowestPageNumber *int
+	SlowestPageMS     *int64
+}
+
+// newProcessingStageDatabaseMetrics 把可选处理器阶段指标转换为可空 SQL 参数。
+func newProcessingStageDatabaseMetrics(
+	metrics *document.ProcessorStageMetrics,
+) processingStageDatabaseMetrics {
+	if metrics == nil {
+		return processingStageDatabaseMetrics{}
+	}
+
+	pythonTotalMS := durationMilliseconds(metrics.TotalDuration)
+	sourceOpenMS := durationMilliseconds(metrics.SourceOpenDuration)
+	metadataReadMS := durationMilliseconds(metrics.MetadataReadDuration)
+	textExtractMS := durationMilliseconds(metrics.TextExtractDuration)
+	textSplitMS := durationMilliseconds(metrics.TextSplitDuration)
+	pageCount := metrics.PageCount
+	slowestPageNumber := metrics.SlowestPageNumber
+	slowestPageMS := durationMilliseconds(metrics.SlowestPageDuration)
+
+	return processingStageDatabaseMetrics{
+		PythonTotalMS:     &pythonTotalMS,
+		SourceOpenMS:      &sourceOpenMS,
+		MetadataReadMS:    &metadataReadMS,
+		TextExtractMS:     &textExtractMS,
+		TextSplitMS:       &textSplitMS,
+		PageCount:         &pageCount,
+		SlowestPageNumber: &slowestPageNumber,
+		SlowestPageMS:     &slowestPageMS,
+	}
+}
+
 func scanProcessingJob(
 	row pgx.Row,
 ) (document.ProcessingJob, error) {
@@ -527,6 +977,46 @@ func scanProcessingJob(
 		return document.ProcessingJob{}, fmt.Errorf(
 			"invalid processing job status %q",
 			status,
+		)
+	}
+
+	return job, nil
+}
+
+// scanClaimedProcessingJob 比普通任务扫描多读取 lease_token。普通 HTTP 查询
+// 不需要暴露该值，只有刚完成原子领取的 Worker 才能得到 fencing token。
+func scanClaimedProcessingJob(
+	row pgx.Row,
+) (document.ProcessingJob, error) {
+	var job document.ProcessingJob
+	var status string
+
+	err := row.Scan(
+		&job.ID,
+		&job.DocumentID,
+		&status,
+		&job.AttemptCount,
+		&job.ErrorMessage,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+		&job.StartedAt,
+		&job.CompletedAt,
+		&job.LeaseToken,
+	)
+	if err != nil {
+		return document.ProcessingJob{}, err
+	}
+
+	job.Status = document.ProcessingJobStatus(status)
+	if !job.Status.IsValid() {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"invalid processing job status %q",
+			status,
+		)
+	}
+	if job.LeaseToken == "" {
+		return document.ProcessingJob{}, fmt.Errorf(
+			"claimed processing job has empty lease token",
 		)
 	}
 

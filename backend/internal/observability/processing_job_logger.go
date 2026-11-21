@@ -40,11 +40,52 @@ func (l *ProcessingJobLogger) ObserveProcessingJobEvent(
 		slog.Int64("document_id", event.DocumentID),
 		slog.Int("attempt_count", event.AttemptCount),
 		slog.String("status", string(event.Status)),
+		slog.Int64("queue_wait_ms", event.QueueWait.Milliseconds()),
 	}
 	if event.Type != documentapplication.ProcessingJobEventStarted {
 		attributes = append(
 			attributes,
-			slog.Int64("duration_ms", event.Duration.Milliseconds()),
+			slog.Int64("processor_ms", event.ProcessorDuration.Milliseconds()),
+			slog.Int64("total_ms", event.TotalDuration.Milliseconds()),
+			slog.Int64("file_bytes", event.FileBytes),
+			slog.Int("chunk_count", event.ChunkCount),
+		)
+		if event.ChunkWriteDuration != nil {
+			attributes = append(
+				attributes,
+				slog.Int64(
+					"chunk_write_ms",
+					event.ChunkWriteDuration.Milliseconds(),
+				),
+			)
+		}
+		if event.FinalizeDuration != nil {
+			attributes = append(
+				attributes,
+				slog.Int64(
+					"finalize_ms",
+					event.FinalizeDuration.Milliseconds(),
+				),
+			)
+		}
+		if stages := event.ProcessorStages; stages != nil {
+			attributes = append(
+				attributes,
+				slog.Int64("python_total_ms", stages.TotalDuration.Milliseconds()),
+				slog.Int64("source_open_ms", stages.SourceOpenDuration.Milliseconds()),
+				slog.Int64("metadata_read_ms", stages.MetadataReadDuration.Milliseconds()),
+				slog.Int64("text_extract_ms", stages.TextExtractDuration.Milliseconds()),
+				slog.Int64("text_split_ms", stages.TextSplitDuration.Milliseconds()),
+				slog.Int("page_count", stages.PageCount),
+				slog.Int("slowest_page_number", stages.SlowestPageNumber),
+				slog.Int64("slowest_page_ms", stages.SlowestPageDuration.Milliseconds()),
+			)
+		}
+	}
+	if event.ErrorCode != "" {
+		attributes = append(
+			attributes,
+			slog.String("error_code", string(event.ErrorCode)),
 		)
 	}
 	if event.Err != nil {

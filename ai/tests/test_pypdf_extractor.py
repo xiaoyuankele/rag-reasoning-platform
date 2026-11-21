@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from pypdf import PdfWriter
 from pypdf.constants import UserAccessPermissions
@@ -16,15 +17,12 @@ SOURCE_ROOT = AI_ROOT / "src"
 sys.path.insert(0, str(SOURCE_ROOT))
 
 from rag_ai.domain.errors import DocumentProcessingError  # noqa: E402
-from rag_ai.domain.models import PageText  # noqa: E402
+from rag_ai.domain.models import ExtractedDocument, PageText  # noqa: E402
 from rag_ai.infrastructure.parsing.pypdf_extractor import (  # noqa: E402
-    PDFPreflightResult,
-    PyPDFPageExtractor,
-    PyPDFTitleExtractor,
+    PyPDFDocumentExtractor,
     _validate_page_count,
-    extract_pdf_pages,
+    extract_pdf_document,
     normalize_pdf_title,
-    preflight_pdf,
 )
 
 
@@ -34,16 +32,27 @@ class PDFPreflightTests(unittest.TestCase):
             source_path = Path(directory) / "normal.pdf"
             self.write_pdf(source_path, page_count=2)
 
-            result = preflight_pdf(
+            result = PyPDFDocumentExtractor().extract(
                 source_path,
                 max_file_bytes=1024 * 1024,
                 max_pages=10,
             )
 
         self.assertEqual(
-            result,
-            PDFPreflightResult(page_count=2, encrypted=False),
+            result.pages,
+            [
+                PageText(page_number=1, text=""),
+                PageText(page_number=2, text=""),
+            ],
         )
+        self.assertIsNotNone(result.metrics)
+        assert result.metrics is not None
+        self.assertEqual(result.metrics.page_count, 2)
+        self.assertIn(result.metrics.slowest_page_number, (1, 2))
+        self.assertGreaterEqual(result.metrics.source_open_ms, 0)
+        self.assertGreaterEqual(result.metrics.metadata_read_ms, 0)
+        self.assertGreaterEqual(result.metrics.text_extract_ms, 0)
+        self.assertGreaterEqual(result.metrics.slowest_page_ms, 0)
 
     def test_preflight_rejects_pdf_requiring_password(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -140,11 +149,11 @@ class PDFPreflightTests(unittest.TestCase):
             max_pages: 测试使用的页数上限。
 
         Returns:
-            ``preflight_pdf`` 抛出的 ``DocumentProcessingError``。
+            统一 PDF 提取器抛出的 ``DocumentProcessingError``。
         """
 
         with self.assertRaises(DocumentProcessingError) as raised:
-            preflight_pdf(
+            PyPDFDocumentExtractor().extract(
                 source_path,
                 max_file_bytes=max_file_bytes,
                 max_pages=max_pages,
@@ -187,23 +196,24 @@ class PDFPreflightTests(unittest.TestCase):
 
 
 class PDFTextExtractionTests(unittest.TestCase):
-    def test_pypdf_extractor_satisfies_page_extraction_port(self) -> None:
+    def test_pypdf_extractor_satisfies_document_extraction_port(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source_path = Path(directory) / "adapter.pdf"
             write_text_pdf(source_path, ["adapter page"])
 
-            pages = PyPDFPageExtractor().extract(
+            result = PyPDFDocumentExtractor().extract(
                 source_path,
                 max_file_bytes=1024 * 1024,
                 max_pages=10,
             )
 
         self.assertEqual(
-            pages,
+            result.pages,
             [PageText(page_number=1, text="adapter page")],
         )
+        self.assertIsNotNone(result.metrics)
 
-    def test_extract_pdf_pages_preserves_page_numbers_and_text(self) -> None:
+    def test_extract_pdf_document_preserves_page_numbers_and_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source_path = Path(directory) / "two-pages.pdf"
             write_text_pdf(
@@ -211,35 +221,59 @@ class PDFTextExtractionTests(unittest.TestCase):
                 ["First page text", "Second page text"],
             )
 
-            pages = extract_pdf_pages(
+            result = extract_pdf_document(
                 source_path,
                 max_file_bytes=1024 * 1024,
                 max_pages=10,
             )
 
         self.assertEqual(
-            pages,
+            result.pages,
             [
                 PageText(page_number=1, text="First page text"),
                 PageText(page_number=2, text="Second page text"),
             ],
         )
 
-    def test_extract_pdf_pages_preserves_blank_page_as_empty_text(self) -> None:
+    def test_extract_pdf_document_preserves_blank_page_as_empty_text(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source_path = Path(directory) / "blank.pdf"
             write_text_pdf(source_path, [""])
 
-            pages = extract_pdf_pages(
+            result = extract_pdf_document(
                 source_path,
                 max_file_bytes=1024 * 1024,
                 max_pages=10,
             )
 
         self.assertEqual(
-            pages,
+            result.pages,
             [PageText(page_number=1, text="")],
         )
+
+    def test_pypdf_document_extractor_opens_source_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source_path = Path(directory) / "single-open.pdf"
+            write_text_pdf(source_path, ["single open"])
+            original_open = Path.open
+            opened_paths: list[Path] = []
+
+            def recording_open(
+                path: Path,
+                *args: object,
+                **kwargs: object,
+            ):  # type: ignore[no-untyped-def]
+                opened_paths.append(path)
+                return original_open(path, *args, **kwargs)
+
+            with patch.object(Path, "open", recording_open):
+                PyPDFDocumentExtractor().extract(
+                    source_path,
+                    max_file_bytes=1024 * 1024,
+                    max_pages=10,
+                )
+
+        self.assertEqual(opened_paths, [source_path])
 
 
 class PDFTitleExtractionTests(unittest.TestCase):
@@ -266,7 +300,11 @@ class PDFTitleExtractionTests(unittest.TestCase):
             with source_path.open("wb") as output:
                 writer.write(output)
 
-            title = PyPDFTitleExtractor().extract_title(source_path)
+            title = PyPDFDocumentExtractor().extract(
+                source_path,
+                max_file_bytes=1024 * 1024,
+                max_pages=10,
+            ).detected_title
 
         self.assertEqual(title, "Maglev control study")
 
@@ -278,7 +316,11 @@ class PDFTitleExtractionTests(unittest.TestCase):
             with source_path.open("wb") as output:
                 writer.write(output)
 
-            title = PyPDFTitleExtractor().extract_title(source_path)
+            title = PyPDFDocumentExtractor().extract(
+                source_path,
+                max_file_bytes=1024 * 1024,
+                max_pages=10,
+            ).detected_title
 
         self.assertIsNone(title)
 

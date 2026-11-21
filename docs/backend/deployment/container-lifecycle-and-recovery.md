@@ -52,16 +52,18 @@ Compose 和镜像使用三个配套设置：
 
 | 任务类型 | 启动前状态 | 恢复后状态 | 原因 |
 | --- | --- | --- | --- |
-| 文档解析 | `processing` | 任务和文档都变为 `failed` | 原文件解析和 chunks 写入属于一次处理结果；第一版要求用户明确重试，避免把旧 chunks 当作当前结果 |
-| Embedding | `processing` | 任务回到 `queued`，文档仍为 `ready` | 文本 chunks 已经稳定存在；向量采用全部成功才提交的事务，可安全重新生成 |
+| 文档解析 | `processing` 且租约过期 | 任务回到 `queued`，文档暂时变为 `failed`，随后可重新领取 | chunks 与终态均受 fencing token 保护，旧 Worker 已不能覆盖新结果，因此可以自动接管 |
+| Embedding | `processing` 且租约过期 | 任务回到 `queued`，文档仍为 `ready` | 向量事务与终态受 fencing token 保护，旧 Worker 不能覆盖接管后的结果 |
+| Answer | `processing` 且租约过期 | 任务回到 `queued`，保留有限重试语义 | 答案快照、成功、重试和失败收尾都受 fencing token 保护 |
 
 恢复错误信息使用稳定安全文本：
 
-- 文档解析：`document processing was interrupted`；
-- Embedding：`embedding generation was interrupted`。
+- 文档解析：`document processing lease expired and was requeued`；
+- Embedding：`embedding job lease expired and was requeued`。
+- Answer：`answer job lease expired and was requeued`。
 
-当前恢复算法建立在单后端实例约束上。如果未来同时运行多个实例，不能再把所有 `processing` 都视为失联，
-必须增加任务 lease、heartbeat 和实例标识后再判断任务归属。
+三类后台任务都已使用 PostgreSQL 持久化 lease、heartbeat、Worker 身份和随机 fencing token，
+只恢复真正过期的任务；这允许多个同类 Worker 进程共享各自队列。
 
 ## 4. 可重复验收脚本
 
@@ -112,3 +114,68 @@ chatgpt/运行产物/日志/container-lifecycle-<UTC 时间>.log
 ```text
 chatgpt/运行产物/临时/container-lifecycle-20260815T075151Z.json
 ```
+
+## 6. 2026-08-29 租约升级说明
+
+第 5 节是旧版单进程恢复的历史证据；`verify-container-lifecycle.ps1` 仍冻结该历史断言，不能单独用它证明当前
+拆分角色和文档租约门禁。真实 PostgreSQL 集成测试 `TestProcessingJobLeaseRecoveryAndFencing` 覆盖有效续租、
+到期重领、新 fencing token、旧 Worker chunks 写入拒绝和旧 Worker 终态写入拒绝。第 9 节进一步使用独立
+Worker 容器完成了真实 `SIGKILL`、到期接管和唯一结果验收。
+
+## 7. 2026-08-29 Embedding 租约升级说明
+
+Embedding Worker 现在会在领取事务中写入 `worker_id`、随机 `lease_token`、`lease_expires_at` 和
+`heartbeat_at`。远程批次调用期间由独立 goroutine 续租；向量覆盖、任务成功、延迟重试和永久失败都必须
+携带仍有效的 token。向量覆盖与成功终态仍处在同一事务中，因此过期旧 Worker 既不能写半份向量，也不能
+改变新 Worker 的状态。
+
+恢复器只重排真正过期或升级前没有租约的 `processing` 任务。Application 在启动和每次领取前执行恢复，
+PostgreSQL 使用部分索引与 `SKIP LOCKED` 支持多个实例同时检查。默认租约 60 秒、心跳 15 秒；Fake Provider
+测试验证处理期间续租和续租失败停止写入，真实 PostgreSQL 测试验证过期重领与旧 token 拒绝。
+
+## 8. 2026-08-29 Answer 租约升级说明
+
+Answer Worker 领取任务时也会写入进程身份、随机 token、到期时间和心跳。语义检索与生成期间由独立
+goroutine 续租；成功答案快照、指数退避 requeue 和永久失败终态都必须匹配当前 token 且租约尚未过期。
+Worker 正常关闭时任务暂时保留 `processing`，其他进程只有在租约到期后才能恢复，避免启动一个新实例就
+错误抢走健康实例正在生成的回答。
+
+真实 PostgreSQL 测试覆盖有效租约不恢复、续租、强制过期、新 token 接管，以及旧 token 的成功、重试、
+失败三种写入全部拒绝。默认租约 60 秒、心跳 15 秒；相关配置为 `ANSWER_JOB_WORKER_ID`、
+`ANSWER_JOB_LEASE_DURATION` 和 `ANSWER_JOB_HEARTBEAT_INTERVAL`。
+
+## 9. 2026-08-29 多进程故障注入验收
+
+本阶段验证的不是“六个 Worker 能同时启动”，而是任意 Worker 在真实任务中被强制终止后，另一个进程能否
+遵守租约边界安全接管。验收入口为：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+    -File .\scripts\maintenance\verify-worker-fault-recovery.ps1 `
+    -LeaseDurationSeconds 8
+```
+
+脚本会创建隔离数据库、隔离本地存储和本地 OpenAI 兼容 Fake Provider，然后分别执行 Document、Embedding、
+Answer 三条链路：
+
+1. Worker A 原子领取任务并获得 fencing token；
+2. 在任务尚未收尾时对 A 执行 `SIGKILL`，确认容器退出码为 `137`；
+3. 立即启动 Worker B，并证明它在租约有效期内不能提前抢走任务；
+4. 等待真实数据库时间使租约过期，B 使用新 token 接管；
+5. 验证任务在第 2 次尝试进入 `succeeded`，且 chunks、vectors、answer snapshot 均只有一份正式结果。
+
+临时审计触发器只建立在隔离数据库中，用于证明同一任务产生了两个不同租约 token；它不是生产 schema。
+Fake Provider 对首次 Embedding 和首次 Generation 请求各延迟 20 秒，保证 A 能在真实外部调用期间被杀死；
+整个验收不会连接远程模型。最终三类任务全部通过，Fake Provider 收到 4 次 Embedding 请求和 2 次 Generation
+请求，远程 Provider 调用数为 0。
+
+验收期间还发现一个测试工具陷阱：删除持锁的 `psql` 客户端容器，不保证 PostgreSQL 正在 `pg_sleep` 的服务端
+会话立刻结束，因此表锁可能继续存在。脚本现会记录服务端 backend PID，并使用 `pg_terminate_backend` 明确
+释放会话后再启动接管者。修复后完整验收约 44 秒完成。正式结果写入 Git 忽略目录：
+
+```text
+chatgpt/运行产物/临时/worker-fault-recovery-20260829T135241Z.json
+```
+
+该结果证明单机多个独立进程的租约接管和 fencing 正确性，不等于跨主机共享原始文件、生产并发容量或长时间
+稳定性已经通过；这些仍需共享对象存储和后续压力测试。

@@ -1,0 +1,197 @@
+// Package agent defines Agent v0 application use cases and persistence ports.
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"time"
+
+	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
+	agentdomain "rag-reasoning-platform/backend/internal/domain/agent"
+	conversationdomain "rag-reasoning-platform/backend/internal/domain/conversation"
+)
+
+var (
+	ErrRunNotFound                 = errors.New("agent run not found")
+	ErrNoQueuedRun                 = errors.New("no queued agent run")
+	ErrNoPendingStep               = errors.New("no pending agent step")
+	ErrRunNotProcessing            = errors.New("agent run is not processing")
+	ErrRunProcessingCannotCancel   = errors.New("processing agent run cannot be canceled")
+	ErrRunTerminalCannotCancel     = errors.New("terminal agent run cannot be canceled")
+	ErrOwnerQueueCapacity          = errors.New("agent owner queue capacity exhausted")
+	ErrGlobalQueueCapacity         = errors.New("agent global queue capacity exhausted")
+	ErrConversationExecutionActive = errors.New("conversation already has an active execution")
+	ErrIdempotencyConflict         = errors.New("agent run idempotency conflict")
+	ErrRunLeaseLost                = errors.New("agent run lease lost")
+	ErrStepLimitExceeded           = errors.New("agent step limit exceeded")
+	ErrTokenBudgetExceeded         = errors.New("agent token budget exceeded")
+	ErrRunDeadlineExceeded         = errors.New("agent run deadline exceeded")
+	ErrFinalStepAlreadyPersisted   = errors.New("agent final step already persisted")
+	ErrInvalidStep                 = errors.New("agent step is invalid")
+	ErrInvalidAdmissionLimits      = errors.New("agent run admission limits are invalid")
+	ErrInvalidSchedulingPolicy     = errors.New("agent run scheduling policy is invalid")
+	ErrInvalidLeasePolicy          = errors.New("agent run lease policy is invalid")
+	ErrInvalidRecoveryBatch        = errors.New("agent recovery batch size is invalid")
+)
+
+const MaxRecoveryBatchSize = 100
+
+// CreateRunInput is the normalized, server-budgeted persistence command.
+type CreateRunInput struct {
+	ConversationID      int64
+	Content             string
+	ClientRunID         string
+	RequestedDocumentID *int64
+	ResponseLanguage    agentdomain.ResponseLanguage
+	Budget              agentdomain.Budget
+}
+
+// RunSnapshot is one owner-scoped, internally consistent view of a Run and
+// every persisted Step ordered by sequence number.
+type RunSnapshot struct {
+	agentdomain.Run
+	Steps []agentdomain.Step
+}
+
+// QueueResult returns the atomic conversation turn and Agent Run creation.
+type QueueResult struct {
+	RunSnapshot
+	UserMessage      conversationdomain.Message
+	AssistantMessage conversationdomain.Message
+	Created          bool
+}
+
+// ScopedRepository is the authenticated user-facing Agent Run port.
+type ScopedRepository interface {
+	CreateRun(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		input CreateRunInput,
+	) (QueueResult, error)
+	GetRunByID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		runID int64,
+	) (RunSnapshot, error)
+	GetActiveRunByConversationID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		conversationID int64,
+	) (RunSnapshot, error)
+	GetLatestRunByConversationID(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		conversationID int64,
+	) (RunSnapshot, error)
+	CancelRun(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		runID int64,
+	) (RunSnapshot, error)
+}
+
+// WorkerRepository owns durable queue claims and fenced Run transitions.
+type WorkerRepository interface {
+	ClaimNextRun(ctx context.Context) (agentdomain.Run, error)
+	GetQueueStats(ctx context.Context) (agentdomain.QueueStats, error)
+	RenewRunLease(ctx context.Context, runID int64, leaseToken string) error
+	RequeueRun(
+		ctx context.Context,
+		runID int64,
+		leaseToken string,
+		nextAttemptAt time.Time,
+		errorCode agentdomain.ErrorCode,
+		errorMessage string,
+	) error
+	CommitFinal(
+		ctx context.Context,
+		runID int64,
+		leaseToken string,
+		input CommitFinalInput,
+	) (agentdomain.Step, error)
+	MarkRunFailed(
+		ctx context.Context,
+		runID int64,
+		leaseToken string,
+		errorCode agentdomain.ErrorCode,
+		errorMessage string,
+	) error
+	RequeueExpiredRuns(
+		ctx context.Context,
+		limit int,
+		errorCode agentdomain.ErrorCode,
+		errorMessage string,
+	) (int64, error)
+}
+
+type PersistDecisionInput struct {
+	ToolName         string
+	Arguments        json.RawMessage
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
+type CompleteStepInput struct {
+	Result json.RawMessage
+}
+
+// FinalStepResult is the auditable JSON shape shared by the final Step and Run snapshot.
+type FinalStepResult struct {
+	Answer           string                       `json:"answer"`
+	ResponseLanguage agentdomain.ResponseLanguage `json:"response_language"`
+	Payload          json.RawMessage              `json:"payload,omitempty"`
+}
+
+type FailStepInput struct {
+	ErrorCode    agentdomain.ErrorCode
+	ErrorMessage string
+}
+
+type CommitFinalInput struct {
+	Result           FinalStepResult
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
+// StepRepository persists decisions before execution and completes bounded
+// Tool actions under the current Run lease.
+type StepRepository interface {
+	ListSteps(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		runID int64,
+	) ([]agentdomain.Step, error)
+	ListStepsForWorker(
+		ctx context.Context,
+		runID int64,
+		leaseToken string,
+	) ([]agentdomain.Step, error)
+	ClaimPendingStep(
+		ctx context.Context,
+		runID int64,
+		leaseToken string,
+	) (agentdomain.Step, error)
+	PersistDecision(
+		ctx context.Context,
+		runID int64,
+		leaseToken string,
+		input PersistDecisionInput,
+	) (agentdomain.Step, error)
+	MarkStepSucceeded(
+		ctx context.Context,
+		runID int64,
+		stepID int64,
+		leaseToken string,
+		input CompleteStepInput,
+	) (agentdomain.Step, error)
+	MarkStepFailed(
+		ctx context.Context,
+		runID int64,
+		stepID int64,
+		leaseToken string,
+		input FailStepInput,
+	) (agentdomain.Step, error)
+}

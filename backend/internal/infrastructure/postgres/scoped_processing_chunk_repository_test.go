@@ -13,6 +13,13 @@ import (
 	postgresrepository "rag-reasoning-platform/backend/internal/infrastructure/postgres"
 )
 
+func testProcessingAdmissionLimits() documentdomain.ProcessingJobAdmissionLimits {
+	return documentdomain.ProcessingJobAdmissionLimits{
+		MaxActiveJobsPerOwner: 100,
+		MaxActiveJobsGlobal:   500,
+	}
+}
+
 // TestScopedProcessingJobRepositoryEnforcesOwnerBoundary 验证任务创建与查询
 // 都通过关联文档的 owner_user_id 执行隔离。
 func TestScopedProcessingJobRepositoryEnforcesOwnerBoundary(t *testing.T) {
@@ -29,7 +36,10 @@ func TestScopedProcessingJobRepositoryEnforcesOwnerBoundary(t *testing.T) {
 	ownerA, _ := accessdomain.NewOwnerScope(ownerAID)
 	ownerB, _ := accessdomain.NewOwnerScope(ownerBID)
 	documents := postgresrepository.NewScopedDocumentRepository(pool)
-	jobs := postgresrepository.NewScopedProcessingJobRepository(pool)
+	jobs := postgresrepository.NewScopedProcessingJobRepository(
+		pool,
+		testProcessingAdmissionLimits(),
+	)
 
 	ownerADocument, err := documents.Create(
 		ctx,
@@ -274,7 +284,10 @@ func TestScopedChunkRepositorySearchEnforcesOwnerBoundary(t *testing.T) {
 func TestScopedProcessingAndChunkRepositoriesRejectInvalidScope(t *testing.T) {
 	var invalidScope accessdomain.OwnerScope
 	ctx := context.Background()
-	jobs := postgresrepository.NewScopedProcessingJobRepository(nil)
+	jobs := postgresrepository.NewScopedProcessingJobRepository(
+		nil,
+		testProcessingAdmissionLimits(),
+	)
 	chunks := postgresrepository.NewScopedChunkRepository(nil)
 
 	if _, err := jobs.CreateProcessingJob(ctx, invalidScope, 1); !errors.Is(err, accessdomain.ErrInvalidOwnerScope) {

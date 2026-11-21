@@ -3,3 +3,12 @@
 
 # gofmt 固定输出 LF；统一换行可避免 Windows 检出后被误判为所有 Go 文件都未格式化。
 /backend/**/*.go text eol=lf
+
+# Vue/TypeScript 工程由 Prettier 校验；固定 LF，避免 Windows 分支切换后只因 CRLF 导致门禁失败。
+/web/**/*.ts text eol=lf
+/web/**/*.vue text eol=lf
+/web/**/*.css text eol=lf
+/web/**/*.js text eol=lf
+/web/**/*.json text eol=lf
+/web/**/*.html text eol=lf
+/web/**/*.md text eol=lf

@@ -10,12 +10,27 @@ import (
 )
 
 const (
-	defaultDashScopeGenerationEndpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-	defaultGenerationModel             = "qwen3.6-flash"
-	defaultGenerationHTTPTimeout       = 60 * time.Second
-	defaultGenerationMaxOutputTokens   = 1024
-	maximumGenerationMaxOutputTokens   = 8192
-	defaultGenerationTemperature       = 0.1
+	defaultDashScopeGenerationEndpoint  = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+	defaultGenerationModel              = "qwen3.6-flash"
+	defaultGenerationHTTPTimeout        = 60 * time.Second
+	defaultGenerationMaxOutputTokens    = 1024
+	maximumGenerationMaxOutputTokens    = 8192
+	defaultGenerationTemperature        = 0.1
+	defaultAnswerInputTokenBudget       = 16_000
+	maximumAnswerInputTokenBudget       = 131_072
+	defaultConversationHistoryMaxTurns  = 6
+	maximumConversationHistoryMaxTurns  = 20
+	defaultConversationHistoryMaxTokens = 3_000
+	maximumConversationHistoryMaxTokens = 16_000
+	defaultAnswerMaxConcurrency         = 10
+	maximumAnswerMaxConcurrency         = 128
+	defaultAnswerMaxConcurrencyPerUser  = 2
+	maximumAnswerMaxConcurrencyPerUser  = 16
+	defaultAnswerMaxWaitersGlobal       = 500
+	maximumAnswerMaxWaitersGlobal       = 10000
+	defaultAnswerMaxWaitersPerUser      = 5
+	maximumAnswerMaxWaitersPerUser      = 100
+	defaultAnswerQueueWaitTimeout       = 5 * time.Second
 )
 
 var (
@@ -28,20 +43,40 @@ var (
 	ErrInvalidGenerationTemperature = errors.New(
 		"generation temperature must be between 0 and 2",
 	)
+
+	// ErrInvalidAnswerAdmissionLimits 表示用户级容量大于全局容量。
+	// 这类关系错误不能只靠单个环境变量的最小值、最大值校验发现。
+	ErrInvalidAnswerAdmissionLimits = errors.New(
+		"answer per-user admission limits must not exceed global limits",
+	)
+
+	// ErrInvalidConversationHistoryBudget 表示历史预算没有给当前问题和证据
+	// 留出最低空间。
+	ErrInvalidConversationHistoryBudget = errors.New(
+		"conversation history budget must leave at least 2000 input tokens for question and evidence",
+	)
 )
 
 // GenerationConfig 保存第一版带来源问答所需的远程生成配置。
 //
 // APIKey 只允许交给 Infrastructure HTTP 适配器，禁止写入日志、数据库和响应。
 type GenerationConfig struct {
-	Enabled         bool
-	APIKey          string
-	Endpoint        string
-	ModelName       string
-	HTTPTimeout     time.Duration
-	MaxOutputTokens int
-	Temperature     float64
-	ThinkingEnabled bool
+	Enabled                      bool
+	APIKey                       string
+	Endpoint                     string
+	ModelName                    string
+	HTTPTimeout                  time.Duration
+	MaxOutputTokens              int
+	Temperature                  float64
+	ThinkingEnabled              bool
+	MaxConcurrency               int
+	MaxConcurrencyPerUser        int
+	MaxWaitersGlobal             int
+	MaxWaitersPerUser            int
+	QueueWaitTimeout             time.Duration
+	AnswerInputTokenBudget       int
+	ConversationHistoryMaxTurns  int
+	ConversationHistoryMaxTokens int
 }
 
 // LoadGeneration 从环境变量加载文本生成配置。
@@ -102,15 +137,124 @@ func LoadGeneration() (GenerationConfig, error) {
 		return GenerationConfig{}, err
 	}
 
+	maxConcurrency, err := loadPositiveBoundedInt(
+		"ANSWER_MAX_CONCURRENCY",
+		defaultAnswerMaxConcurrency,
+		maximumAnswerMaxConcurrency,
+	)
+	if err != nil {
+		return GenerationConfig{}, fmt.Errorf(
+			"load answer max concurrency: %w",
+			err,
+		)
+	}
+
+	maxConcurrencyPerUser, err := loadPositiveBoundedInt(
+		"ANSWER_MAX_CONCURRENCY_PER_USER",
+		defaultAnswerMaxConcurrencyPerUser,
+		maximumAnswerMaxConcurrencyPerUser,
+	)
+	if err != nil {
+		return GenerationConfig{}, fmt.Errorf(
+			"load answer max concurrency per user: %w",
+			err,
+		)
+	}
+
+	maxWaitersGlobal, err := loadPositiveBoundedInt(
+		"ANSWER_MAX_WAITERS_GLOBAL",
+		defaultAnswerMaxWaitersGlobal,
+		maximumAnswerMaxWaitersGlobal,
+	)
+	if err != nil {
+		return GenerationConfig{}, fmt.Errorf(
+			"load answer max waiters global: %w",
+			err,
+		)
+	}
+
+	maxWaitersPerUser, err := loadPositiveBoundedInt(
+		"ANSWER_MAX_WAITERS_PER_USER",
+		defaultAnswerMaxWaitersPerUser,
+		maximumAnswerMaxWaitersPerUser,
+	)
+	if err != nil {
+		return GenerationConfig{}, fmt.Errorf(
+			"load answer max waiters per user: %w",
+			err,
+		)
+	}
+
+	if maxConcurrencyPerUser > maxConcurrency ||
+		maxWaitersPerUser > maxWaitersGlobal {
+		return GenerationConfig{}, ErrInvalidAnswerAdmissionLimits
+	}
+
+	queueWaitTimeout, err := loadPositiveDuration(
+		"ANSWER_QUEUE_WAIT_TIMEOUT",
+		defaultAnswerQueueWaitTimeout,
+	)
+	if err != nil {
+		return GenerationConfig{}, fmt.Errorf(
+			"load answer queue wait timeout: %w",
+			err,
+		)
+	}
+
+	answerInputTokenBudget, err := loadPositiveBoundedInt(
+		"ANSWER_INPUT_TOKEN_BUDGET",
+		defaultAnswerInputTokenBudget,
+		maximumAnswerInputTokenBudget,
+	)
+	if err != nil {
+		return GenerationConfig{}, fmt.Errorf(
+			"load answer input token budget: %w",
+			err,
+		)
+	}
+	conversationHistoryMaxTurns, err := loadPositiveBoundedInt(
+		"CONVERSATION_HISTORY_MAX_TURNS",
+		defaultConversationHistoryMaxTurns,
+		maximumConversationHistoryMaxTurns,
+	)
+	if err != nil {
+		return GenerationConfig{}, fmt.Errorf(
+			"load conversation history max turns: %w",
+			err,
+		)
+	}
+	conversationHistoryMaxTokens, err := loadPositiveBoundedInt(
+		"CONVERSATION_HISTORY_MAX_TOKENS",
+		defaultConversationHistoryMaxTokens,
+		maximumConversationHistoryMaxTokens,
+	)
+	if err != nil {
+		return GenerationConfig{}, fmt.Errorf(
+			"load conversation history max tokens: %w",
+			err,
+		)
+	}
+	if answerInputTokenBudget < conversationHistoryMaxTokens+2_000 {
+		return GenerationConfig{}, ErrInvalidConversationHistoryBudget
+	}
+
 	return GenerationConfig{
-		Enabled:         enabled,
-		APIKey:          apiKey,
-		Endpoint:        endpoint,
-		ModelName:       modelName,
-		HTTPTimeout:     httpTimeout,
-		MaxOutputTokens: maxOutputTokens,
-		Temperature:     temperature,
-		ThinkingEnabled: thinkingEnabled,
+		Enabled:                      enabled,
+		APIKey:                       apiKey,
+		Endpoint:                     endpoint,
+		ModelName:                    modelName,
+		HTTPTimeout:                  httpTimeout,
+		MaxOutputTokens:              maxOutputTokens,
+		Temperature:                  temperature,
+		ThinkingEnabled:              thinkingEnabled,
+		MaxConcurrency:               maxConcurrency,
+		MaxConcurrencyPerUser:        maxConcurrencyPerUser,
+		MaxWaitersGlobal:             maxWaitersGlobal,
+		MaxWaitersPerUser:            maxWaitersPerUser,
+		QueueWaitTimeout:             queueWaitTimeout,
+		AnswerInputTokenBudget:       answerInputTokenBudget,
+		ConversationHistoryMaxTurns:  conversationHistoryMaxTurns,
+		ConversationHistoryMaxTokens: conversationHistoryMaxTokens,
 	}, nil
 }
 

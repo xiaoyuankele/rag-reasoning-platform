@@ -7,8 +7,10 @@ import { useAuthStore } from '../../features/auth/store/auth-store'
 const navigationItems = [
   { label: '工作台', to: '/' },
   { label: '文档库', to: '/documents' },
+  { label: '向量化', to: '/embeddings' },
   { label: '检索', to: '/search' },
   { label: '问答', to: '/answer' },
+  { label: '对话', to: '/conversations' },
 ]
 
 const authStore = useAuthStore()

@@ -1,6 +1,8 @@
 # 后端交接：向量任务并发、版本与 Redis 演进
 
-> 状态：2026-08-19 部分完成。提交 `c4696bc` 已实现等待意图、幂等申请、批量申请、取消和解析成功原子激活；
+> 状态：2026-08-21 部分完成。提交 `c4696bc` 已实现等待意图、幂等申请、批量申请、取消和解析成功原子激活；
+> 后续已补充按最多 100 个文档 ID 一次发现各自最新任务的 OwnerScope 查询，并完成单实例固定大小
+> Embedding Worker Pool；
 > 内容 revision、活动任务下的重新解析/删除约束、Worker 租约、配额和 Redis 仍未实现。跨端产品决策见
 > [文档向量化、在线编辑、并发与缓存设计复盘](../../shared/architecture/document-vectorization-editing-concurrency-review.md)。
 
@@ -13,10 +15,11 @@
 - `OwnerScope` 在 Handler、Application 和 SQL 三层的向量任务隔离；
 - PostgreSQL `FOR UPDATE SKIP LOCKED` 原子领取；
 - 活动向量任务唯一约束、有限重试、Token 和生命周期日志；
-- PDF Worker 与 Embedding Worker 独立循环。
+- PDF Worker 与 Embedding Worker 独立运行；Embedding 支持 1～4 个固定并发循环，默认 1 可安全降级；
 - `waiting_document` 持久意图和解析成功事务内激活；
 - 最多 100 份文档的逐项批量申请；
 - `waiting_document/queued` 取消和 `processing` 冲突保护。
+- 按文档批量发现最新任务，供前端跨会话恢复状态并避免 N+1 查询。
 
 本轮不把向量调用塞进 Python Processor 或 PDF Worker。新增的是“用户持久意图”和可证明正确的状态转换，
 不是把两条链路重新耦合。
@@ -27,8 +30,9 @@
 [完成] V1 状态与约束
   → [完成] V2 单个/批量申请和取消
   → [完成] V3 解析成功原子激活 waiting 任务
+  → [完成] V3.1 按文档批量发现最新任务
   → [计划] V4 revision 与重新解析一致性
-  → [计划] V5 并发配额、压测和 Worker 池
+  → [部分完成] V5 单实例 Worker 池；并发配额与完整压测仍待实施
   → [计划] V6 Worker 租约与 API/Worker 分进程
   → [计划] V7 可选 Redis 限流、Session 缓存和进度通知
 ```
@@ -167,7 +171,12 @@ WHERE document_id = $1
 ### 6.1 Worker 领取
 
 只领取 `queued`，不再通过 JOIN ready 文档把 `waiting_document` 混入可执行队列。领取与状态更新保持同一事务，
-继续使用 `FOR UPDATE SKIP LOCKED`。
+继续使用 `FOR UPDATE SKIP LOCKED`。同一实例可以通过 `EMBEDDING_WORKER_CONCURRENCY` 启动 1～4 个固定循环；
+不同循环共享无单次任务状态的 Worker、数据库连接池和 HTTP 客户端。每个循环一次只处理一份文档，单份文档内部
+仍按批次顺序调用提供方，最后通过一个 PostgreSQL 事务保存全部向量并更新任务终态。
+
+默认并发为 1，允许在供应商异常、费用控制或本机资源紧张时无代码降级。当前本机建议从 2 开始验证，不能把
+Worker 数直接等同于 HTTP goroutine 数或 Python 进程数。
 
 ### 6.2 用户取消
 
@@ -217,8 +226,26 @@ HTTP goroutine 数量不能代表系统容量。需要分别限制：
 - 批量 document ID 数量；
 - PostgreSQL 连接池和连接获取等待时间。
 
-达到用户预算返回 `429 + Retry-After`；系统资源暂时饱和返回 `503`。不要把新任务无限写入数据库后才依赖 Worker 慢慢
-消化。全局 FIFO 还需要防止一个用户占满队列，第一版至少在入队时限制每用户活动数量，后续再按指标设计公平调度。
+第一版入队背压已实现：活动状态为 `waiting_document/queued/processing`，默认每用户上限 100、全局上限 500。
+达到用户预算返回 `429 + Retry-After`，系统容量饱和返回 `503 + Retry-After`。Repository 在文档幂等检查后使用
+PostgreSQL 事务级 advisory lock 串行化“统计活动任务 + INSERT”，避免不同文档的并发请求同时越过最后一个名额。
+锁只覆盖短数据库事务，不覆盖 Worker 的远程 API 调用。
+
+第一版远程调用闸门也已实现：组合根只创建一个 `EmbeddingProviderGate`，其中包含 Worker、Online 和 Global
+三组槽位。后台 Worker 使用无本地超时的 `GatedEmbedder`，在线语义检索和问答内部检索使用限时等待的
+`GatedEmbedder`，二者复用同一个原始 DashScope/OpenAI 客户端，但先经过各自分类容量。默认 Worker 2、
+Online 2、Global 4；在线等待 2 秒后返回 `503 embedding_provider_capacity_exhausted`，后台等待则随任务
+context 或 shutdown 终止。Worker 和 Online 份额之和不能超过全局上限；启用 Worker 时，Worker 份额不能小于
+Worker 数，避免任务提前变成 `processing` 后长期堵在闸门前。
+
+该闸门还不是完整的供应商限流器：它不计算 RPM/TPM，不跨后端副本共享，在线类别内部也不保证用户级公平。
+只有多实例全局配额成为真实需求时才引入 Redis 等协调层。
+
+批量请求继续逐项提交：已经成功创建或复用的任务不因后续项目满额而回滚。Owner 公平领取已经落地：多用户竞争时
+默认每个 Owner 先获得 1 个 processing 槽位；没有其他 Owner 可获得基础槽位时，单一 Owner 最多借用到 2 个；
+已到 `next_attempt_at` 的任务真正等待超过 2 分钟后进入防饥饿优先级。`embedding_owner_schedules` 只保存最近派发游标，
+processing 数量仍实时查询 `embedding_jobs`，避免两份任务状态漂移。领取 Owner、领取任务、任务进入 processing 和
+调度游标更新在同一个 PostgreSQL 事务内完成。
 
 建议压测场景：重复批量提交、解析完成/申请同时发生、取消/领取同时发生、两个 Worker 并行、单用户洪峰、两个用户
 公平性、供应商 429/500、进程崩溃恢复和 30～60 分钟稳定性。默认测试使用本地 Fake Provider，避免真实费用。

@@ -6,23 +6,23 @@ import (
 	"testing"
 )
 
-type fakeInterruptedProcessingJobRecoverer struct {
-	markFailedFunc func(context.Context, string) (int64, error)
-	calls          int
+type fakeExpiredProcessingJobRecoverer struct {
+	requeueFunc func(context.Context, string) (int64, error)
+	calls       int
 }
 
-func (f *fakeInterruptedProcessingJobRecoverer) MarkInterruptedProcessingJobsFailed(
+func (f *fakeExpiredProcessingJobRecoverer) RequeueExpiredProcessingJobs(
 	ctx context.Context,
 	errorMessage string,
 ) (int64, error) {
 	f.calls++
-	return f.markFailedFunc(ctx, errorMessage)
+	return f.requeueFunc(ctx, errorMessage)
 }
 
 func TestInterruptedJobRecoveryServiceRecoversJobs(t *testing.T) {
 	expectedContext := context.Background()
-	jobs := &fakeInterruptedProcessingJobRecoverer{
-		markFailedFunc: func(
+	jobs := &fakeExpiredProcessingJobRecoverer{
+		requeueFunc: func(
 			ctx context.Context,
 			errorMessage string,
 		) (int64, error) {
@@ -39,7 +39,7 @@ func TestInterruptedJobRecoveryServiceRecoversJobs(t *testing.T) {
 			return 2, nil
 		},
 	}
-	service := NewInterruptedJobRecoveryService(jobs)
+	service := NewExpiredJobRecoveryService(jobs)
 
 	recoveredCount, err := service.Recover(expectedContext)
 
@@ -56,15 +56,15 @@ func TestInterruptedJobRecoveryServiceRecoversJobs(t *testing.T) {
 
 func TestInterruptedJobRecoveryServiceWrapsRepositoryError(t *testing.T) {
 	repositoryError := errors.New("database unavailable")
-	jobs := &fakeInterruptedProcessingJobRecoverer{
-		markFailedFunc: func(
+	jobs := &fakeExpiredProcessingJobRecoverer{
+		requeueFunc: func(
 			context.Context,
 			string,
 		) (int64, error) {
 			return 0, repositoryError
 		},
 	}
-	service := NewInterruptedJobRecoveryService(jobs)
+	service := NewExpiredJobRecoveryService(jobs)
 
 	recoveredCount, err := service.Recover(context.Background())
 

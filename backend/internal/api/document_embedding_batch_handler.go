@@ -11,12 +11,15 @@ import (
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
 	accessdomain "rag-reasoning-platform/backend/internal/domain/access"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
+	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
 
 const (
 	batchEmbeddingOutcomeCreated       = "created"
 	batchEmbeddingOutcomeAlreadyActive = "already_active"
 	batchEmbeddingOutcomeNotFound      = "not_found"
+	batchEmbeddingOutcomeRateLimited   = "rate_limited"
+	batchEmbeddingOutcomeCapacityFull  = "capacity_exhausted"
 	batchEmbeddingOutcomeFailed        = "failed"
 )
 
@@ -110,6 +113,20 @@ func (h *DocumentEmbeddingBatchHandler) QueueBatch(c *gin.Context) {
 		case errors.Is(item.Err, documentdomain.ErrNotFound):
 			responseItem.Outcome = batchEmbeddingOutcomeNotFound
 			responseItem.Error = &errorResponse{Error: "document not found", Code: errorCodeDocumentNotFound}
+		case errors.Is(item.Err, embeddingdomain.ErrOwnerActiveJobLimitExceeded):
+			responseItem.Outcome = batchEmbeddingOutcomeRateLimited
+			responseItem.Error = &errorResponse{
+				Error: "too many active embedding jobs for this user",
+				Code:  errorCodeEmbeddingOwnerJobLimit,
+			}
+			c.Header("Retry-After", "5")
+		case errors.Is(item.Err, embeddingdomain.ErrGlobalActiveJobLimitExceeded):
+			responseItem.Outcome = batchEmbeddingOutcomeCapacityFull
+			responseItem.Error = &errorResponse{
+				Error: "embedding queue is temporarily full",
+				Code:  errorCodeEmbeddingQueueCapacity,
+			}
+			c.Header("Retry-After", "5")
 		default:
 			responseItem.Outcome = batchEmbeddingOutcomeFailed
 			responseItem.Error = &errorResponse{Error: "internal server error", Code: errorCodeInternal}

@@ -1,0 +1,21 @@
+BEGIN;
+
+-- document_jobs 的行锁只在领取事务内有效。以下字段把任务所有权延长到
+-- 整个 Python 解析和 chunks 入库期间，使多个 Worker 进程能够安全协作。
+ALTER TABLE document_jobs
+    ADD COLUMN worker_id TEXT,
+    ADD COLUMN lease_token TEXT,
+    ADD COLUMN lease_expires_at TIMESTAMPTZ,
+    ADD COLUMN heartbeat_at TIMESTAMPTZ;
+
+-- 仅扫描 processing 中已经到期的任务，避免恢复轮询退化成全表扫描。
+CREATE INDEX idx_document_jobs_expired_lease
+    ON document_jobs (lease_expires_at, id)
+    WHERE status = 'processing';
+
+-- lease_token 是 fencing token；同一时刻不能属于两条 processing 任务。
+CREATE UNIQUE INDEX uq_document_jobs_active_lease_token
+    ON document_jobs (lease_token)
+    WHERE lease_token IS NOT NULL;
+
+COMMIT;

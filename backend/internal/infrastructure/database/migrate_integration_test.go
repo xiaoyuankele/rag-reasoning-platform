@@ -620,6 +620,28 @@ func assertAuthenticationSchema(
 		t.Fatalf("insert verified email user: %v", err)
 	}
 
+	var initialCorpusRevision int64
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT corpus_revision FROM users WHERE id = $1",
+		emailUserID,
+	).Scan(&initialCorpusRevision); err != nil {
+		t.Fatalf("query default corpus revision: %v", err)
+	}
+	if initialCorpusRevision != 1 {
+		t.Fatalf("default corpus revision = %d, want 1", initialCorpusRevision)
+	}
+	assertStatementRejected(
+		t,
+		ctx,
+		pool,
+		fmt.Sprintf(
+			"UPDATE users SET corpus_revision = 0 WHERE id = %d",
+			emailUserID,
+		),
+		"non-positive corpus revision",
+	)
+
 	if _, err := pool.Exec(
 		ctx,
 		`

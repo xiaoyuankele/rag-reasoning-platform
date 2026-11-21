@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
@@ -182,6 +183,16 @@ func TestDecodeProcessResponseReturnsChunks(t *testing.T) {
 		"request_id":"job-123",
 		"status":"succeeded",
 		"metadata":{"title":"Maglev control study"},
+		"metrics":{
+			"python_total_ms":75,
+			"source_open_ms":5,
+			"metadata_read_ms":1,
+			"text_extract_ms":60,
+			"text_split_ms":4,
+			"page_count":3,
+			"slowest_page_number":2,
+			"slowest_page_ms":30
+		},
 		"chunks":[
 			{"index":0,"content":"first","page_start":2,"page_end":3},
 			{"index":1,"content":"second"}
@@ -215,6 +226,19 @@ func TestDecodeProcessResponseReturnsChunks(t *testing.T) {
 			result.DetectedTitle,
 			"Maglev control study",
 		)
+	}
+	wantMetrics := &documentdomain.ProcessorStageMetrics{
+		TotalDuration:        75 * time.Millisecond,
+		SourceOpenDuration:   5 * time.Millisecond,
+		MetadataReadDuration: time.Millisecond,
+		TextExtractDuration:  60 * time.Millisecond,
+		TextSplitDuration:    4 * time.Millisecond,
+		PageCount:            3,
+		SlowestPageNumber:    2,
+		SlowestPageDuration:  30 * time.Millisecond,
+	}
+	if !reflect.DeepEqual(result.Metrics, wantMetrics) {
+		t.Fatalf("metrics = %+v, want %+v", result.Metrics, wantMetrics)
 	}
 }
 
@@ -345,6 +369,54 @@ func TestDecodeProcessResponseRejectsInvalidEnvelope(t *testing.T) {
 				"status":"failed",
 				"metadata":{"title":"must not be returned"},
 				"error":{"code":"parse_failed","message":"failure","retryable":false}
+			}`,
+		},
+		{
+			name: "failure contains metrics",
+			responseJSON: `{
+				"contract_version":"v1",
+				"request_id":"job-123",
+				"status":"failed",
+				"metrics":{"python_total_ms":1},
+				"error":{"code":"parse_failed","message":"failure","retryable":false}
+			}`,
+		},
+		{
+			name: "metrics contain negative duration",
+			responseJSON: `{
+				"contract_version":"v1",
+				"request_id":"job-123",
+				"status":"succeeded",
+				"metrics":{
+					"python_total_ms":-1,
+					"source_open_ms":0,
+					"metadata_read_ms":0,
+					"text_extract_ms":0,
+					"text_split_ms":0,
+					"page_count":1,
+					"slowest_page_number":1,
+					"slowest_page_ms":0
+				},
+				"chunks":[{"index":0,"content":"content"}]
+			}`,
+		},
+		{
+			name: "metrics contain invalid slowest page",
+			responseJSON: `{
+				"contract_version":"v1",
+				"request_id":"job-123",
+				"status":"succeeded",
+				"metrics":{
+					"python_total_ms":1,
+					"source_open_ms":0,
+					"metadata_read_ms":0,
+					"text_extract_ms":0,
+					"text_split_ms":0,
+					"page_count":2,
+					"slowest_page_number":3,
+					"slowest_page_ms":0
+				},
+				"chunks":[{"index":0,"content":"content"}]
 			}`,
 		},
 		{

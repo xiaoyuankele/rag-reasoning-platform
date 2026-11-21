@@ -11,9 +11,11 @@ const props = withDefaults(
   defineProps<{
     modelValue: DocumentScope
     invalidSelection?: boolean
+    disabled?: boolean
   }>(),
   {
     invalidSelection: false,
+    disabled: false,
   },
 )
 
@@ -49,12 +51,12 @@ const unavailableDocumentId = computed(() => {
 const scopeDescription = computed(() => {
   if (props.invalidSelection) return 'URL 中的文档范围无效，请改用全部文档或重新选择。'
   if (props.modelValue.kind === 'all') {
-    return '在当前账户所有已经解析完成的文档中检索。'
+    return '使用当前账户所有已经解析完成的文档。'
   }
   if (selectedDocument.value) {
-    return `只检索“${displayTitle(selectedDocument.value)}”。`
+    return `只使用“${displayTitle(selectedDocument.value)}”。`
   }
-  return `文档 #${props.modelValue.documentId} 当前不可用于关键词检索。`
+  return `文档 #${props.modelValue.documentId} 当前不可用于检索或问答。`
 })
 
 function displayTitle(document: ResearchDocument): string {
@@ -68,6 +70,7 @@ function optionLabel(document: ResearchDocument): string {
 }
 
 function handleChange(event: Event): void {
+  if (props.disabled) return
   const value = (event.target as HTMLSelectElement).value
   if (value === 'all') {
     emit('update:modelValue', allDocumentsScope())
@@ -79,6 +82,16 @@ function handleChange(event: Event): void {
   if (Number.isSafeInteger(documentId) && documentId > 0) {
     emit('update:modelValue', { kind: 'single', documentId })
   }
+}
+
+function handleReload(): void {
+  if (props.disabled) return
+  void load()
+}
+
+function handleUseAllDocuments(): void {
+  if (props.disabled) return
+  emit('update:modelValue', allDocumentsScope())
 }
 </script>
 
@@ -98,6 +111,7 @@ function handleChange(event: Event): void {
         id="document-scope"
         name="document_scope"
         :value="selectedValue"
+        :disabled="disabled"
         :aria-describedby="'document-scope-help'"
         @change="handleChange"
       >
@@ -129,7 +143,7 @@ function handleChange(event: Event): void {
         <p>{{ errorMessage }} “全部文档”范围仍然可用。</p>
         <small v-if="requestId">请求编号：{{ requestId }}</small>
       </div>
-      <button type="button" @click="load">重新加载</button>
+      <button type="button" :disabled="disabled" @click="handleReload">重新加载</button>
     </div>
     <div
       v-if="!isLoading && (invalidSelection || unavailableDocumentId !== null)"
@@ -137,12 +151,12 @@ function handleChange(event: Event): void {
       role="alert"
     >
       <span>{{ scopeDescription }}</span>
-      <button type="button" @click="emit('update:modelValue', allDocumentsScope())">
+      <button type="button" :disabled="disabled" @click="handleUseAllDocuments">
         使用全部文档
       </button>
     </div>
     <div v-else-if="!isLoading && state === 'empty' && !invalidSelection" class="scope-notice">
-      当前没有解析完成的文档。选择“全部”仍可检索，但结果会为空。
+      当前没有解析完成的文档。选择“全部”仍可提交范围，但检索或问答将没有可用证据。
     </div>
   </section>
 </template>

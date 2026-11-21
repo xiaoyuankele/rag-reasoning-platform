@@ -10,14 +10,30 @@ import (
 )
 
 const (
-	defaultEmbeddingDimensions        = 1536
-	defaultEmbeddingHTTPTimeout       = 30 * time.Second
-	defaultEmbeddingProcessingTimeout = 5 * time.Minute
-	defaultEmbeddingPollInterval      = 2 * time.Second
-	defaultEmbeddingMaxAttempts       = 5
-	maximumEmbeddingMaxAttempts       = 20
-	defaultEmbeddingRetryBaseDelay    = 5 * time.Second
-	defaultEmbeddingRetryMaxDelay     = 2 * time.Minute
+	defaultEmbeddingDimensions                = 1536
+	defaultEmbeddingWorkerConcurrency         = 1
+	maximumEmbeddingWorkerConcurrency         = 4
+	defaultEmbeddingProviderConcurrency       = 4
+	maximumEmbeddingProviderConcurrency       = 32
+	defaultEmbeddingWorkerProviderConcurrency = 2
+	defaultEmbeddingOnlineProviderConcurrency = 2
+	defaultEmbeddingOnlineWaitTimeout         = 2 * time.Second
+	defaultEmbeddingHTTPTimeout               = 30 * time.Second
+	defaultEmbeddingProcessingTimeout         = 5 * time.Minute
+	defaultEmbeddingPollInterval              = 2 * time.Second
+	defaultEmbeddingMaxAttempts               = 5
+	maximumEmbeddingMaxAttempts               = 20
+	defaultEmbeddingRetryBaseDelay            = 5 * time.Second
+	defaultEmbeddingRetryMaxDelay             = 2 * time.Minute
+	defaultEmbeddingActiveOwnerLimit          = 100
+	defaultEmbeddingActiveGlobalLimit         = 500
+	maximumEmbeddingActiveJobLimit            = 10000
+	defaultEmbeddingOwnerInFlightLimit        = 1
+	defaultEmbeddingOwnerBorrowedLimit        = 2
+	maximumEmbeddingOwnerInFlightLimit        = 64
+	defaultEmbeddingStarvationThreshold       = 2 * time.Minute
+	defaultEmbeddingJobLeaseDuration          = 60 * time.Second
+	defaultEmbeddingJobHeartbeatInterval      = 15 * time.Second
 )
 
 // EmbeddingProvider 是远程向量服务提供方的配置枚举。
@@ -59,26 +75,54 @@ var (
 	ErrInvalidEmbeddingRetryDelays = errors.New(
 		"embedding retry base delay must not exceed maximum delay",
 	)
+	ErrInvalidEmbeddingActiveJobLimits = errors.New(
+		"embedding global active job limit must not be smaller than the per-user limit",
+	)
+	ErrInvalidEmbeddingProviderConcurrency = errors.New(
+		"embedding worker provider concurrency must not be smaller than worker concurrency",
+	)
+	ErrInvalidEmbeddingProviderAllocation = errors.New(
+		"embedding worker and online provider concurrency must not exceed global provider concurrency",
+	)
+	ErrInvalidEmbeddingOwnerSchedulingLimits = errors.New(
+		"embedding borrowed owner in-flight limit must not be smaller than the base owner limit",
+	)
+	ErrInvalidEmbeddingJobLeaseTiming = errors.New(
+		"embedding job heartbeat interval must be shorter than lease duration",
+	)
 )
 
 // EmbeddingConfig 保存任务入队、后台执行和在线语义检索需要的向量配置。
 //
 // APIKey 只允许传给远程 HTTP 适配器，禁止写入日志、数据库或 HTTP 响应。
 type EmbeddingConfig struct {
-	WorkerEnabled         bool
-	SemanticSearchEnabled bool
-	Provider              EmbeddingProvider
-	APIKey                string
-	Endpoint              string
-	ModelName             string
-	Dimensions            int
-	BatchSize             int
-	HTTPTimeout           time.Duration
-	ProcessingTimeout     time.Duration
-	PollInterval          time.Duration
-	MaxAttempts           int
-	RetryBaseDelay        time.Duration
-	RetryMaxDelay         time.Duration
+	WorkerEnabled             bool
+	WorkerConcurrency         int
+	ProviderMaxConcurrency    int
+	WorkerProviderConcurrency int
+	OnlineProviderConcurrency int
+	OnlineQueueWaitTimeout    time.Duration
+	SemanticSearchEnabled     bool
+	Provider                  EmbeddingProvider
+	APIKey                    string
+	Endpoint                  string
+	ModelName                 string
+	Dimensions                int
+	BatchSize                 int
+	HTTPTimeout               time.Duration
+	ProcessingTimeout         time.Duration
+	PollInterval              time.Duration
+	MaxAttempts               int
+	RetryBaseDelay            time.Duration
+	RetryMaxDelay             time.Duration
+	ActiveJobsPerUserLimit    int
+	ActiveJobsGlobalLimit     int
+	OwnerInFlightLimit        int
+	OwnerBorrowedLimit        int
+	StarvationThreshold       time.Duration
+	WorkerID                  string
+	JobLeaseDuration          time.Duration
+	JobHeartbeatInterval      time.Duration
 }
 
 // LoadEmbedding 从环境变量加载向量任务、Worker 与语义检索配置。
@@ -93,6 +137,70 @@ func LoadEmbedding() (EmbeddingConfig, error) {
 	)
 	if err != nil {
 		return EmbeddingConfig{}, err
+	}
+
+	workerConcurrency, err := loadPositiveBoundedInt(
+		"EMBEDDING_WORKER_CONCURRENCY",
+		defaultEmbeddingWorkerConcurrency,
+		maximumEmbeddingWorkerConcurrency,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding worker concurrency: %w",
+			err,
+		)
+	}
+
+	providerMaxConcurrency, err := loadPositiveBoundedInt(
+		"EMBEDDING_PROVIDER_MAX_CONCURRENCY",
+		defaultEmbeddingProviderConcurrency,
+		maximumEmbeddingProviderConcurrency,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding provider max concurrency: %w",
+			err,
+		)
+	}
+	workerProviderConcurrency, err := loadPositiveBoundedInt(
+		"EMBEDDING_WORKER_PROVIDER_CONCURRENCY",
+		defaultEmbeddingWorkerProviderConcurrency,
+		maximumEmbeddingProviderConcurrency,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding worker provider concurrency: %w",
+			err,
+		)
+	}
+	onlineProviderConcurrency, err := loadPositiveBoundedInt(
+		"EMBEDDING_ONLINE_PROVIDER_CONCURRENCY",
+		defaultEmbeddingOnlineProviderConcurrency,
+		maximumEmbeddingProviderConcurrency,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding online provider concurrency: %w",
+			err,
+		)
+	}
+	if workerProviderConcurrency >
+		providerMaxConcurrency-onlineProviderConcurrency {
+		return EmbeddingConfig{}, ErrInvalidEmbeddingProviderAllocation
+	}
+
+	onlineQueueWaitTimeout, err := loadPositiveDuration(
+		"EMBEDDING_ONLINE_QUEUE_WAIT_TIMEOUT",
+		defaultEmbeddingOnlineWaitTimeout,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding online queue wait timeout: %w",
+			err,
+		)
+	}
+	if workerEnabled && workerProviderConcurrency < workerConcurrency {
+		return EmbeddingConfig{}, ErrInvalidEmbeddingProviderConcurrency
 	}
 
 	provider, err := loadEmbeddingProvider()
@@ -199,21 +307,126 @@ func LoadEmbedding() (EmbeddingConfig, error) {
 		return EmbeddingConfig{}, ErrInvalidEmbeddingRetryDelays
 	}
 
+	activeJobsPerUserLimit, err := loadPositiveBoundedInt(
+		"EMBEDDING_MAX_ACTIVE_JOBS_PER_USER",
+		defaultEmbeddingActiveOwnerLimit,
+		maximumEmbeddingActiveJobLimit,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf("load embedding per-user active job limit: %w", err)
+	}
+	activeJobsGlobalLimit, err := loadPositiveBoundedInt(
+		"EMBEDDING_MAX_ACTIVE_JOBS_GLOBAL",
+		defaultEmbeddingActiveGlobalLimit,
+		maximumEmbeddingActiveJobLimit,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf("load embedding global active job limit: %w", err)
+	}
+	if activeJobsGlobalLimit < activeJobsPerUserLimit {
+		return EmbeddingConfig{}, ErrInvalidEmbeddingActiveJobLimits
+	}
+
+	ownerInFlightLimit, err := loadPositiveBoundedInt(
+		"EMBEDDING_MAX_IN_FLIGHT_PER_OWNER",
+		defaultEmbeddingOwnerInFlightLimit,
+		maximumEmbeddingOwnerInFlightLimit,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding owner in-flight limit: %w",
+			err,
+		)
+	}
+
+	ownerBorrowedLimit, err := loadPositiveBoundedInt(
+		"EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER",
+		defaultEmbeddingOwnerBorrowedLimit,
+		maximumEmbeddingOwnerInFlightLimit,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding borrowed owner in-flight limit: %w",
+			err,
+		)
+	}
+	if ownerBorrowedLimit < ownerInFlightLimit {
+		return EmbeddingConfig{}, ErrInvalidEmbeddingOwnerSchedulingLimits
+	}
+
+	starvationThreshold, err := loadPositiveDuration(
+		"EMBEDDING_STARVATION_THRESHOLD",
+		defaultEmbeddingStarvationThreshold,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding starvation threshold: %w",
+			err,
+		)
+	}
+
+	workerID := strings.TrimSpace(os.Getenv("EMBEDDING_WORKER_ID"))
+	if workerID == "" {
+		hostname, hostnameErr := os.Hostname()
+		if hostnameErr != nil || strings.TrimSpace(hostname) == "" {
+			hostname = "embedding-worker"
+		}
+		workerID = fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	}
+
+	jobLeaseDuration, err := loadPositiveDuration(
+		"EMBEDDING_JOB_LEASE_DURATION",
+		defaultEmbeddingJobLeaseDuration,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding job lease duration: %w",
+			err,
+		)
+	}
+
+	jobHeartbeatInterval, err := loadPositiveDuration(
+		"EMBEDDING_JOB_HEARTBEAT_INTERVAL",
+		defaultEmbeddingJobHeartbeatInterval,
+	)
+	if err != nil {
+		return EmbeddingConfig{}, fmt.Errorf(
+			"load embedding job heartbeat interval: %w",
+			err,
+		)
+	}
+	if jobHeartbeatInterval >= jobLeaseDuration {
+		return EmbeddingConfig{}, ErrInvalidEmbeddingJobLeaseTiming
+	}
+
 	return EmbeddingConfig{
-		WorkerEnabled:         workerEnabled,
-		SemanticSearchEnabled: semanticSearchEnabled,
-		Provider:              provider,
-		APIKey:                apiKey,
-		Endpoint:              endpoint,
-		ModelName:             modelName,
-		Dimensions:            dimensions,
-		BatchSize:             batchSize,
-		HTTPTimeout:           httpTimeout,
-		ProcessingTimeout:     processingTimeout,
-		PollInterval:          pollInterval,
-		MaxAttempts:           maxAttempts,
-		RetryBaseDelay:        retryBaseDelay,
-		RetryMaxDelay:         retryMaxDelay,
+		WorkerEnabled:             workerEnabled,
+		WorkerConcurrency:         workerConcurrency,
+		ProviderMaxConcurrency:    providerMaxConcurrency,
+		WorkerProviderConcurrency: workerProviderConcurrency,
+		OnlineProviderConcurrency: onlineProviderConcurrency,
+		OnlineQueueWaitTimeout:    onlineQueueWaitTimeout,
+		SemanticSearchEnabled:     semanticSearchEnabled,
+		Provider:                  provider,
+		APIKey:                    apiKey,
+		Endpoint:                  endpoint,
+		ModelName:                 modelName,
+		Dimensions:                dimensions,
+		BatchSize:                 batchSize,
+		HTTPTimeout:               httpTimeout,
+		ProcessingTimeout:         processingTimeout,
+		PollInterval:              pollInterval,
+		MaxAttempts:               maxAttempts,
+		RetryBaseDelay:            retryBaseDelay,
+		RetryMaxDelay:             retryMaxDelay,
+		ActiveJobsPerUserLimit:    activeJobsPerUserLimit,
+		ActiveJobsGlobalLimit:     activeJobsGlobalLimit,
+		OwnerInFlightLimit:        ownerInFlightLimit,
+		OwnerBorrowedLimit:        ownerBorrowedLimit,
+		StarvationThreshold:       starvationThreshold,
+		WorkerID:                  workerID,
+		JobLeaseDuration:          jobLeaseDuration,
+		JobHeartbeatInterval:      jobHeartbeatInterval,
 	}, nil
 }
 

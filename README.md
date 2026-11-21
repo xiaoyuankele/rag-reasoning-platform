@@ -2,7 +2,17 @@
 
 一个面向学生、研究者和小团队的轻量文档知识系统。项目以 Go 构建稳定的业务后端并直接处理 Markdown/TXT，以 Python 承担 PDF、DOCX 等复杂文档解析和后续 AI 能力，优先完成可运行、可测试、可解释的后端主链路。
 
-> 当前状态：P5（个人版工程化基线）已完成。P0～P4 的文档管理、异步解析、关键词检索、向量生产、语义检索和带来源问答均已形成可运行闭环；P5 已补齐稳定路径、结构化日志、容器部署、配套备份恢复、异常任务恢复及分级自动化回归。P6 后端 B1～B7 及忘记/重置密码已完成：身份闭环、PostgreSQL Session、全链路数据隔离、本地 Mailpit 邮件联调、历史数据显式认领及 `owner_user_id NOT NULL` 硬约束均已通过发布验收。下一步对接前端登录态与个人用户完整产品验收；团队工作区和成员权限留到 P7。混合检索、DOCX、OCR、复杂学术版面及表格公式质量继续作为后续增量能力。
+> 当前状态（2026-11-12）：已提交基线完成 P0～P5、P6 后端 B1～B7 与密码重置，个人用户前端也已接入
+> Session 恢复、登录/注册/退出、受保护路由以及文档、检索、向量化和单轮问答入口。M1 会话与消息持久化、
+> M2 异步 Answer Job、latest 恢复、游标分页、参数、来源与 Token、会话管理和终态保留策略已分别提交为
+> `d64170c` 与 `e1977e5`，并通过完整代码门禁、隔离 PostgreSQL、持久迁移、本地 HTTP 冒烟和三轮真实
+> `qwen3.6-flash` Generation 验收。M3.1 第一片已经让 conversation-linked 回答按冻结消息边界读取
+> 最近 6 轮、最多 3000 个估算 Token 的 completed 历史；最近用户问题还会与当前追问组成一次有界语义检索，
+> 最终在 16000 Token 总输入预算内与当前 RAG 证据组装 Prompt。该片已通过单元、静态、隔离 PostgreSQL 与
+> Fake Generator 纵向门禁，真实远程多轮质量仍待单独验收；
+> SSE、来源快照和旧历史摘要仍未实现；
+> 异步问答默认由 `ANSWER_JOBS_ENABLED=false` 关闭。团队工作区和
+> 成员权限留到 P7，混合检索、DOCX、OCR、复杂学术版面及表格公式质量继续作为后续增量能力。
 
 ## 项目目标
 
@@ -17,7 +27,7 @@
 - 简洁的 Vue Web 工作台
 - 核心接口与任务状态测试
 
-项目强调低资源占用：文件流式处理、worker 默认单并发、Python 按需启动、AI 能力可关闭且失败可降级。
+项目强调低资源占用：文件流式处理、worker 默认单并发且可配置为有界并发、Python 可选择按任务启动或通过有界进程池复用、AI 能力可关闭且失败可降级。
 
 ## 技术架构
 
@@ -30,9 +40,15 @@
 
 ### Go 与 Python 如何协作
 
-Markdown/TXT 首先由 Go 直接处理，不需要启动 Python。对于 PDF、DOCX 等复杂格式，第一阶段不让 Python 作为常驻服务运行：Go 创建后台任务后按需启动 Python 子进程，双方通过标准输入、标准输出和 JSON 交换数据。Go 负责超时、错误处理、状态更新和结果入库，Python 完成计算后退出并释放内存。
+Markdown/TXT 首先由 Go 直接处理，不需要启动 Python。对于 PDF、DOCX 等复杂格式，Go 创建后台任务后调用 Python 子进程，双方通过 UTF-8 标准输入、标准输出和版本化 JSON 交换数据。默认 `oneshot` 模式仍是一份文档一个进程的稳定降级路径；可选 `pool` 模式使用 JSON Lines 让固定数量的 Python 进程连续处理多份文档，并在达到回收上限、超时、崩溃或协议异常后重建。Go 负责超时、进程生命周期、错误处理、状态更新和结果入库，Python 不访问 PostgreSQL。
 
 当功能和负载证明有独立部署的需要时，再考虑把 Python 改造成 HTTP AI 服务。普通文档管理和关键词检索不依赖 AI 服务，Python 或模型不可用时，Go 后端仍应提供基础能力。
+
+部署角色拆分第二阶段已经完成条件组装。`APP_ROLE` 支持 `all`、`api`、`document-worker`、
+`embedding-worker` 和 `answer-worker`：默认 `all` 保持原单进程行为；`api` 不创建 Python Pool 或后台
+领取循环；三个 Worker 角色不创建 Gin 路由或 HTTP 监听。显式选择 `embedding-worker` 或
+`answer-worker` 时必须同时打开对应功能开关，避免启动一个不工作的空壳进程。部署边界与后续前置条件见
+[同一二进制部署角色拆分路线](docs/backend/architecture/deployment-role-roadmap.md)。
 
 ```text
 浏览器
@@ -92,7 +108,7 @@ rag_reasoning_platform_individual/
 - PDF、Markdown 和 TXT 流式上传及大小、类型校验
 - 文档增删查
 - `uploaded`、`processing`、`ready`、`failed` 状态流转
-- 单并发后台解析、超时、失败记录和手动重试
+- 默认单并发、可配置 1～4 的后台解析，支持超时、失败记录和手动重试
 - 文本分块入库
 - 关键词检索、分页与过滤
 - 核心接口和任务状态测试
@@ -120,17 +136,18 @@ rag_reasoning_platform_individual/
 
 - **P0：范围与仓库**——目录、Git、忽略规则、配置示例和基础说明。
 - **P1：最小后端骨架**——Go 模块、`/health`、PostgreSQL 和文档基础接口。
-- **P2：异步解析链路**——任务表、单并发 worker、Python 解析、失败重试与幂等。
+- **P2：异步解析链路**——任务表、有界 worker、Python 解析、失败重试与幂等。
 - **P3：检索**——关键词/全文检索、分页、过滤、排序和测量。
 - **P4：AI 增强**——向量检索、带来源引用的摘要或问答，以及失败降级。
 - **P5：个人版后端工程化**——运行路径、测试、日志、配置校验、部署、备份和性能/成本记录。
-- **P6：个人用户产品化（后端已完成，前端联调中）**——个人账户、PostgreSQL Session、忘记/重置密码、文档归属与全链路私有数据隔离。
+- **P6：个人用户产品化（后端已完成，前端认证闭环已接入）**——个人账户、PostgreSQL Session、忘记/重置密码、受保护前端路由、文档归属与全链路私有数据隔离；完整产品验收继续推进。
 - **P7：团队与多租户（未来）**——工作区、成员权限、共享、配额与审计；只有出现团队协作需求后启动。
 
-前端不复用后端的 P 阶段编号，而是沿着独立的 `F0～F5` 路线推进：从 Vue 工程骨架、统一 API Client，
-逐步完成文档管理、检索、AI 工作台和前端工程化。P6 将先增加个人登录态，租户切换仍留在 P7。
+前端不复用后端的 P 阶段编号，而是沿着独立的 `F0～F5` 路线推进。当前已经接入 Vue 工程骨架、统一 API Client、
+个人登录态、文档管理、检索、向量化、单轮问答和会话工作台；会话真实 Generation 主链路已经通过，剩余产品边界继续按专项门禁推进，
+租户切换仍留在 P7。
 
-### 当前里程碑进度（2026-08-17）
+### 当前里程碑进度（2026-11-04）
 
 | 阶段 | 状态 | 当前结论 |
 | --- | --- | --- |
@@ -140,11 +157,13 @@ rag_reasoning_platform_individual/
 | P3 | 已完成 | 关键词检索、分页、文档过滤、标题来源、稳定排序、性能基线、`pg_trgm + GIN` 和真实 HTTP 验收均已完成 |
 | P4 | 已完成（第一版） | 向量生产、独立语义检索、带来源问答、回答语言、未就绪门禁、证据多样化和 15 条冻结样本人工质量评估均已完成；复杂表格和证据可回答性问题已保留边界 |
 | P5 | 已完成（个人版基线） | 稳定运行路径、可观测性、容器部署、配套备份恢复、任务恢复、默认回归、一次性数据库集成及发布候选分级验收均已完成；不包含用户与租户系统 |
-| P6 | 后端 B1～B7 及密码重置已完成 | 身份闭环、忘记/重置密码、全链路用户隔离、本地 Mailpit 注册、46 篇历史文档事务化认领和 `owner_user_id NOT NULL` 已完成；默认回归、一次性 PostgreSQL、真实 Go/Python 及双用户 HTTP 隔离发布验收全部通过。下一步完成前端登录态与个人用户产品闭环 |
+| P6 | 后端已完成；前端认证闭环已接入 | 身份闭环、忘记/重置密码、全链路用户隔离、本地 Mailpit 注册、46 篇历史文档事务化认领和 `owner_user_id NOT NULL` 已完成；前端已接入 Session 恢复、认证页面和受保护应用外壳，完整个人用户产品验收继续推进 |
+| 会话 M1/M2 | 第一片已提交并完成真实 Generation 验收 | M1 持久化、M2 异步回答、latest、opaque cursor、参数、来源/Token、会话管理和 standalone/linked 保留边界已通过代码门禁、隔离 PostgreSQL、迁移 29～37、本地 HTTP 冒烟及三轮真实 Generation；真实多轮上下文、SSE、独立历史证据快照与 Token 预算未实现 |
+| 会话 M3.1 | 第一片已提交；真实远程多轮质量待验收 | 按 OwnerScope 和当前 user message 冻结历史边界，选择最近 6 轮/最多 3000 个估算 Token，使用最近用户问题补足追问检索语义，并以 16000 Token 总预算裁剪低排名证据；答案缓存对会话任务强制绕过，摘要、来源快照和真实多轮质量验收仍待完成 |
 | P7 | 未开始 | 团队工作区、成员权限、共享、租户配额和审计尚未设计或实现 |
 
-前端 F0、F1 已完成，F3 关键词检索最小切片已通过真实联调；下一步先接入 P6 后端身份边界，再完成
-带登录态的 F2 文档管理和后续检索、问答闭环。
+前端认证闭环和受保护工作台已经接入；文档、向量化、关键词/语义检索、单轮问答和会话页面均已有代码与自动化门禁。
+下一步进入真实多轮上下文、独立历史证据快照、Token 预算和流式输出。
 
 PDF 文献处理的错误分类、页码来源、资源限制、解析库选择和分阶段验收标准见
 [PDF 文献处理架构与分阶段路线](docs/backend/architecture/pdf-processing-roadmap.md)。
@@ -217,7 +236,7 @@ PostgreSQL 文档仓储已实现 `Create`、`GetByID`、分页 `List` 和 `Delet
 
 `GET /processing-jobs/:id` 已实现单个解析任务状态查询，返回任务状态、尝试次数、错误信息和各阶段时间。自动化测试已覆盖非法 ID、任务不存在、内部错误和成功响应；真实 HTTP 测试已验证 `200`、`400`、`404`，并确认查询结果与刚创建的 `queued` 任务一致。
 
-Worker 已实现安全领取下一条任务的基础能力：PostgreSQL 事务使用 `FOR UPDATE SKIP LOCKED` 防止并发重复领取，并在同一事务中把任务与文档更新为 `processing`。Application 层把空队列转换为正常空闲结果。真实 PostgreSQL 集成测试已验证最早任务优先、尝试次数递增、状态同步以及两个并发领取者不会得到同一任务。
+Worker 已实现按 Owner 公平领取下一条任务：PostgreSQL 事务使用 `FOR UPDATE SKIP LOCKED` 同时锁定 Owner 调度游标和具体任务，防止并发重复领取。存在多个等待用户时，每个用户默认先获得 1 个解析槽位；没有其他用户可获得基础槽位时，同一用户最多可借用到 2 个槽位，既避免单个大批量用户长期占满 Worker，也避免低负载时闲置算力。等待超过 2 分钟的 Owner 进入防饥饿优先级；任务领取、文档进入 `processing` 和调度游标更新在同一事务内完成。真实 PostgreSQL 集成测试已验证不同 Owner 优先、空闲容量借用、借用上限、槽位释放、防饥饿及两个并发 Worker 领取不同 Owner 任务。
 
 Worker Application 已定义可替换的文档处理器端口，并实现单次“领取、查询文档、调用处理器、保存统一文本块、成功或失败收尾”编排。PostgreSQL 会在事务中同步更新任务与文档：成功时分别进入 `succeeded` 和 `ready`，处理或文本块保存失败时都进入 `failed` 并保存安全错误说明。单元测试和真实 PostgreSQL + Fake Processor 集成测试已经覆盖成功、处理失败、文本块保存失败、状态回写失败和双重错误保留。
 
@@ -225,19 +244,28 @@ Worker Application 已定义可替换的文档处理器端口，并实现单次�
 
 本地文件存储已经提供安全 `Open` 能力，能够校验存储路径、保留文件系统错误并在读取过程中响应 context 取消。Go 原生 `TextProcessor` 支持 `text/markdown` 和 `text/plain`，会流式读取 UTF-8 字符、折叠连续空白、去除 BOM，并按每块最多 1000 个 Unicode 字符生成从 0 开始的稳定文本块。自动化测试已覆盖格式拒绝、打开失败、空文本、非法 UTF-8、context 取消、成功与失败关闭，以及真实 LocalStorage 跨层组合。
 
-单并发 WorkerLoop 已经实现连续领取、空队列等待、错误上报和 context 取消，并由生产入口以独立 goroutine 启动。HTTP 服务使用标准库 `http.Server` 响应退出信号和执行限时优雅关闭；真实 HTTP、PostgreSQL 与本地文件链路已经验证 Markdown 文档能够自动处理为统一文本块。Worker 使用独立子 context 限制单份文档的处理时间，默认超时为 5 分钟，并在超时后使用仍有效的父 context 将任务安全标记为失败。
+固定大小 Worker Pool 已经实现连续领取、空队列等待、错误上报和 context 取消；默认并发为 1，可通过 `DOCUMENT_WORKER_CONCURRENCY` 配置为 1～4。Python Process Pool 也已实现固定槽位租借、进程复用、单进程处理数量上限、超时杀进程、崩溃替换、输出边界和 shutdown；默认仍使用 `oneshot`，显式配置 `pool` 后才启用。两个不同任务的 PostgreSQL 收尾、两个一次性 Python 子进程以及两个常驻 Python 槽位均已完成并发验收。HTTP 服务使用标准库 `http.Server` 响应退出信号和执行限时优雅关闭；真实 HTTP、PostgreSQL 与本地文件链路已经验证 Markdown 文档能够自动处理为统一文本块。Worker 使用独立子 context 限制单份文档的处理时间，默认超时为 5 分钟，并在超时后使用仍有效的父 context 将任务安全标记为失败。文档任务现已增加 PostgreSQL 持久化租约、周期心跳和 fencing token；只有当前租约持有者可以替换 chunks 或写入终态，失联任务到期后会自动重新排队。
 
-服务启动时会在 Worker 运行前恢复上一次异常退出遗留的 `processing` 任务，并在同一 PostgreSQL 事务内把任务和关联文档标记为 `failed`。真实启动测试已验证恢复数量、双表状态一致性、安全错误信息和第二次启动的幂等性。当前恢复策略建立在单实例 Worker 约束上；未来扩展为多实例时需要使用 lease/heartbeat 判断任务是否真正失联。
+文档解析任务入队已经增加 PostgreSQL 原子背压：默认每个用户最多保留 5 条 `queued/processing` 任务，全系统最多 40 条；并发请求通过文档行锁和短事务 advisory lock 竞争容量，不会突破最后一个名额。用户满额返回 `429`，全局满额返回 `503`，成功或失败的历史任务不占用名额。
+
+Document、Embedding 与 Answer 三类后台任务都已使用 PostgreSQL 持久化租约、周期心跳和随机 fencing token。Worker 只恢复租约真正过期的 `processing` 任务；仍在其他进程心跳的任务不会被重排。成功、重试和失败收尾都必须携带当前未过期 token，因此旧 Worker 即使稍后恢复运行，也不能覆盖新 Worker 的 chunks、vectors、答案或任务终态。
 
 `ProcessorDispatcher` 已作为统一处理器入口接入 Worker，根据数据库中的可信 MIME 类型选择具体实现。`text/markdown` 和 `text/plain` 路由到 Go `TextProcessor`，`application/pdf` 路由到生产 `PythonProcessor`；尚未注册的格式会返回可判断的错误，而不会误用其他处理器。未来增加 DOCX、OCR 或替换 PDF 解析器时，可以继续添加或替换适配器，Worker 的任务领取、超时、文本块保存和状态收尾流程不需要修改。
 
-Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义版本化请求、成功响应、失败响应、稳定错误码、示例和进程通信规则。Go 基础设施层已经实现安全绝对路径解析、请求构造、UTF-8 JSON 编码、严格响应解码、文本块不变量校验、结构化 Python 失败错误、子进程超时取消和 stdout/stderr 输出上限。生产 `PythonProcessor` 已注册到 `application/pdf`，自动化测试覆盖成功、结构化失败、非法响应、进程崩溃、超时与输出超限。Python 内部已经按 domain、application、contracts、entrypoints 和 infrastructure 完成轻量分层；pypdf 与简单文本切分器通过 application 定义的 Protocol 接入，不向核心层暴露第三方框架对象。Python PDF 处理能够识别伪造或损坏文件、密码要求、提取权限限制、OCR 需求以及文件和页数超限，并能对普通数字 PDF 逐页提取、规范化、页内分块和返回物理页码。真实英文文献已生成 126 个带页码文本块，真实中文文献已生成 42 个带页码文本块；二者均通过 HTTP 上传、Worker 异步处理、PostgreSQL 入库和 `ready` 状态验收。连字、页眉页脚、双栏和表格阅读顺序等质量改进留在 PDF-4 阶段。
+Go/Python 文档处理契约已在 `contracts/document-processing/v1` 中定义版本化请求、成功响应、失败响应、稳定错误码、示例和进程通信规则。Go 基础设施层已经实现安全绝对路径解析、请求构造、UTF-8 JSON 编码、严格响应解码、文本块不变量校验、结构化 Python 失败错误、子进程超时取消和 stdout/stderr 输出上限；同一份 v1 消息结构既支持 oneshot，也支持一行请求对应一行响应的 JSON Lines 常驻传输。生产 `PythonProcessor` 和 `ProcessPool` 都满足相同的 Application 处理器端口，自动化测试覆盖复用、主动回收、非法响应、进程崩溃替换、超时取消与输出超限。Python 内部已经按 domain、application、contracts、entrypoints 和 infrastructure 完成轻量分层；pypdf 与简单文本切分器通过 application 定义的 Protocol 接入，不向核心层暴露第三方框架对象。Python PDF 处理能够识别伪造或损坏文件、密码要求、提取权限限制、OCR 需求以及文件和页数超限，并能对普通数字 PDF 逐页提取、规范化、页内分块和返回物理页码。真实英文文献已生成 126 个带页码文本块，真实中文文献已生成 42 个带页码文本块；二者均通过 HTTP 上传、Worker 异步处理、PostgreSQL 入库和 `ready` 状态验收。连字、页眉页脚、双栏和表格阅读顺序等质量改进留在 PDF-4 阶段。
 
-`GET /search` 已实现以统一文本块为结果单位的关键词检索，并在 P6/B5.2 接入 Session 与 OwnerScope。Handler 接收 `q`、可选 `document_id`、`page` 和 `page_size` 查询参数，Application 负责业务校验、分页换算与总页数计算，PostgreSQL 仓储在 `text_chunks` 与 `documents` 之间执行关联查询；count 与 data 两条 SQL 都同时限定当前用户和 `ready` 状态。跨文档搜索只表示当前用户的全部文档，其他用户即使指定真实 `document_id` 也只得到正常 `200` 空结果。HTTP 响应包含命中文本、文献标题、原始文件名、物理页码和分页元数据。Repository 使用 `ILIKE` 保持中英文大小写不敏感的字面子串语义，并转义 `%`、`_` 与反斜杠；第 6 号迁移通过 `pg_trgm + GIN` 加速数万文本块规模下的稀有子串查询。第一版采用确定性排序：较新文档优先，同一文档内按照 `chunk_index` 原文顺序返回，不把时间顺序包装成相关性评分。自动化测试覆盖成功、空结果、默认分页、文档过滤、特殊字符、非法参数、应用错误映射和双用户相同关键词隔离。
+`GET /search` 已实现以统一文本块为结果单位的关键词检索，并在 P6/B5.2 接入 Session 与 OwnerScope。接口保留 `q` 完整短语，同时支持 2～8 个重复 `term`、`operator=all|any` 和 `within=chunk`，可要求全部关键词或任一关键词出现在同一个 chunk。Handler 另接收可选 `document_id`、`page` 和 `page_size`，Application 负责规范化、去重、业务校验、分页换算与总页数计算，PostgreSQL 仓储在 `text_chunks` 与 `documents` 之间执行关联查询；count 与 data 两条 SQL 都使用相同的用户、状态、词项和文档条件。跨文档搜索只表示当前用户的全部 `ready` 文档，其他用户即使指定真实 `document_id` 也只得到正常 `200` 空结果。HTTP 响应包含规范化检索模式、命中文本、文献标题、原始文件名、物理页码和分页元数据。Repository 使用参数化 `ILIKE` 保持中英文大小写不敏感的字面子串语义，并转义 `%`、`_` 与反斜杠；第 6 号迁移通过 `pg_trgm + GIN` 加速数万文本块规模下的稀有子串查询。当前排序仍为确定性的“较新文档优先、文档内原文顺序”，不把时间顺序包装成相关性评分；sentence/paragraph 共现尚未实现。
 
-`POST /documents/:id/embeddings` 已实现独立向量任务的手动入队，并在 P6/B5.1 接入 Session 与 OwnerScope。只有当前用户自己的 `ready` 文档可以创建任务，成功返回 `202 Accepted`；非法 ID 返回 `400`，文档不存在或属于其他用户统一返回 `404`，文本未就绪或已经存在活动向量任务返回 `409`。PostgreSQL 使用带所有者条件的 `INSERT ... SELECT` 原子验证归属并创建任务，防止只在 Application 检查后发生竞态越权。任务会冻结 `model_name` 和 `dimensions`，第一版数据库固定使用 1536 维向量；DashScope 默认模型为 `text-embedding-v4`，OpenAI 默认模型为 `text-embedding-3-small`。接口本身只创建 `queued` 任务；当 `EMBEDDING_WORKER_ENABLED=true` 时，后台单 Worker 会按批调用当前配置的远程 API，并通过 PostgreSQL 事务原子保存全部 chunk 向量与任务成功状态。临时错误按指数退避重新排队，鉴权、参数、余额或额度耗尽等永久错误进入 `failed`，正常 shutdown 遗留的 `processing` 任务会在下次单实例启动时恢复为 `queued`。Worker 默认关闭，不会产生远程调用或模型费用。
+`POST /documents/:id/embeddings` 已实现独立向量任务的手动入队，并在 P6/B5.1 接入 Session 与 OwnerScope。当前用户自己的文档可以保存向量化意图：文本已经 ready 时进入 `queued`，尚未完成解析时进入 `waiting_document`；同一文档已有活动任务时幂等返回原任务。非法 ID 返回 `400`，文档不存在或属于其他用户统一返回 `404`。任务会冻结 `model_name` 和 `dimensions`，第一版数据库固定使用 1536 维向量；DashScope 默认模型为 `text-embedding-v4`，OpenAI 默认模型为 `text-embedding-3-small`。入队端默认限制每用户 100、全局 500 条活动任务，并通过 PostgreSQL 事务级 advisory lock 原子执行容量检查与创建；用户满额返回 `429`，系统满额返回 `503`。当 `EMBEDDING_WORKER_ENABLED=true` 时，后台固定大小 Worker Pool 会按文件并行、按文件内部批次顺序调用当前配置的远程 API，并通过 PostgreSQL 事务原子保存一份文档的全部 chunk 向量与任务成功状态。并发数由 `EMBEDDING_WORKER_CONCURRENCY` 控制，默认 1 可安全降级，允许 1～4；PostgreSQL `FOR UPDATE SKIP LOCKED` 保证并发 Worker 不会领取同一任务。向量任务也采用独立的 Owner 公平调度：多用户竞争时默认每个 Owner 先获得 1 个 processing 槽位，无其他用户等待时最多借用到 2 个；到期 queued 任务真正等待超过 2 分钟后进入防饥饿优先级，重试任务从 `next_attempt_at` 开始计算等待。远程调用容量采用“分类隔离 + 全局保险”：后台 Worker 默认最多占 2 个槽位，语义检索与问答内部检索共用另外 2 个在线槽位，所有入口合计不超过 4。在线请求等待 2 秒仍无槽位时返回稳定 `503 embedding_provider_capacity_exhausted`，后台任务则继续等待至任务取消或服务关闭，因此后台任务堆积不会把在线语义检索完全饿死。临时错误按指数退避重新排队，鉴权、参数、余额或额度耗尽等永久错误进入 `failed`。向量任务使用持久化租约、心跳和 fencing token：多个 Embedding Worker 进程可以共享队列，失联任务只有在租约真正到期后才会回到 `queued`，旧 Worker 不能覆盖新 Worker 的向量或终态。Worker 默认关闭，不会产生远程调用或模型费用。
+
+`RAG_CACHE_ENABLED=true` 时，语义检索会先复用 Owner 隔离的 Redis 查询向量，问答会按 PostgreSQL
+`corpus_revision` 复用同一语料版本下的成功答案。缓存命中仍执行鉴权；Redis 故障会自动回源，不影响正确性。
+文档删除、重新解析开始和新向量原子落库会在同一数据库事务内推进语料版本，使旧答案自然失效。完整设计见
+[Redis 查询向量与问答结果缓存](docs/backend/architecture/redis-rag-cache.md)。
 
 `GET /embedding-jobs/:id` 已提供受 Session 保护的向量任务状态查询。接口通过任务 JOIN 所属文档并按 OwnerScope 过滤，任务不存在或属于其他用户统一返回 `404`；成功时返回任务所属文档、冻结的模型与维度、当前状态、尝试次数、下次重试时间、错误信息、Token 用量和各阶段时间戳。前端可以在创建任务获得 ID 后轮询该接口，而不需要读取数据库或依赖后端日志。
+
+`POST /embedding-jobs/latest` 已提供按最多 100 个文档 ID 批量发现最新向量任务的能力，用于页面刷新、换浏览器或换设备后恢复服务端状态，避免逐文档产生 N+1 查询。Application 对 ID 去重并保持首次出现顺序，PostgreSQL 通过 OwnerScope JOIN 和 `(document_id, id DESC)` 索引一次选出各文档最新任务；没有任务、不存在和属于其他用户统一返回 `job: null`。该接口只表达最新任务快照，不能在尚无 document revision 契约时把历史成功任务冒充为当前版本向量就绪。
 
 DashScope 真实验收已经完成：文档 20 的 42 个文本块创建任务 22，使用 `text-embedding-v4`
 生成 1536 维向量；任务只领取 1 次并进入 `succeeded`，记录 16399 个输入 Token。数据库最终存在
@@ -361,6 +389,8 @@ Go 后端当前支持以下环境变量：
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `APP_PORT` | `8080` | Go HTTP 服务监听端口，有效范围为 1 到 65535 |
+| `APP_ROLE` | `all` | 后端部署角色，可选 `all`、`api`、`document-worker`、`embedding-worker`、`answer-worker` |
+| `APP_READY_FILE` | 空 | 专用 Worker 的可选就绪文件绝对路径；Compose 自动设置，本机直接运行通常留空 |
 | `LOG_LEVEL` | `info` | 最低日志级别，可选 `debug`、`info`、`warn`、`error` |
 | `LOG_FORMAT` | `json` | 日志输出格式，可选机器友好的 `json` 或终端友好的 `text`；成本汇总必须使用 `json` |
 | `DB_HOST` | `localhost` | Go 连接 PostgreSQL 时使用的主机 |
@@ -369,6 +399,27 @@ Go 后端当前支持以下环境变量：
 | `DB_USER` | `rag_user` | 数据库用户 |
 | `DB_PASSWORD` | 无 | 本机私有密码，必须在 `.env` 中设置 |
 | `DB_SSLMODE` | `disable` | 本地开发时的 PostgreSQL SSL 模式 |
+| `DB_MAX_CONNECTIONS` | `10` | 单个 Go 后端实例的 PostgreSQL 连接池上限；多实例时应按实例数合计 |
+| `API_DB_MAX_CONNECTIONS` | `5` | Compose API 角色连接池上限 |
+| `DOCUMENT_WORKER_DB_MAX_CONNECTIONS` | `3` | Compose 文档 Worker 连接池上限 |
+| `EMBEDDING_WORKER_DB_MAX_CONNECTIONS` | `3` | Compose 向量 Worker 连接池上限 |
+| `ANSWER_WORKER_DB_MAX_CONNECTIONS` | `5` | Compose 异步问答 Worker 连接池上限 |
+| `RAG_CACHE_ENABLED` | `false` | 是否启用 Redis 查询向量和问答结果 Cache-Aside；默认关闭 |
+| `CACHE_NAMESPACE` | `rag` | Redis Key 的应用命名空间 |
+| `REDIS_ADDRESS` | `127.0.0.1:6380` | Go 后端直接运行时连接的 Redis 地址；Compose 内自动使用 `redis:6379` |
+| `REDIS_HOST_PORT` | `6380` | Compose Redis 映射到宿主机的端口 |
+| `REDIS_PASSWORD` | 无 | 可选 Redis 密码；生产部署应由密钥管理注入 |
+| `REDIS_DATABASE` | `0` | Redis 逻辑数据库编号，允许 0～15 |
+| `REDIS_MAXMEMORY` | `128mb` | Compose Redis 数据内存上限；100 用户生产候选建议从 `256mb` 开始验证 |
+| `REDIS_CONTAINER_MEMORY_LIMIT` | `160m` | Compose Redis 容器总内存限制；使用 256 MiB 缓存时建议至少 `320m` |
+| `CACHE_HMAC_SECRET` | 无 | 缓存 Key 的问题摘要密钥；启用缓存时必填且至少 32 字节 |
+| `CACHE_OPERATION_TIMEOUT` | `250ms` | 单次 Redis 读写、Ping 或租约操作的最长时间 |
+| `QUERY_VECTOR_CACHE_TTL` | `12h` | 查询向量缓存有效期 |
+| `QUERY_VECTOR_CACHE_LOCK_TTL` | `30s` | 查询向量填充租约有效期 |
+| `QUERY_VECTOR_CACHE_WAIT_TIMEOUT` | `2s` | 其他实例正在填充相同向量时的最长等待时间 |
+| `ANSWER_RESULT_CACHE_TTL` | `15m` | 带来源成功答案缓存有效期 |
+| `ANSWER_RESULT_CACHE_LOCK_TTL` | `90s` | 问答结果填充租约有效期 |
+| `ANSWER_RESULT_CACHE_WAIT_TIMEOUT` | `10s` | 其他实例正在生成相同答案时的最长等待时间 |
 | `VERIFICATION_HMAC_SECRET` | 无 | 验证码 HMAC 服务端密钥，至少 32 字节，必须保存在本机 `.env` |
 | `VERIFICATION_SENDER` | `fake` | 验证码发送实现；`fake` 仅供自动化测试，`mailpit` 用于本地人工邮件联调 |
 | `VERIFICATION_SMTP_HOST` | `127.0.0.1` | 直接运行 Go 后端时连接 Mailpit 的 SMTP 主机 |
@@ -388,14 +439,53 @@ Go 后端当前支持以下环境变量：
 | `AUTH_PER_CLIENT_LIMIT` | `10` | 同一远端 IP 在窗口内允许的认证请求数 |
 | `AUTH_GLOBAL_LIMIT` | `200` | 整个后端进程在窗口内允许的认证请求数 |
 | `APP_ROOT` | 开发环境自动发现 | 应用运行时资源的共同根目录；显式配置时必须是已经存在的绝对目录 |
-| `STORAGE_ROOT` | `storage` | 本地文档存储根目录；相对路径固定以 `APP_ROOT` 为基准 |
+| `FILE_STORAGE_DRIVER` | `local` | 正式文件存储驱动；允许 `local` 或 `oss` |
+| `STORAGE_ROOT` | `storage` | local 模式的正式文件根目录；oss 模式的本机受控暂存目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `STORAGE_HOST_PATH` | `./storage` | Compose 挂载的宿主机文件目录；恢复验收后可无覆盖切换到新目录 |
 | `STORAGE_MAX_FILE_SIZE_BYTES` | `209715200` | 单个上传文件允许的最大字节数，即 200 MiB |
+| `OSS_BUCKET` | 空 | `oss` 模式使用的私有 Bucket 名称 |
+| `OSS_REGION` | `cn-shanghai` | Bucket 所在阿里云 Region |
+| `OSS_ENDPOINT` | `https://oss-cn-shanghai.aliyuncs.com` | 本机使用公网 Endpoint；同地域 ECS 应改为内网 Endpoint |
+| `OSS_CREDENTIAL_MODE` | `environment` | `environment` 读取 SDK 标准环境凭证；`ecs_ram_role` 使用 ECS 临时凭证 |
+| `OSS_ECS_RAM_ROLE` | 空 | `ecs_ram_role` 模式必须填写的 ECS RAM Role 名称 |
+| `OSS_ACCESS_KEY_ID` | 空 | 仅 environment 模式使用；不得提交真实值 |
+| `OSS_ACCESS_KEY_SECRET` | 空 | 仅 environment 模式使用；不得提交真实值 |
+| `OSS_SESSION_TOKEN` | 空 | environment 模式使用临时 STS 凭证时的可选 Token |
+| `UPLOAD_MAX_CONCURRENCY_PER_USER` | `2` | 单个用户同时执行的完整上传链路上限 |
+| `UPLOAD_MAX_CONCURRENCY_GLOBAL` | `16` | 单个后端实例同时执行的完整上传链路上限，不能小于单用户值 |
+| `UPLOAD_QUEUE_WAIT_TIMEOUT` | `2s` | 上传请求等待单用户和全局槽位的最长时间 |
+| `WORKER_POLL_INTERVAL` | `2s` | 文档 Worker 在空队列或单轮错误后的轮询间隔 |
+| `DOCUMENT_WORKER_ID` | 自动生成 | 文档 Worker 进程的观测身份；容器中建议保持默认主机名与 PID 组合 |
+| `DOCUMENT_JOB_LEASE_DURATION` | `60s` | 文档解析任务租约有效期；实例失联后到期任务才能被接管 |
+| `DOCUMENT_JOB_HEARTBEAT_INTERVAL` | `15s` | processing 任务续租周期，必须短于租约有效期 |
+| `WORKER_PROCESSING_TIMEOUT` | `5m` | 单份文档从处理器调用到任务收尾的最大时间 |
+| `DOCUMENT_WORKER_CONCURRENCY` | `1` | 同一实例的文档 Worker 数，允许 1～4；默认 1 可安全降级 |
+| `PROCESSING_MAX_ACTIVE_JOBS_PER_USER` | `5` | 单个用户允许的 queued/processing 文档解析任务总数 |
+| `PROCESSING_MAX_ACTIVE_JOBS_GLOBAL` | `40` | 全系统允许的活动文档解析任务总数，不能小于单用户上限 |
+| `PROCESSING_MAX_IN_FLIGHT_PER_OWNER` | `1` | 多用户竞争时，每个 Owner 默认可以占用的 processing 槽位数 |
+| `PROCESSING_MAX_BORROWED_IN_FLIGHT_PER_OWNER` | `2` | 没有其他 Owner 可获得基础槽位时，单个 Owner 可借用到的 processing 绝对上限 |
+| `PROCESSING_STARVATION_THRESHOLD` | `2m` | queued 任务等待多久后进入 Owner 防饥饿优先级 |
 | `PYTHON_EXECUTABLE` | `python` | Go 启动复杂文档处理子进程时使用的 Python 可执行程序 |
 | `PYTHON_SOURCE_ROOT` | `ai/src` | 包含 `rag_ai` 包的 Python 源码目录；相对路径固定以 `APP_ROOT` 为基准 |
 | `PYTHON_PDF_MAX_FILE_SIZE_BYTES` | `52428800` | PDF 解析文件上限，即 50 MiB；独立于上传上限 |
 | `PYTHON_PDF_MAX_PAGES` | `500` | 单份 PDF 允许解析的最大页数 |
+| `PYTHON_PROCESS_MODE` | `oneshot` | `oneshot` 每任务一个进程；`pool` 启用可复用常驻进程 |
+| `PYTHON_PROCESS_POOL_SIZE` | `2` | pool 模式的 Python 槽位数，允许 1～4且不能小于文档 Worker 数 |
+| `PYTHON_PROCESS_MAX_DOCUMENTS` | `20` | 单个常驻 Python 进程处理多少份文档后主动回收 |
 | `EMBEDDING_WORKER_ENABLED` | `false` | 是否启动远程 Embedding Worker；默认关闭以避免意外费用 |
+| `EMBEDDING_WORKER_CONCURRENCY` | `1` | 同一实例内的向量 Worker 数，允许 1～4；默认 1 可安全降级 |
+| `EMBEDDING_WORKER_ID` | 自动生成 | 当前向量 Worker 进程的排障标识；容器编排可显式设置实例名 |
+| `EMBEDDING_JOB_LEASE_DURATION` | `60s` | 向量任务租约时长；失联超过该时间后允许其他 Worker 接管 |
+| `EMBEDDING_JOB_HEARTBEAT_INTERVAL` | `15s` | 向量任务续租周期；必须短于租约时长 |
+| `EMBEDDING_MAX_ACTIVE_JOBS_PER_USER` | `100` | 单个用户允许的 waiting/queued/processing 向量任务总数 |
+| `EMBEDDING_MAX_ACTIVE_JOBS_GLOBAL` | `500` | 全系统允许的活动向量任务总数，不能小于单用户上限 |
+| `EMBEDDING_MAX_IN_FLIGHT_PER_OWNER` | `1` | 多用户竞争时，每个 Owner 默认可以占用的向量 processing 槽位数 |
+| `EMBEDDING_MAX_BORROWED_IN_FLIGHT_PER_OWNER` | `2` | 无其他 Owner 可获得基础槽位时，单个 Owner 可借用到的向量 processing 上限 |
+| `EMBEDDING_STARVATION_THRESHOLD` | `2m` | 到期 queued 向量任务等待多久后进入 Owner 防饥饿优先级 |
+| `EMBEDDING_PROVIDER_MAX_CONCURRENCY` | `4` | 单个后端进程内所有远程 Embedding 在途调用的全局硬上限 |
+| `EMBEDDING_WORKER_PROVIDER_CONCURRENCY` | `2` | 后台向量 Worker 可占用的远程调用上限；启用 Worker 时不能小于 Worker 数 |
+| `EMBEDDING_ONLINE_PROVIDER_CONCURRENCY` | `2` | 语义检索和问答内部语义检索共享的在线远程调用上限 |
+| `EMBEDDING_ONLINE_QUEUE_WAIT_TIMEOUT` | `2s` | 在线语义检索或问答等待共享 Embedding 槽位的最长时间 |
 | `SEMANTIC_SEARCH_ENABLED` | `false` | 是否注册在线语义检索接口；启用后每次检索会调用远程 Embedding API |
 | `EMBEDDING_PROVIDER` | `dashscope` | 当前远程提供方，可选 `dashscope` 或 `openai` |
 | `DASHSCOPE_API_KEY` | 无 | 选择 DashScope 且 Worker 或语义检索启用时必填；只能保存在本机 `.env` |
@@ -412,6 +502,33 @@ Go 后端当前支持以下环境变量：
 | `EMBEDDING_RETRY_BASE_DELAY` | `5s` | 第一次延迟重试的基础等待时间 |
 | `EMBEDDING_RETRY_MAX_DELAY` | `2m` | 指数退避等待时间上限 |
 | `ANSWER_ENABLED` | `false` | 是否注册带来源问答接口；启用后会调用 Embedding 与 Generation API |
+| `ANSWER_MAX_CONCURRENCY` | `10` | 单个后端进程同时执行的完整问答链路全局上限；保护远程 API、数据库连接池和本机资源 |
+| `ANSWER_MAX_CONCURRENCY_PER_USER` | `2` | 同一用户同时执行的问答上限，避免单个用户占满全局槽位 |
+| `ANSWER_MAX_WAITERS_GLOBAL` | `500` | 单个后端进程允许同步等待问答槽位的全局请求上限 |
+| `ANSWER_MAX_WAITERS_PER_USER` | `5` | 同一用户允许同步等待问答槽位的请求上限；超出返回 `429` |
+| `ANSWER_QUEUE_WAIT_TIMEOUT` | `5s` | 问答请求等待执行槽位的最长时间；超时返回可重试的 `503 answer_capacity_exhausted` |
+| `ANSWER_INPUT_TOKEN_BUDGET` | `16000` | 系统规则、会话历史、当前问题和 RAG 证据的应用级估算输入上限 |
+| `CONVERSATION_HISTORY_MAX_TURNS` | `6` | conversation-linked 回答最多读取的最近用户轮次数；user-only 消息也计一轮 |
+| `CONVERSATION_HISTORY_MAX_TOKENS` | `3000` | 会话历史标题、角色标签和正文合计的保守估算 Token 上限 |
+| `ANSWER_JOBS_ENABLED` | `false` | 是否注册并运行持久化异步问答；要求 `ANSWER_ENABLED=true`，默认关闭以避免远程费用 |
+| `ANSWER_JOB_WORKER_CONCURRENCY` | `10` | 异步任务 Worker 数；仍经过共享问答闸门，因此同步与异步实际执行总数不会超过 `ANSWER_MAX_CONCURRENCY` |
+| `ANSWER_JOB_POLL_INTERVAL` | `1s` | 异步问答队列为空或单轮出错后的轮询间隔 |
+| `ANSWER_JOB_PROCESSING_TIMEOUT` | `90s` | 单条异步问答完整 RAG 链路的执行上限 |
+| `ANSWER_JOB_MAX_QUEUED_PER_USER` | `5` | 单用户可持久化等待的 queued 任务上限，超出返回 `429` |
+| `ANSWER_JOB_MAX_QUEUED_GLOBAL` | `500` | 全局可持久化等待的 queued 任务上限，超出返回 `503` |
+| `ANSWER_JOB_OWNER_IN_FLIGHT_LIMIT` | `1` | 多用户竞争时每个用户的基础 processing 配额 |
+| `ANSWER_JOB_OWNER_BORROWED_LIMIT` | `2` | 无其他用户等待时单用户可借用的 processing 上限 |
+| `ANSWER_JOB_STARVATION_THRESHOLD` | `30s` | 到期任务等待超过该时间后进入防饥饿优先级 |
+| `ANSWER_JOB_MAX_ATTEMPTS` | `3` | 临时失败允许的最大执行次数 |
+| `ANSWER_JOB_RETRY_BASE_DELAY` | `2s` | 第一次重试的基础退避时间 |
+| `ANSWER_JOB_RETRY_MAX_DELAY` | `30s` | 指数退避的最长等待时间 |
+| `ANSWER_STANDALONE_JOB_RETENTION` | `168h` | 只控制 `conversation_id IS NULL` 的 standalone succeeded/failed/canceled Job；到期后删除问题、答案、来源和 Token |
+| `ANSWER_JOB_RETENTION` | 空 | 旧部署兼容变量；只有新变量未设置时才作为 standalone 保留期读取 |
+| `ANSWER_JOB_CLEANUP_INTERVAL` | `1h` | standalone 终态任务清理在队列为空时的检查间隔 |
+| `ANSWER_JOB_CLEANUP_BATCH_SIZE` | `500` | 每个短事务最多删除的过期 standalone 终态任务数，范围 1～10000 |
+| `ANSWER_JOB_WORKER_ID` | 自动生成 | 当前异步问答 Worker 进程的排障标识；容器编排可显式设置实例名 |
+| `ANSWER_JOB_LEASE_DURATION` | `60s` | 问答任务租约时长；失联超过该时间后允许其他 Worker 接管 |
+| `ANSWER_JOB_HEARTBEAT_INTERVAL` | `15s` | 问答任务续租周期；必须短于租约时长 |
 | `DASHSCOPE_GENERATION_ENDPOINT` | 百炼中国内地兼容地址 | DashScope Chat Completions HTTP API 地址 |
 | `GENERATION_MODEL` | `qwen3.6-flash` | 第一版回答生成模型；由后端配置，不接受前端任意指定 |
 | `GENERATION_HTTP_TIMEOUT` | `60s` | 单次远程回答生成请求超时 |
@@ -488,18 +605,28 @@ docker compose stop postgres
 
 `docker compose stop postgres` 只停止容器，不会删除数据卷中的数据。
 
-从项目根目录启动完整后端容器：
+从项目根目录启动零远程费用的基础后端：
 
 ```powershell
 docker compose build backend
-docker compose up -d backend
+docker compose up -d backend document-worker
 docker compose ps
 curl.exe -i http://127.0.0.1:8080/health
-docker compose stop backend
+docker compose stop backend document-worker
 ```
 
-`docker compose up -d backend` 会按依赖关系同时启动 PostgreSQL。容器内后端始终监听 `8080`，
-本机映射端口由 `BACKEND_HOST_PORT` 控制。不要在日常停止时执行 `docker compose down -v`，因为
+`backend` 只运行 HTTP API，`document-worker` 独立运行 Python 文档处理；二者挂载相同的
+`STORAGE_HOST_PATH`。命令会按依赖关系同时启动 PostgreSQL。容器内 API 始终监听 `8080`，本机映射端口由
+`BACKEND_HOST_PORT` 控制。
+
+启用远程能力并确认 API Key、费用和配置后，再显式启动对应 Profile：
+
+```powershell
+docker compose --profile embedding up -d embedding-worker
+docker compose --profile answer up -d answer-worker
+```
+
+不要在日常停止时执行 `docker compose down -v`，因为
 `-v` 会删除 PostgreSQL 数据卷；完整配置、Linux 文件权限和恢复边界见
 [后端容器部署指南](docs/backend/deployment/container-deployment.md)。
 

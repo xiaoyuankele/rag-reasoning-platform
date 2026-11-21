@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { KeywordSearchHit } from '../../../entities/search-result/model/search-result'
-import { highlightKeyword } from '../model/highlight-keyword'
+import { highlightKeywords } from '../model/highlight-keyword'
 
 const props = defineProps<{
   hit: KeywordSearchHit
-  query: string
+  keywords: string[]
 }>()
 
 const documentLabel = computed(() => props.hit.title?.trim() || props.hit.originalName)
-const contentSegments = computed(() => highlightKeyword(props.hit.content, props.query))
+const contentSegments = computed(() => highlightKeywords(props.hit.content, props.keywords))
 
 const pageLabel = computed(() => {
   const { pageStart, pageEnd } = props.hit

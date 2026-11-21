@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	conversationdomain "rag-reasoning-platform/backend/internal/domain/conversation"
 	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 )
 
@@ -48,6 +49,20 @@ func buildUserPrompt(
 	hits []documentdomain.SemanticSearchHit,
 	language ResponseLanguage,
 ) (string, error) {
+	return buildUserPromptWithHistory(
+		query,
+		nil,
+		hits,
+		language,
+	)
+}
+
+func buildUserPromptWithHistory(
+	query string,
+	history []conversationdomain.Message,
+	hits []documentdomain.SemanticSearchHit,
+	language ResponseLanguage,
+) (string, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return "", errAnswerPromptQueryRequired
@@ -58,6 +73,12 @@ func buildUserPrompt(
 
 	var builder strings.Builder
 	labels := promptLabelsFor(language)
+	if len(history) > 0 {
+		builder.WriteString(labels.history)
+		builder.WriteString("\n")
+		builder.WriteString(formatConversationHistory(history, language))
+		builder.WriteString("\n\n")
+	}
 	builder.WriteString(labels.question)
 	builder.WriteString("\n")
 	builder.WriteString(query)
@@ -101,43 +122,174 @@ func buildUserPrompt(
 	return strings.TrimSpace(builder.String()), nil
 }
 
+func buildBudgetedUserPrompt(
+	query string,
+	history []conversationdomain.Message,
+	hits []documentdomain.SemanticSearchHit,
+	language ResponseLanguage,
+	inputTokenBudget int,
+) (string, []documentdomain.SemanticSearchHit, int, error) {
+	if inputTokenBudget <= 0 {
+		return "", nil, 0, ErrAnswerInputTokenBudgetExceeded
+	}
+	if len(hits) == 0 {
+		return "", nil, 0, errAnswerPromptEvidenceRequired
+	}
+
+	systemInstruction := buildSystemInstructionWithHistory(language, len(history) > 0)
+	selected := make([]documentdomain.SemanticSearchHit, 0, len(hits))
+	var selectedPrompt string
+	selectedEstimate := 0
+	for _, hit := range hits {
+		candidate := append(append([]documentdomain.SemanticSearchHit(nil), selected...), hit)
+		prompt, err := buildUserPromptWithHistory(query, history, candidate, language)
+		if err != nil {
+			return "", nil, 0, err
+		}
+		estimate := estimateTextTokens(systemInstruction) + estimateTextTokens(prompt)
+		if estimate > inputTokenBudget {
+			break
+		}
+		selected = candidate
+		selectedPrompt = prompt
+		selectedEstimate = estimate
+	}
+
+	if len(selected) > 0 {
+		return selectedPrompt, selected, selectedEstimate, nil
+	}
+
+	first := hits[0]
+	truncated, prompt, estimate, ok := truncateEvidenceToInputBudget(
+		query,
+		history,
+		first,
+		language,
+		inputTokenBudget,
+		systemInstruction,
+	)
+	if !ok {
+		return "", nil, 0, ErrAnswerInputTokenBudgetExceeded
+	}
+	return prompt, []documentdomain.SemanticSearchHit{truncated}, estimate, nil
+}
+
+func truncateEvidenceToInputBudget(
+	query string,
+	history []conversationdomain.Message,
+	hit documentdomain.SemanticSearchHit,
+	language ResponseLanguage,
+	inputTokenBudget int,
+	systemInstruction string,
+) (documentdomain.SemanticSearchHit, string, int, bool) {
+	runes := []rune(strings.TrimSpace(hit.Content))
+	low, high := 0, len(runes)
+	bestHit := hit
+	bestPrompt := ""
+	bestEstimate := 0
+	found := false
+	marker := evidenceTruncationMarker(language)
+
+	for low <= high {
+		middle := low + (high-low)/2
+		content := strings.TrimSpace(string(runes[:middle]))
+		if middle < len(runes) {
+			content = strings.TrimSpace(content + marker)
+		}
+		candidate := hit
+		candidate.Content = content
+		prompt, err := buildUserPromptWithHistory(
+			query,
+			history,
+			[]documentdomain.SemanticSearchHit{candidate},
+			language,
+		)
+		if err != nil {
+			high = middle - 1
+			continue
+		}
+		estimate := estimateTextTokens(systemInstruction) + estimateTextTokens(prompt)
+		if content != "" && estimate <= inputTokenBudget {
+			bestHit = candidate
+			bestPrompt = prompt
+			bestEstimate = estimate
+			found = true
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+
+	return bestHit, bestPrompt, bestEstimate, found
+}
+
+func formatConversationHistory(
+	messages []conversationdomain.Message,
+	language ResponseLanguage,
+) string {
+	labels := promptLabelsFor(language)
+	var builder strings.Builder
+	for _, message := range messages {
+		switch message.Role {
+		case conversationdomain.RoleUser:
+			builder.WriteString(labels.historyUser)
+		case conversationdomain.RoleAssistant:
+			builder.WriteString(labels.historyAssistant)
+		default:
+			continue
+		}
+		builder.WriteString(strings.TrimSpace(message.Content))
+		builder.WriteString("\n")
+	}
+	return strings.TrimSpace(builder.String())
+}
+
 type promptLabels struct {
-	question     string
-	evidence     string
-	markerStart  string
-	beginEnd     string
-	finishEnd    string
-	title        string
-	originalName string
-	page         string
-	content      string
+	history          string
+	historyUser      string
+	historyAssistant string
+	question         string
+	evidence         string
+	markerStart      string
+	beginEnd         string
+	finishEnd        string
+	title            string
+	originalName     string
+	page             string
+	content          string
 }
 
 func promptLabelsFor(language ResponseLanguage) promptLabels {
 	if language == ResponseLanguageEnglish {
 		return promptLabels{
-			question:     "User question:",
-			evidence:     "Retrieved evidence:",
-			markerStart:  "=== Evidence [",
-			beginEnd:     "] begins ===",
-			finishEnd:    "] ends ===",
-			title:        "Document title: ",
-			originalName: "Original filename: ",
-			page:         "Page: ",
-			content:      "Content:",
+			history:          "Recent conversation history (context only, not factual evidence):",
+			historyUser:      "User: ",
+			historyAssistant: "Assistant: ",
+			question:         "User question:",
+			evidence:         "Retrieved evidence:",
+			markerStart:      "=== Evidence [",
+			beginEnd:         "] begins ===",
+			finishEnd:        "] ends ===",
+			title:            "Document title: ",
+			originalName:     "Original filename: ",
+			page:             "Page: ",
+			content:          "Content:",
 		}
 	}
 
 	return promptLabels{
-		question:     "用户问题：",
-		evidence:     "检索证据：",
-		markerStart:  "=== 证据 [",
-		beginEnd:     "] 开始 ===",
-		finishEnd:    "] 结束 ===",
-		title:        "文献标题：",
-		originalName: "原始文件名：",
-		page:         "页码：",
-		content:      "正文：",
+		history:          "最近对话历史（只用于理解语境，不是事实证据）：",
+		historyUser:      "用户：",
+		historyAssistant: "助手：",
+		question:         "用户问题：",
+		evidence:         "检索证据：",
+		markerStart:      "=== 证据 [",
+		beginEnd:         "] 开始 ===",
+		finishEnd:        "] 结束 ===",
+		title:            "文献标题：",
+		originalName:     "原始文件名：",
+		page:             "页码：",
+		content:          "正文：",
 	}
 }
 
@@ -146,6 +298,27 @@ func buildSystemInstruction(language ResponseLanguage) string {
 		return answerSystemInstructionEnglish
 	}
 	return answerSystemInstructionChinese
+}
+
+func buildSystemInstructionWithHistory(
+	language ResponseLanguage,
+	hasHistory bool,
+) string {
+	base := buildSystemInstruction(language)
+	if !hasHistory {
+		return base
+	}
+	if language == ResponseLanguageEnglish {
+		return base + "\n6. Conversation history is context for resolving references and intent, not factual evidence. If it conflicts with numbered evidence, follow the numbered evidence."
+	}
+	return base + "\n6. 对话历史只用于理解指代和用户意图，不是事实证据；如果历史内容与编号证据冲突，以编号证据为准。"
+}
+
+func evidenceTruncationMarker(language ResponseLanguage) string {
+	if language == ResponseLanguageEnglish {
+		return " [evidence truncated to fit the input budget]"
+	}
+	return " [证据内容因输入预算截断]"
 }
 
 func formatPageRange(

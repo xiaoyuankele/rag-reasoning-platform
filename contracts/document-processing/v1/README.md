@@ -17,19 +17,30 @@ Python 负责：
 - 读取 Go 授权的单个源文件；
 - 根据 MIME 类型解析内容；
 - 输出统一文本块或结构化失败信息；
-- 处理完成后退出。
+- 在 oneshot 模式处理完成后退出，或在 stream 模式等待下一条请求。
 
 Python 不连接 PostgreSQL、不更新任务状态、不调用 Go HTTP API，也不修改上传文件。
 
 ## 传输规则
 
+v1 的 JSON 消息结构支持两种进程传输模式，Schema 和业务语义完全相同。
+
+### Oneshot
+
 1. 一个 Python 子进程只处理一个请求。
 2. Go 向标准输入写入一个 UTF-8 JSON 对象，然后关闭 stdin。
-3. Python 向标准输出写入一个 UTF-8 JSON 响应对象。
-4. stdout 只能包含协议 JSON；诊断日志必须写入 stderr。
-5. 合法的成功或失败响应都表示协议已经完成。
-6. 非零进程退出码表示 Python 崩溃、启动失败或未能完成协议。
-7. Go 必须限制运行时间和 stdout/stderr 大小，避免失控子进程耗尽资源。
+3. Python 向标准输出写入一个 UTF-8 JSON 响应对象并退出。
+
+### Stream
+
+1. Go 和 Python 使用 JSON Lines：一行请求严格对应一行响应。
+2. JSON 正文中的换行必须由 JSON 编码器转义，不能产生额外物理行。
+3. Python 每写完一条响应必须立即 flush，然后继续等待下一行。
+4. `request_id` 必须与对应请求一致；不一致时 Go 销毁该进程。
+5. Go 关闭 stdin 表示主动回收；Python 读到 EOF 后正常退出。
+6. 单条结构化业务失败不能终止 stream 循环；进程崩溃、协议错误、超时或输出超限会让 Go 销毁并在后续请求时重建该槽位。
+
+两种模式都必须满足：stdout 只能包含协议 JSON，诊断日志写入 stderr；合法成功或失败响应都表示单条请求已经完成；Go 必须限制单任务运行时间和 stdout/stderr 大小。非零退出码表示 Python 崩溃、启动失败或未能继续完成协议。
 
 ## 请求
 
@@ -72,6 +83,16 @@ Schema：`success-response.schema.json`
   "contract_version": "v1",
   "request_id": "job-123",
   "status": "succeeded",
+  "metrics": {
+    "python_total_ms": 8380,
+    "source_open_ms": 35,
+    "metadata_read_ms": 4,
+    "text_extract_ms": 8200,
+    "text_split_ms": 120,
+    "page_count": 164,
+    "slowest_page_number": 83,
+    "slowest_page_ms": 910
+  },
   "chunks": [
     {
       "index": 0,
@@ -92,6 +113,12 @@ Schema：`success-response.schema.json`
 - 页码从 1 开始，且 `page_end` 不能早于 `page_start`；
 - Markdown/TXT 等没有固定页码的来源省略两个页码字段；
 - 块顺序就是最终持久化顺序。
+
+`metrics` 是 v1 的可选观测字段。旧处理器可以省略，新版 Python PDF
+处理器成功时会返回。全部耗时均为非负整数毫秒；`slowest_page_number`
+必须位于 `1..page_count`。小于 1ms 的已执行阶段记录为 `0`，字段整体
+缺失表示该处理器没有提供内部观测，二者不能混为一谈。该字段只用于后端
+性能诊断，不属于前端业务响应。
 
 ## 失败响应
 

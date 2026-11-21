@@ -16,13 +16,15 @@ import (
 	"rag-reasoning-platform/backend/internal/api"
 	answerapplication "rag-reasoning-platform/backend/internal/application/answer"
 	authapplication "rag-reasoning-platform/backend/internal/application/auth"
+	conversationapplication "rag-reasoning-platform/backend/internal/application/conversation"
 	documentapplication "rag-reasoning-platform/backend/internal/application/document"
 	embeddingapplication "rag-reasoning-platform/backend/internal/application/embedding"
 	verificationapplication "rag-reasoning-platform/backend/internal/application/verification"
 	"rag-reasoning-platform/backend/internal/config"
+	documentdomain "rag-reasoning-platform/backend/internal/domain/document"
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
+	infrastructure "rag-reasoning-platform/backend/internal/infrastructure"
 	"rag-reasoning-platform/backend/internal/infrastructure/database"
-	"rag-reasoning-platform/backend/internal/infrastructure/filestorage"
 	passwordinfrastructure "rag-reasoning-platform/backend/internal/infrastructure/password"
 	"rag-reasoning-platform/backend/internal/infrastructure/postgres"
 	"rag-reasoning-platform/backend/internal/infrastructure/pythonprocessor"
@@ -90,6 +92,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			err,
 		)
 	}
+	rolePlan, err := newApplicationRolePlan(appConfig.Role)
+	if err != nil {
+		return err
+	}
 
 	databaseConfig, err := config.LoadDatabase()
 	if err != nil {
@@ -99,50 +105,243 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		)
 	}
 
-	runtimePathsConfig, err := config.LoadRuntimePaths()
-	if err != nil {
-		return fmt.Errorf(
-			"load runtime paths configuration: %w",
-			err,
+	var runtimePathsConfig config.RuntimePathsConfig
+	var storageConfig config.StorageConfig
+	if rolePlan.needsStorage() {
+		runtimePathsConfig, err = config.LoadRuntimePaths()
+		if err != nil {
+			return fmt.Errorf(
+				"load runtime paths configuration: %w",
+				err,
+			)
+		}
+
+		storageConfig, err = config.LoadStorage(runtimePathsConfig.AppRoot)
+		if err != nil {
+			return fmt.Errorf(
+				"load storage configuration: %w",
+				err,
+			)
+		}
+	}
+
+	var workerConfig config.WorkerConfig
+	if rolePlan.needsDocumentConfig() {
+		workerConfig, err = config.LoadWorker()
+		if err != nil {
+			return fmt.Errorf("load worker configuration: %w", err)
+		}
+	}
+
+	var pythonConfig config.PythonConfig
+	if rolePlan.runDocumentWorker {
+		pythonConfig, err = config.LoadPython(runtimePathsConfig.AppRoot)
+		if err != nil {
+			return fmt.Errorf("load Python processor configuration: %w", err)
+		}
+	}
+
+	var embeddingConfig config.EmbeddingConfig
+	if rolePlan.needsEmbeddingConfig() {
+		embeddingConfig, err = config.LoadEmbedding()
+		if err != nil {
+			return fmt.Errorf("load embedding configuration: %w", err)
+		}
+	}
+
+	var generationConfig config.GenerationConfig
+	if rolePlan.needsGenerationConfig() {
+		generationConfig, err = config.LoadGeneration()
+		if err != nil {
+			return fmt.Errorf("load generation configuration: %w", err)
+		}
+	}
+
+	var answerJobsConfig config.AnswerJobsConfig
+	if rolePlan.needsAnswerJobsConfig() {
+		answerJobsConfig, err = config.LoadAnswerJobs()
+		if err != nil {
+			return fmt.Errorf("load answer jobs configuration: %w", err)
+		}
+		if answerJobsConfig.Enabled && !generationConfig.Enabled {
+			return errors.New(
+				"ANSWER_JOBS_ENABLED requires ANSWER_ENABLED=true",
+			)
+		}
+	}
+
+	var agentConfig config.AgentConfig
+	if rolePlan.needsAgentConfig() {
+		agentConfig, err = config.LoadAgent()
+		if err != nil {
+			return fmt.Errorf("load Agent configuration: %w", err)
+		}
+	}
+	agentPlan := newAgentRuntimePlan(rolePlan, agentConfig)
+
+	if err := validateApplicationRoleFeatures(
+		appConfig.Role,
+		embeddingConfig.WorkerEnabled,
+		generationConfig.Enabled,
+		answerJobsConfig.Enabled,
+		agentConfig.WorkerEnabled,
+	); err != nil {
+		return err
+	}
+
+	var verificationConfig config.VerificationConfig
+	var authConfig config.AuthConfig
+	if rolePlan.serveHTTP {
+		verificationConfig, err = config.LoadVerification()
+		if err != nil {
+			return fmt.Errorf("load verification configuration: %w", err)
+		}
+
+		authConfig, err = config.LoadAuth()
+		if err != nil {
+			return fmt.Errorf("load auth configuration: %w", err)
+		}
+	}
+
+	var cacheConfig config.CacheConfig
+	if rolePlan.needsCacheConfig() {
+		cacheConfig, err = config.LoadCache()
+		if err != nil {
+			return fmt.Errorf("load RAG cache configuration: %w", err)
+		}
+	}
+
+	var capacityConfig config.CapacityCoordinationConfig
+	if rolePlan.needsCapacityCoordinationConfig() {
+		capacityConfig, err = config.LoadCapacityCoordination()
+		if err != nil {
+			return fmt.Errorf("load capacity coordination configuration: %w", err)
+		}
+	}
+	if err := validateAgentWorkerPrerequisites(
+		agentPlan,
+		agentConfig,
+		embeddingConfig,
+		capacityConfig,
+	); err != nil {
+		return err
+	}
+	answerRuntimeEnabled := (rolePlan.serveHTTP || rolePlan.runAnswerWorker) && generationConfig.Enabled
+	if err := validateSharedAnswerAgentCapacity(
+		agentPlan.enableWorker,
+		agentConfig,
+		generationConfig,
+	); err != nil {
+		return err
+	}
+
+	// Redis 只保存可丢弃的加速副本。即使启动时 Ping 失败，服务仍会启动，
+	// 后续每次缓存读写失败都由 Application 自动回源远程模型。
+	var ragCache *infrastructure.RedisCache
+	var cacheDigester *infrastructure.HMACSHA256Digester
+	if cacheConfig.Enabled {
+		ragCache, err = infrastructure.NewRedisCache(
+			infrastructure.RedisCacheOptions{
+				Address:          cacheConfig.RedisAddress,
+				Password:         cacheConfig.RedisPassword,
+				Database:         cacheConfig.RedisDatabase,
+				OperationTimeout: cacheConfig.OperationTimeout,
+			},
 		)
-	}
+		if err != nil {
+			return fmt.Errorf("create Redis RAG cache: %w", err)
+		}
+		defer func() {
+			if closeErr := ragCache.Close(); closeErr != nil {
+				logger.Warn(
+					"Close Redis cache",
+					"event", "redis_cache_close_failed",
+					"error", closeErr,
+				)
+			}
+		}()
 
-	storageConfig, err := config.LoadStorage(runtimePathsConfig.AppRoot)
-	if err != nil {
-		return fmt.Errorf(
-			"load storage configuration: %w",
-			err,
+		cacheDigester, err = infrastructure.NewHMACSHA256Digester(
+			[]byte(cacheConfig.HMACSecret),
 		)
+		if err != nil {
+			return fmt.Errorf("create cache question digester: %w", err)
+		}
+		if pingErr := ragCache.Ping(ctx); pingErr != nil {
+			logger.Warn(
+				"Redis cache unavailable during startup; requests will use provider fallback",
+				"event", "redis_cache_startup_unavailable",
+				"error", pingErr,
+			)
+		} else {
+			logger.Info(
+				"Redis RAG cache configured",
+				"event", "redis_cache_configured",
+				"namespace", cacheConfig.Namespace,
+				"query_vector_ttl_ms", cacheConfig.QueryVectorTTL.Milliseconds(),
+				"answer_result_ttl_ms", cacheConfig.AnswerResultTTL.Milliseconds(),
+			)
+		}
 	}
 
-	workerConfig, err := config.LoadWorker()
-	if err != nil {
-		return fmt.Errorf("load worker configuration: %w", err)
-	}
+	needsWorkerEmbedder := rolePlan.runEmbeddingWorker &&
+		embeddingConfig.WorkerEnabled
+	needsOnlineEmbedder := (rolePlan.serveHTTP || rolePlan.runAnswerWorker) &&
+		(embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled)
+	needsOnlineEmbedder = needsOnlineEmbedder || agentPlan.enableWorker
+	needsRemoteCapacity := needsWorkerEmbedder ||
+		needsOnlineEmbedder ||
+		answerRuntimeEnabled || agentPlan.enableWorker
 
-	pythonConfig, err := config.LoadPython(runtimePathsConfig.AppRoot)
-	if err != nil {
-		return fmt.Errorf("load Python processor configuration: %w", err)
-	}
+	// 容量协调不是可丢弃缓存：显式启用后必须在启动时可用，否则不同进程会
+	// 各自放行完整并发上限。运行期故障会拒绝新的远程调用，并由同步 503 或
+	// 异步任务重试承接，不会无保护地绕过 Redis。
+	var capacityStore *infrastructure.RedisCapacityStore
+	if capacityConfig.Enabled && needsRemoteCapacity {
+		minimumLeaseTTL := embeddingConfig.HTTPTimeout
+		if generationConfig.Enabled {
+			minimumLeaseTTL += generationConfig.HTTPTimeout + 30*time.Second
+		}
+		if capacityConfig.LeaseTTL <= minimumLeaseTTL {
+			return fmt.Errorf(
+				"CAPACITY_LEASE_TTL must exceed the longest coordinated call budget %s",
+				minimumLeaseTTL,
+			)
+		}
 
-	embeddingConfig, err := config.LoadEmbedding()
-	if err != nil {
-		return fmt.Errorf("load embedding configuration: %w", err)
-	}
-
-	generationConfig, err := config.LoadGeneration()
-	if err != nil {
-		return fmt.Errorf("load generation configuration: %w", err)
-	}
-
-	verificationConfig, err := config.LoadVerification()
-	if err != nil {
-		return fmt.Errorf("load verification configuration: %w", err)
-	}
-
-	authConfig, err := config.LoadAuth()
-	if err != nil {
-		return fmt.Errorf("load auth configuration: %w", err)
+		capacityStore, err = infrastructure.NewRedisCapacityStore(
+			infrastructure.RedisCapacityOptions{
+				Address:          capacityConfig.RedisAddress,
+				Password:         capacityConfig.RedisPassword,
+				Database:         capacityConfig.RedisDatabase,
+				OperationTimeout: capacityConfig.OperationTimeout,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create Redis capacity coordinator: %w", err)
+		}
+		defer func() {
+			if closeErr := capacityStore.Close(); closeErr != nil {
+				logger.Warn(
+					"Close Redis capacity coordinator",
+					"event", "redis_capacity_close_failed",
+					"error", closeErr,
+				)
+			}
+		}()
+		if pingErr := capacityStore.Ping(ctx); pingErr != nil {
+			return fmt.Errorf(
+				"ping required Redis capacity coordinator: %w",
+				pingErr,
+			)
+		}
+		logger.Info(
+			"Redis provider capacity coordination configured",
+			"event", "redis_capacity_coordination_configured",
+			"namespace", capacityConfig.Namespace,
+			"lease_ttl_ms", capacityConfig.LeaseTTL.Milliseconds(),
+			"retry_interval_ms", capacityConfig.RetryInterval.Milliseconds(),
+		)
 	}
 
 	// ConnectionString 包含密码，只传给数据库层，不写入日志。
@@ -180,161 +379,406 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		)
 	}
 
-	// Repository 负责 PostgreSQL 数据访问。
-	documentRepository := postgres.NewDocumentRepository(databasePool)
-	scopedDocumentRepository := postgres.NewScopedDocumentRepository(databasePool)
-	processingJobRepository := postgres.NewProcessingJobRepository(databasePool)
-	scopedProcessingJobRepository := postgres.NewScopedProcessingJobRepository(databasePool)
-	embeddingJobRepository := postgres.NewEmbeddingJobRepository(databasePool)
-	scopedEmbeddingJobRepository := postgres.NewScopedEmbeddingJobRepository(databasePool)
-	chunkRepository := postgres.NewChunkRepository(databasePool)
-	scopedChunkRepository := postgres.NewScopedChunkRepository(databasePool)
-	verificationChallengeRepository :=
-		postgres.NewVerificationChallengeRepository(databasePool)
-	authRegistrationRepository :=
-		postgres.NewAuthRegistrationRepository(databasePool)
-	authPasswordResetRepository :=
-		postgres.NewAuthPasswordResetRepository(databasePool)
-	authSessionRepository := postgres.NewAuthSessionRepository(databasePool)
-
-	// Worker 启动前，先恢复上一次异常退出遗留的 processing 任务。
-	// main 只负责决定调用时机；恢复规则位于 Application，SQL 位于 Repository。
-	interruptedJobRecoveryService :=
-		documentapplication.NewInterruptedJobRecoveryService(
-			processingJobRepository,
-		)
-	recoveredJobCount, err := interruptedJobRecoveryService.Recover(ctx)
-	if err != nil {
-		return fmt.Errorf(
-			"recover interrupted processing jobs during startup: %w",
-			err,
-		)
+	// Repository 只在当前角色真正需要时创建。虽然 Repository 本身很轻，
+	// 但显式边界可以防止后续误把无关依赖继续接入某个独立角色。
+	var documentRepository *postgres.DocumentRepository
+	var processingJobRepository *postgres.ProcessingJobRepository
+	var chunkRepository *postgres.ChunkRepository
+	if rolePlan.runDocumentWorker {
+		documentRepository = postgres.NewDocumentRepository(databasePool)
+		processingJobRepository =
+			postgres.NewProcessingJobRepositoryWithPolicies(
+				databasePool,
+				documentdomain.ProcessingJobSchedulingPolicy{
+					MaxInFlightPerOwner:         workerConfig.OwnerInFlightLimit,
+					MaxBorrowedInFlightPerOwner: workerConfig.OwnerBorrowedLimit,
+					StarvationThreshold:         workerConfig.StarvationThreshold,
+				},
+				documentdomain.ProcessingJobLeasePolicy{
+					WorkerID:      workerConfig.DocumentWorkerID,
+					LeaseDuration: workerConfig.JobLeaseDuration,
+				},
+			)
+		chunkRepository = postgres.NewChunkRepository(databasePool)
 	}
 
-	if recoveredJobCount > 0 {
-		logger.Info(
-			"Recovered interrupted processing jobs",
-			"event", "processing_jobs_recovered",
-			"job_count", recoveredJobCount,
+	var scopedDocumentRepository *postgres.ScopedDocumentRepository
+	var scopedProcessingJobRepository *postgres.ScopedProcessingJobRepository
+	var scopedEmbeddingJobRepository *postgres.ScopedEmbeddingJobRepository
+	var conversationRepository *postgres.ConversationRepository
+	if rolePlan.serveHTTP {
+		scopedDocumentRepository = postgres.NewScopedDocumentRepository(databasePool)
+		scopedProcessingJobRepository = postgres.NewScopedProcessingJobRepository(
+			databasePool,
+			documentdomain.ProcessingJobAdmissionLimits{
+				MaxActiveJobsPerOwner: workerConfig.ActiveJobsPerUserLimit,
+				MaxActiveJobsGlobal:   workerConfig.ActiveJobsGlobalLimit,
+			},
+		)
+		scopedEmbeddingJobRepository = postgres.NewScopedEmbeddingJobRepository(
+			databasePool,
+			embeddingdomain.JobAdmissionLimits{
+				MaxActiveJobsPerOwner: embeddingConfig.ActiveJobsPerUserLimit,
+				MaxActiveJobsGlobal:   embeddingConfig.ActiveJobsGlobalLimit,
+			},
+		)
+	}
+	if rolePlan.serveHTTP || rolePlan.runAnswerWorker {
+		conversationRepository = postgres.NewConversationRepository(databasePool)
+	}
+
+	var embeddingJobRepository *postgres.EmbeddingJobRepository
+	if rolePlan.runEmbeddingWorker {
+		embeddingJobRepository =
+			postgres.NewEmbeddingJobRepositoryWithPolicies(
+				databasePool,
+				embeddingdomain.JobSchedulingPolicy{
+					MaxInFlightPerOwner:         embeddingConfig.OwnerInFlightLimit,
+					MaxBorrowedInFlightPerOwner: embeddingConfig.OwnerBorrowedLimit,
+					StarvationThreshold:         embeddingConfig.StarvationThreshold,
+				},
+				embeddingdomain.JobLeasePolicy{
+					WorkerID:      embeddingConfig.WorkerID,
+					LeaseDuration: embeddingConfig.JobLeaseDuration,
+				},
+			)
+		if chunkRepository == nil {
+			chunkRepository = postgres.NewChunkRepository(databasePool)
+		}
+	}
+
+	var scopedChunkRepository *postgres.ScopedChunkRepository
+	var corpusRevisionRepository *postgres.CorpusRevisionRepository
+	if rolePlan.serveHTTP || rolePlan.runAnswerWorker || agentPlan.enableWorker {
+		scopedChunkRepository = postgres.NewScopedChunkRepository(databasePool)
+	}
+	if cacheConfig.Enabled &&
+		(rolePlan.serveHTTP || rolePlan.runAnswerWorker) {
+		corpusRevisionRepository = postgres.NewCorpusRevisionRepository(databasePool)
+	}
+
+	var verificationChallengeRepository *postgres.VerificationChallengeRepository
+	var authRegistrationRepository *postgres.AuthRegistrationRepository
+	var authPasswordResetRepository *postgres.AuthPasswordResetRepository
+	var authSessionRepository *postgres.AuthSessionRepository
+	if rolePlan.serveHTTP {
+		verificationChallengeRepository =
+			postgres.NewVerificationChallengeRepository(databasePool)
+		authRegistrationRepository =
+			postgres.NewAuthRegistrationRepository(databasePool)
+		authPasswordResetRepository =
+			postgres.NewAuthPasswordResetRepository(databasePool)
+		authSessionRepository = postgres.NewAuthSessionRepository(databasePool)
+	}
+
+	var answerJobRepository *postgres.AnswerJobRepository
+	if answerJobsConfig.Enabled &&
+		(rolePlan.serveHTTP || rolePlan.runAnswerWorker) {
+		answerJobRepository = postgres.NewAnswerJobRepositoryWithPolicies(
+			databasePool,
+			answerapplication.JobAdmissionLimits{
+				MaxQueuedJobsPerOwner: answerJobsConfig.MaxQueuedPerUser,
+				MaxQueuedJobsGlobal:   answerJobsConfig.MaxQueuedGlobal,
+			},
+			answerapplication.JobSchedulingPolicy{
+				MaxInFlightPerOwner:         answerJobsConfig.OwnerInFlightLimit,
+				MaxBorrowedInFlightPerOwner: answerJobsConfig.OwnerBorrowedInFlightLimit,
+				StarvationThreshold:         answerJobsConfig.StarvationThreshold,
+			},
+			answerapplication.JobLeasePolicy{
+				WorkerID:      answerJobsConfig.WorkerID,
+				LeaseDuration: answerJobsConfig.JobLeaseDuration,
+			},
 		)
 	}
 
-	// Embedding Worker 在 shutdown 时保留 processing，避免把正常停机伪装成业务失败。
-	// 单实例服务重新启动后，必须先把这些遗留任务放回 queued，随后才能启动 Worker。
-	embeddingRecoveryService, err :=
-		embeddingapplication.NewInterruptedJobRecoveryService(
-			embeddingJobRepository,
-		)
-	if err != nil {
-		return fmt.Errorf("create embedding recovery service: %w", err)
-	}
-	embeddingRecoveredJobCount, err := embeddingRecoveryService.Recover(ctx)
-	if err != nil {
-		return fmt.Errorf(
-			"recover interrupted embedding jobs during startup: %w",
-			err,
-		)
-	}
-	if embeddingRecoveredJobCount > 0 {
-		logger.Info(
-			"Requeued interrupted embedding jobs",
-			"event", "embedding_jobs_requeued",
-			"job_count", embeddingRecoveredJobCount,
-		)
+	// Worker 启动前先重排已经过期的 processing 租约。仍在其他实例心跳的
+	// 任务不会被恢复；规则位于 Application，SQL 位于 Repository。
+	if rolePlan.runDocumentWorker {
+		expiredJobRecoveryService :=
+			documentapplication.NewExpiredJobRecoveryService(
+				processingJobRepository,
+			)
+		recoveredJobCount, err := expiredJobRecoveryService.Recover(ctx)
+		if err != nil {
+			return fmt.Errorf(
+				"recover expired processing jobs during startup: %w",
+				err,
+			)
+		}
+
+		if recoveredJobCount > 0 {
+			logger.Info(
+				"Requeued expired processing jobs",
+				"event", "processing_jobs_recovered",
+				"job_count", recoveredJobCount,
+			)
+		}
 	}
 
-	localFileStorage, err := filestorage.NewLocalStorage(storageConfig.RootDir, storageConfig.MaxFileSizeBytes)
-	if err != nil {
-		return fmt.Errorf("create local file storage: %w", err)
-	}
-	// 必须先确认 LocalStorage 创建成功，再把它交给 TextProcessor。
-	pythonDocumentProcessor, err := pythonprocessor.NewProcessor(
-		localFileStorage,
-		pythonConfig.Executable,
-		pythonConfig.SourceRoot,
-		pythonConfig.PDFMaxFileSizeBytes,
-		pythonConfig.PDFMaxPages,
-	)
-	if err != nil {
-		return fmt.Errorf("create Python document processor: %w", err)
-	}
-	textProcessor := documentapplication.NewTextProcessor(localFileStorage)
-	processorDispatcher, err := documentapplication.NewProcessorDispatcher(
-		map[string]documentapplication.DocumentProcessor{
-			"text/markdown":   textProcessor,
-			"text/plain":      textProcessor,
-			"application/pdf": pythonDocumentProcessor,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"create document processor dispatcher: %w",
-			err,
-		)
+	// Embedding Worker 只恢复真正过期的 processing 租约。其他实例仍在
+	// 心跳的任务不会被重排，因此不同进程可以安全共享同一队列。
+	if rolePlan.runEmbeddingWorker {
+		embeddingRecoveryService, err :=
+			embeddingapplication.NewExpiredJobRecoveryService(
+				embeddingJobRepository,
+			)
+		if err != nil {
+			return fmt.Errorf("create embedding recovery service: %w", err)
+		}
+		embeddingRecoveredJobCount, err := embeddingRecoveryService.Recover(ctx)
+		if err != nil {
+			return fmt.Errorf(
+				"recover expired embedding jobs during startup: %w",
+				err,
+			)
+		}
+		if embeddingRecoveredJobCount > 0 {
+			logger.Info(
+				"Requeued expired embedding jobs",
+				"event", "embedding_jobs_requeued",
+				"job_count", embeddingRecoveredJobCount,
+			)
+		}
 	}
 
-	// Service 负责文档查询用例和业务参数校验。
-	documentService := documentapplication.NewService(scopedDocumentRepository)
-	documentUploadService := documentapplication.NewUploadService(scopedDocumentRepository, localFileStorage)
-	documentListService := documentapplication.NewListService(scopedDocumentRepository)
-	documentChunkListService := documentapplication.NewChunkListService(
-		scopedDocumentRepository,
-		scopedChunkRepository,
-	)
-	documentSearchService := documentapplication.NewSearchService(scopedChunkRepository)
-	documentDeleteService := documentapplication.NewDeleteService(scopedDocumentRepository, localFileStorage)
-	documentProcessingService := documentapplication.NewQueueProcessingService(
-		scopedDocumentRepository,
-		scopedProcessingJobRepository,
-	)
-	processingJobService := documentapplication.NewProcessingJobService(
-		scopedProcessingJobRepository,
-	)
-	embeddingQueueService := embeddingapplication.NewQueueService(
-		scopedEmbeddingJobRepository,
-		embeddingConfig.ModelName,
-		embeddingConfig.Dimensions,
-	)
-	embeddingJobQueryService := embeddingapplication.NewJobQueryService(
-		scopedEmbeddingJobRepository,
-	)
-	embeddingJobCancelService := embeddingapplication.NewCancelService(
-		scopedEmbeddingJobRepository,
-	)
-	documentWorker := documentapplication.NewWorker(
-		processingJobRepository,
-		documentRepository,
-		processorDispatcher,
-		chunkRepository,
-		observability.NewProcessingJobLogger(logger),
-		workerConfig.ProcessingTimeout,
-	)
-	documentWorkerErrorReporter := func(err error) {
-		logger.Error(
-			"Document worker iteration failed",
-			"event", "document_worker_error",
-			"error", err,
-		)
-	}
-	documentWorkerLoop, err := documentapplication.NewWorkerLoop(
-		documentWorker,
-		workerConfig.PollInterval,
-		documentWorkerErrorReporter,
-	)
-	if err != nil {
-		return fmt.Errorf("create document worker loop: %w", err)
-	}
-
-	// Worker、公开语义检索和问答内部检索都依赖 Embedder。只要任一能力开启，
-	// 就创建一个无状态客户端并复用；三者都关闭时不创建远程客户端。
-	var embedder embeddingdomain.Embedder
-	if embeddingConfig.WorkerEnabled ||
-		embeddingConfig.SemanticSearchEnabled ||
-		generationConfig.Enabled {
-		embedder, err = newEmbeddingClient(embeddingConfig)
+	var fileStorage runtimeFileStorage
+	if rolePlan.needsStorage() {
+		fileStorage, err = newRuntimeFileStorage(storageConfig)
 		if err != nil {
 			return err
 		}
+		logger.Info(
+			"Configured document file storage",
+			"event", "document_file_storage_configured",
+			"driver", storageConfig.Driver,
+		)
+	}
+
+	// 必须先确认统一文件存储创建成功，再组装 Python 文档处理器。
+	// oneshot 和 pool 都满足同一个 Application 端口，模式差异只留在组合根
+	// 与 Infrastructure；业务服务和 Worker 不感知子进程是否被复用。
+	closePythonDocumentProcessor := func() error { return nil }
+	var processorDispatcher *documentapplication.ProcessorDispatcher
+	if rolePlan.runDocumentWorker {
+		var pythonDocumentProcessor documentapplication.DocumentProcessor
+		switch pythonConfig.ProcessMode {
+		case config.PythonProcessModeOneShot:
+			processor, err := pythonprocessor.NewProcessor(
+				fileStorage,
+				pythonConfig.Executable,
+				pythonConfig.SourceRoot,
+				pythonConfig.PDFMaxFileSizeBytes,
+				pythonConfig.PDFMaxPages,
+			)
+			if err != nil {
+				return fmt.Errorf("create oneshot Python document processor: %w", err)
+			}
+			pythonDocumentProcessor = processor
+
+		case config.PythonProcessModePool:
+			// 第一版不允许 Go Worker 多于 Python 槽位，否则多领出的任务会显示
+			// processing 却只是在进程池门口等待，扭曲排队和处理耗时指标。
+			if pythonConfig.ProcessPoolSize < workerConfig.DocumentConcurrency {
+				return fmt.Errorf(
+					"Python process pool size %d must be at least document worker concurrency %d",
+					pythonConfig.ProcessPoolSize,
+					workerConfig.DocumentConcurrency,
+				)
+			}
+			processPool, err := pythonprocessor.NewProcessPool(
+				fileStorage,
+				pythonConfig.Executable,
+				pythonConfig.SourceRoot,
+				pythonConfig.PDFMaxFileSizeBytes,
+				pythonConfig.PDFMaxPages,
+				pythonConfig.ProcessPoolSize,
+				pythonConfig.ProcessMaxDocuments,
+			)
+			if err != nil {
+				return fmt.Errorf("create pooled Python document processor: %w", err)
+			}
+			pythonDocumentProcessor = processPool
+			closePythonDocumentProcessor = processPool.Close
+		}
+		logger.Info(
+			"Configured Python document processor",
+			"event", "python_document_processor_configured",
+			"mode", pythonConfig.ProcessMode,
+			"pool_size", pythonConfig.ProcessPoolSize,
+			"max_documents_per_process", pythonConfig.ProcessMaxDocuments,
+		)
+		textProcessor := documentapplication.NewTextProcessor(fileStorage)
+		processorDispatcher, err = documentapplication.NewProcessorDispatcher(
+			map[string]documentapplication.DocumentProcessor{
+				"text/markdown":   textProcessor,
+				"text/plain":      textProcessor,
+				"application/pdf": pythonDocumentProcessor,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"create document processor dispatcher: %w",
+				err,
+			)
+		}
+	}
+
+	var documentWorkerPool *documentapplication.WorkerPool
+	if rolePlan.runDocumentWorker {
+		documentWorker, err := documentapplication.NewWorkerWithHeartbeatInterval(
+			processingJobRepository,
+			documentRepository,
+			processorDispatcher,
+			chunkRepository,
+			observability.NewProcessingJobLogger(logger),
+			workerConfig.ProcessingTimeout,
+			workerConfig.JobHeartbeatInterval,
+		)
+		if err != nil {
+			return fmt.Errorf("create leased document worker: %w", err)
+		}
+		documentWorkerErrorReporter := func(err error) {
+			logger.Error(
+				"Document worker iteration failed",
+				"event", "document_worker_error",
+				"error", err,
+			)
+		}
+		documentWorkerLoop, err := documentapplication.NewWorkerLoop(
+			documentWorker,
+			workerConfig.PollInterval,
+			documentWorkerErrorReporter,
+		)
+		if err != nil {
+			return fmt.Errorf("create document worker loop: %w", err)
+		}
+		documentWorkerPool, err = documentapplication.NewWorkerPool(
+			documentWorkerLoop,
+			workerConfig.DocumentConcurrency,
+		)
+		if err != nil {
+			return fmt.Errorf("create document worker pool: %w", err)
+		}
+		logger.Info(
+			"Document worker pool configured",
+			"event", "document_worker_pool_configured",
+			"concurrency", workerConfig.DocumentConcurrency,
+			"owner_in_flight_limit", workerConfig.OwnerInFlightLimit,
+			"owner_borrowed_limit", workerConfig.OwnerBorrowedLimit,
+			"starvation_threshold_ms",
+			workerConfig.StarvationThreshold.Milliseconds(),
+			"worker_id", workerConfig.DocumentWorkerID,
+			"lease_duration_ms", workerConfig.JobLeaseDuration.Milliseconds(),
+			"heartbeat_interval_ms",
+			workerConfig.JobHeartbeatInterval.Milliseconds(),
+		)
+	}
+
+	// Worker、公开语义检索和问答内部检索最终都调用同一个远程 Embedding
+	// 提供方。组合根创建一个原始客户端、一个共享 Gate，再按后台/在线两种
+	// 等待策略包装成两个 Embedder；这样两条执行链竞争的是同一组槽位。
+	var workerEmbedder embeddingdomain.Embedder
+	var onlineEmbedder embeddingdomain.Embedder
+	if needsWorkerEmbedder || needsOnlineEmbedder {
+		rawEmbedder, err := newEmbeddingClient(embeddingConfig)
+		if err != nil {
+			return err
+		}
+
+		providerGate, err := embeddingapplication.NewEmbeddingProviderGate(
+			embeddingConfig.ProviderMaxConcurrency,
+			embeddingConfig.WorkerProviderConcurrency,
+			embeddingConfig.OnlineProviderConcurrency,
+		)
+		if err != nil {
+			return fmt.Errorf("create embedding provider gate: %w", err)
+		}
+		providerAdmissionObserver :=
+			observability.NewEmbeddingProviderAdmissionLogger(logger)
+
+		if needsWorkerEmbedder {
+			workerProvider := rawEmbedder
+			if capacityStore != nil {
+				workerProvider, err = embeddingapplication.NewDistributedGatedEmbedder(
+					rawEmbedder,
+					capacityStore,
+					providerAdmissionObserver,
+					embeddingapplication.DistributedEmbeddingProviderGateConfig{
+						Namespace:              capacityConfig.Namespace,
+						Provider:               string(embeddingConfig.Provider),
+						Model:                  embeddingConfig.ModelName,
+						Dimensions:             embeddingConfig.Dimensions,
+						Origin:                 embeddingapplication.EmbeddingProviderCallOriginWorker,
+						ProviderMaxConcurrency: embeddingConfig.ProviderMaxConcurrency,
+						OriginMaxConcurrency:   embeddingConfig.WorkerProviderConcurrency,
+						LeaseTTL:               capacityConfig.LeaseTTL,
+						RetryInterval:          capacityConfig.RetryInterval,
+						WaitTimeout:            0,
+					},
+				)
+				if err != nil {
+					return fmt.Errorf("create distributed worker embedding gate: %w", err)
+				}
+			}
+			workerEmbedder, err = embeddingapplication.NewGatedEmbedder(
+				workerProvider,
+				providerGate,
+				providerAdmissionObserver,
+				embeddingapplication.EmbeddingProviderCallOriginWorker,
+				0,
+			)
+			if err != nil {
+				return fmt.Errorf("create worker embedding provider gate: %w", err)
+			}
+		}
+		if needsOnlineEmbedder {
+			onlineProvider := rawEmbedder
+			if capacityStore != nil {
+				onlineProvider, err = embeddingapplication.NewDistributedGatedEmbedder(
+					rawEmbedder,
+					capacityStore,
+					providerAdmissionObserver,
+					embeddingapplication.DistributedEmbeddingProviderGateConfig{
+						Namespace:              capacityConfig.Namespace,
+						Provider:               string(embeddingConfig.Provider),
+						Model:                  embeddingConfig.ModelName,
+						Dimensions:             embeddingConfig.Dimensions,
+						Origin:                 embeddingapplication.EmbeddingProviderCallOriginOnline,
+						ProviderMaxConcurrency: embeddingConfig.ProviderMaxConcurrency,
+						OriginMaxConcurrency:   embeddingConfig.OnlineProviderConcurrency,
+						LeaseTTL:               capacityConfig.LeaseTTL,
+						RetryInterval:          capacityConfig.RetryInterval,
+						WaitTimeout:            embeddingConfig.OnlineQueueWaitTimeout,
+					},
+				)
+				if err != nil {
+					return fmt.Errorf("create distributed online embedding gate: %w", err)
+				}
+			}
+			onlineEmbedder, err = embeddingapplication.NewGatedEmbedder(
+				onlineProvider,
+				providerGate,
+				providerAdmissionObserver,
+				embeddingapplication.EmbeddingProviderCallOriginOnline,
+				embeddingConfig.OnlineQueueWaitTimeout,
+			)
+			if err != nil {
+				return fmt.Errorf("create online embedding provider gate: %w", err)
+			}
+		}
+
+		logger.Info(
+			"Embedding provider concurrency configured",
+			"event", "embedding_provider_concurrency_configured",
+			"max_concurrency", embeddingConfig.ProviderMaxConcurrency,
+			"worker_max_concurrency",
+			embeddingConfig.WorkerProviderConcurrency,
+			"online_max_concurrency",
+			embeddingConfig.OnlineProviderConcurrency,
+			"online_queue_wait_timeout_ms",
+			embeddingConfig.OnlineQueueWaitTimeout.Milliseconds(),
+		)
 	}
 
 	// 语义检索服务有两种消费者：
@@ -342,14 +786,35 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// 2. ANSWER_ENABLED 控制的 AnswerService 内部证据检索。
 	// 因此“创建应用能力”和“是否暴露独立 HTTP 路由”必须分开判断。
 	var semanticSearchService *embeddingapplication.SemanticSearchService
-	if embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled {
-		semanticSearchService, err =
-			embeddingapplication.NewSemanticSearchService(
-				embedder,
+	if ((rolePlan.serveHTTP || rolePlan.runAnswerWorker) &&
+		(embeddingConfig.SemanticSearchEnabled || generationConfig.Enabled)) ||
+		agentPlan.enableWorker {
+		if cacheConfig.Enabled {
+			semanticSearchService, err =
+				embeddingapplication.NewSemanticSearchServiceWithQueryCache(
+					onlineEmbedder,
+					scopedChunkRepository,
+					embeddingConfig.ModelName,
+					embeddingConfig.Dimensions,
+					ragCache,
+					cacheDigester,
+					observability.NewQueryVectorCacheLogger(logger),
+					embeddingapplication.QueryVectorCacheConfig{
+						Namespace:   cacheConfig.Namespace,
+						Provider:    string(embeddingConfig.Provider),
+						TTL:         cacheConfig.QueryVectorTTL,
+						LockTTL:     cacheConfig.QueryVectorLockTTL,
+						WaitTimeout: cacheConfig.QueryVectorWaitTimeout,
+					},
+				)
+		} else {
+			semanticSearchService, err = embeddingapplication.NewSemanticSearchService(
+				onlineEmbedder,
 				scopedChunkRepository,
 				embeddingConfig.ModelName,
 				embeddingConfig.Dimensions,
 			)
+		}
 		if err != nil {
 			return fmt.Errorf("create semantic search service: %w", err)
 		}
@@ -357,17 +822,24 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// 第一版问答使用 DashScope 的 OpenAI 兼容生成接口。Generator 只在显式
 	// 启用 ANSWER_ENABLED 时创建，避免基础服务启动后意外产生生成费用。
-	var answerService *answerapplication.Service
-	if generationConfig.Enabled {
+	var answerService answerapplication.Answerer
+	if (rolePlan.serveHTTP || rolePlan.runAnswerWorker) &&
+		generationConfig.Enabled {
 		generator, err := newGenerationClient(generationConfig)
 		if err != nil {
 			return err
 		}
 
-		answerService, err = answerapplication.NewService(
+		baseAnswerService, err := answerapplication.NewServiceWithConversationHistory(
 			semanticSearchService,
 			generator,
 			observability.NewGenerationCallLogger(logger),
+			conversationRepository,
+			answerapplication.ConversationHistoryConfig{
+				MaxTurns:         generationConfig.ConversationHistoryMaxTurns,
+				MaxTokens:        generationConfig.ConversationHistoryMaxTokens,
+				InputTokenBudget: generationConfig.AnswerInputTokenBudget,
+			},
 			generationConfig.ModelName,
 			generationConfig.MaxOutputTokens,
 			generationConfig.Temperature,
@@ -375,118 +847,377 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("create answer service: %w", err)
 		}
-	}
-
-	// Application 只依赖验证码端口；这里是组合根，负责选择具体实现。
-	verificationCodeHasher, err :=
-		verificationinfrastructure.NewHMACCodeHasher(
-			[]byte(verificationConfig.HMACSecret),
+		logger.Info(
+			"Conversation history configured",
+			"event", "conversation_history_configured",
+			"max_turns", generationConfig.ConversationHistoryMaxTurns,
+			"max_history_tokens", generationConfig.ConversationHistoryMaxTokens,
+			"input_token_budget", generationConfig.AnswerInputTokenBudget,
 		)
-	if err != nil {
-		return fmt.Errorf("create verification code hasher: %w", err)
-	}
 
-	var verificationSender verificationapplication.Sender
-	switch verificationConfig.Sender {
-	case config.VerificationSenderFake:
-		verificationSender = verificationinfrastructure.NewFakeSender()
-	case config.VerificationSenderMailpit:
-		verificationSender, err = verificationinfrastructure.NewSMTPSender(
-			verificationinfrastructure.SMTPOptions{
-				Host:        verificationConfig.SMTPHost,
-				Port:        verificationConfig.SMTPPort,
-				FromAddress: verificationConfig.SMTPFromAddress,
-				FromName:    verificationConfig.SMTPFromName,
-				Timeout:     verificationConfig.SMTPTimeout,
+		answerAdmissionObserver := observability.NewAnswerAdmissionLogger(logger)
+		var capacityAwareAnswerService answerapplication.Answerer = baseAnswerService
+		if capacityStore != nil {
+			capacityAwareAnswerService, err = answerapplication.NewDistributedService(
+				baseAnswerService,
+				capacityStore,
+				answerAdmissionObserver,
+				answerapplication.DistributedAnswerConfig{
+					Namespace:              capacityConfig.Namespace,
+					Provider:               "dashscope",
+					Model:                  generationConfig.ModelName,
+					MaxConcurrencyGlobal:   generationConfig.MaxConcurrency,
+					MaxConcurrencyPerOwner: generationConfig.MaxConcurrencyPerUser,
+					LeaseTTL:               capacityConfig.LeaseTTL,
+					RetryInterval:          capacityConfig.RetryInterval,
+					WaitTimeout:            generationConfig.QueueWaitTimeout,
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("create distributed answer capacity service: %w", err)
+			}
+		}
+
+		concurrentAnswerService, err := answerapplication.NewConcurrentService(
+			capacityAwareAnswerService,
+			answerAdmissionObserver,
+			answerapplication.AnswerAdmissionLimits{
+				MaxConcurrencyGlobal:   generationConfig.MaxConcurrency,
+				MaxConcurrencyPerOwner: generationConfig.MaxConcurrencyPerUser,
+				MaxWaitersGlobal:       generationConfig.MaxWaitersGlobal,
+				MaxWaitersPerOwner:     generationConfig.MaxWaitersPerUser,
+				WaitTimeout:            generationConfig.QueueWaitTimeout,
 			},
 		)
 		if err != nil {
-			return fmt.Errorf("create Mailpit SMTP verification sender: %w", err)
+			return fmt.Errorf("create answer concurrency service: %w", err)
 		}
-	default:
-		return fmt.Errorf(
-			"unsupported verification sender %q",
-			verificationConfig.Sender,
+		answerService = concurrentAnswerService
+
+		// 缓存放在并发闸门外层：命中直接返回，未命中才占用生成槽位。
+		if cacheConfig.Enabled {
+			answerService, err = answerapplication.NewCachedService(
+				concurrentAnswerService,
+				corpusRevisionRepository,
+				ragCache,
+				cacheDigester,
+				observability.NewAnswerCacheLogger(logger),
+				answerapplication.AnswerCacheConfig{
+					Namespace:           cacheConfig.Namespace,
+					GenerationProvider:  "dashscope",
+					GenerationModel:     generationConfig.ModelName,
+					PromptVersion:       answerapplication.AnswerPromptVersion,
+					RetrievalVersion:    answerapplication.AnswerRetrievalVersion,
+					EmbeddingModel:      embeddingConfig.ModelName,
+					EmbeddingDimensions: embeddingConfig.Dimensions,
+					MaxOutputTokens:     generationConfig.MaxOutputTokens,
+					Temperature:         generationConfig.Temperature,
+					TTL:                 cacheConfig.AnswerResultTTL,
+					LockTTL:             cacheConfig.AnswerResultLockTTL,
+					WaitTimeout:         cacheConfig.AnswerResultWaitTimeout,
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("create answer result cache service: %w", err)
+			}
+		}
+
+		logger.Info(
+			"Answer concurrency configured",
+			"event", "answer_concurrency_configured",
+			"max_concurrency_global", generationConfig.MaxConcurrency,
+			"max_concurrency_per_user", generationConfig.MaxConcurrencyPerUser,
+			"max_waiters_global", generationConfig.MaxWaitersGlobal,
+			"max_waiters_per_user", generationConfig.MaxWaitersPerUser,
+			"queue_wait_timeout_ms",
+			generationConfig.QueueWaitTimeout.Milliseconds(),
 		)
 	}
 
-	verificationService := verificationapplication.NewService(
-		verificationChallengeRepository,
-		verificationinfrastructure.NewRandomCodeGenerator(),
-		verificationCodeHasher,
-		verificationSender,
-		time.Now,
-		verificationapplication.DefaultChallengeTTL,
-		verificationapplication.DefaultResendCooldown,
-	)
-	verificationRequestLimiter, err := ratelimit.NewSlidingWindowLimiter(
-		verificationConfig.RateLimitWindow,
-		verificationConfig.PerClientLimit,
-		verificationConfig.GlobalLimit,
-	)
+	agentRuntime, err := newAgentComponents(agentComponentInputs{
+		plan:           agentPlan,
+		pool:           databasePool,
+		scopedChunks:   scopedChunkRepository,
+		semanticSearch: semanticSearchService,
+		capacityStore:  capacityStore,
+		capacityConfig: capacityConfig,
+		agentConfig:    agentConfig,
+		logger:         logger,
+		modelFactory:   newAgentModelClient,
+	})
 	if err != nil {
-		return fmt.Errorf("create verification request limiter: %w", err)
+		return fmt.Errorf("create Agent runtime components: %w", err)
+	}
+	if agentRuntime.startupRecovery != nil {
+		recovered, err := recoverAgentWorkerForStartup(ctx, agentRuntime.startupRecovery)
+		if err != nil {
+			return fmt.Errorf("recover expired Agent runs during startup: %w", err)
+		}
+		logger.Info(
+			"Agent startup recovery completed",
+			"event", "agent_startup_recovery_completed",
+			"recovered_count", recovered,
+		)
+		logger.Info(
+			"Agent Worker pool configured",
+			"event", "agent_worker_pool_configured",
+			"concurrency", agentConfig.WorkerConcurrency,
+			"max_queued_per_owner", agentConfig.MaxQueuedPerOwner,
+			"max_queued_global", agentConfig.MaxQueuedGlobal,
+			"owner_in_flight_limit", agentConfig.OwnerInFlightLimit,
+			"owner_borrowed_limit", agentConfig.OwnerBorrowedLimit,
+			"model_max_concurrency", agentConfig.ModelMaxConcurrency,
+			"model_max_concurrency_per_owner", agentConfig.ModelMaxConcurrencyPerOwner,
+		)
 	}
 
-	passwordHasher, err := passwordinfrastructure.NewArgon2idHasher(
-		passwordinfrastructure.DefaultParameters(),
-	)
-	if err != nil {
-		return fmt.Errorf("create password hasher: %w", err)
+	// 异步问答复用同一套 AnswerService，但把 HTTP 连接的等待转换为数据库任务。
+	// Worker 并发仍会经过 ConcurrentService 的总闸门，因此同步和异步请求不会
+	// 绕开同一组远程生成容量限制。
+	var answerJobService *answerapplication.JobService
+	var answerJobWorkerPool *documentapplication.WorkerPool
+	var answerJobCleanupLoop *documentapplication.WorkerLoop
+	if answerJobsConfig.Enabled && rolePlan.serveHTTP {
+		answerJobService, err = answerapplication.NewJobService(
+			answerJobRepository,
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job service: %w", err)
+		}
 	}
-	// 同一个 TokenGenerator 同时负责创建和校验 Session Token。
-	// 这里显式组装后，Application 不需要知道具体的随机数与摘要算法。
-	sessionTokenManager := sessioninfrastructure.NewTokenGenerator()
-	authRegisterService, err := authapplication.NewRegisterService(
-		authRegistrationRepository,
-		passwordHasher,
-		verificationCodeHasher,
-		sessionTokenManager,
-		time.Now,
-		authConfig.SessionTTL,
-	)
-	if err != nil {
-		return fmt.Errorf("create auth register service: %w", err)
+
+	if answerJobsConfig.Enabled && rolePlan.runAnswerWorker {
+		answerJobRecoveryService, err :=
+			answerapplication.NewExpiredJobRecoveryService(
+				answerJobRepository,
+			)
+		if err != nil {
+			return fmt.Errorf("create answer job recovery service: %w", err)
+		}
+		answerJobRecoveredCount, err := answerJobRecoveryService.Recover(ctx)
+		if err != nil {
+			return fmt.Errorf(
+				"recover interrupted answer jobs during startup: %w",
+				err,
+			)
+		}
+		if answerJobRecoveredCount > 0 {
+			logger.Info(
+				"Requeued interrupted answer jobs",
+				"event", "answer_jobs_requeued",
+				"job_count", answerJobRecoveredCount,
+			)
+		}
+
+		answerJobRetryPolicy, err := answerapplication.NewJobRetryPolicy(
+			answerJobsConfig.MaxAttempts,
+			answerJobsConfig.RetryBaseDelay,
+			answerJobsConfig.RetryMaxDelay,
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job retry policy: %w", err)
+		}
+		answerJobLogger := observability.NewAnswerJobLogger(logger)
+		answerJobWorker, err := answerapplication.NewJobWorkerWithHeartbeatInterval(
+			answerJobRepository,
+			answerService,
+			answerJobLogger,
+			answerJobsConfig.ProcessingTimeout,
+			answerJobRetryPolicy,
+			answerJobsConfig.JobHeartbeatInterval,
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job worker: %w", err)
+		}
+		answerJobWorkerLoop, err := documentapplication.NewWorkerLoop(
+			answerJobWorker,
+			answerJobsConfig.PollInterval,
+			func(err error) {
+				logger.Error(
+					"Answer job worker iteration failed",
+					"event", "answer_job_worker_error",
+					"error", err,
+				)
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job worker loop: %w", err)
+		}
+		answerJobWorkerPool, err = documentapplication.NewWorkerPool(
+			answerJobWorkerLoop,
+			answerJobsConfig.WorkerConcurrency,
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job worker pool: %w", err)
+		}
+		answerJobRetentionService, err :=
+			answerapplication.NewJobRetentionService(
+				answerJobRepository,
+				answerJobLogger,
+				answerJobsConfig.StandaloneRetention,
+				answerJobsConfig.CleanupBatchSize,
+			)
+		if err != nil {
+			return fmt.Errorf("create answer job retention service: %w", err)
+		}
+		answerJobCleanupLoop, err = documentapplication.NewWorkerLoop(
+			answerJobRetentionService,
+			answerJobsConfig.CleanupInterval,
+			func(err error) {
+				logger.Error(
+					"Standalone answer job retention iteration failed",
+					"event", "standalone_answer_job_retention_error",
+					"error", err,
+				)
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create answer job retention loop: %w", err)
+		}
+
+		logger.Info(
+			"Answer job worker pool configured",
+			"event", "answer_job_worker_pool_configured",
+			"concurrency", answerJobsConfig.WorkerConcurrency,
+			"max_queued_per_user", answerJobsConfig.MaxQueuedPerUser,
+			"max_queued_global", answerJobsConfig.MaxQueuedGlobal,
+			"owner_in_flight_limit", answerJobsConfig.OwnerInFlightLimit,
+			"owner_borrowed_limit",
+			answerJobsConfig.OwnerBorrowedInFlightLimit,
+			"starvation_threshold_ms",
+			answerJobsConfig.StarvationThreshold.Milliseconds(),
+			"retention_scope", "standalone",
+			"standalone_retention_ms", answerJobsConfig.StandaloneRetention.Milliseconds(),
+			"cleanup_interval_ms",
+			answerJobsConfig.CleanupInterval.Milliseconds(),
+			"standalone_cleanup_batch_size", answerJobsConfig.CleanupBatchSize,
+			"worker_id", answerJobsConfig.WorkerID,
+			"lease_duration_ms",
+			answerJobsConfig.JobLeaseDuration.Milliseconds(),
+			"heartbeat_interval_ms",
+			answerJobsConfig.JobHeartbeatInterval.Milliseconds(),
+		)
 	}
-	authPasswordResetService, err := authapplication.NewPasswordResetService(
-		authPasswordResetRepository,
-		passwordHasher,
-		verificationCodeHasher,
-		time.Now,
-	)
-	if err != nil {
-		return fmt.Errorf("create auth password reset service: %w", err)
-	}
-	authLoginService, err := authapplication.NewLoginService(
-		authSessionRepository,
-		passwordHasher,
-		sessionTokenManager,
-		time.Now,
-		authConfig.SessionTTL,
-	)
-	if err != nil {
-		return fmt.Errorf("create auth login service: %w", err)
-	}
-	authSessionService, err := authapplication.NewSessionService(
-		authSessionRepository,
-		sessionTokenManager,
-		time.Now,
-	)
-	if err != nil {
-		return fmt.Errorf("create auth session service: %w", err)
-	}
-	authRequestLimiter, err := ratelimit.NewSlidingWindowLimiter(
-		authConfig.RateLimitWindow,
-		authConfig.PerClientLimit,
-		authConfig.GlobalLimit,
-	)
-	if err != nil {
-		return fmt.Errorf("create auth request limiter: %w", err)
+
+	var verificationService *verificationapplication.Service
+	var verificationRequestLimiter *ratelimit.SlidingWindowLimiter
+	var authRegisterService *authapplication.RegisterService
+	var authPasswordResetService *authapplication.PasswordResetService
+	var authLoginService *authapplication.LoginService
+	var authSessionService *authapplication.SessionService
+	var authRequestLimiter *ratelimit.SlidingWindowLimiter
+	if rolePlan.serveHTTP {
+		// Application 只依赖验证码端口；这里是组合根，负责选择具体实现。
+		verificationCodeHasher, err :=
+			verificationinfrastructure.NewHMACCodeHasher(
+				[]byte(verificationConfig.HMACSecret),
+			)
+		if err != nil {
+			return fmt.Errorf("create verification code hasher: %w", err)
+		}
+
+		var verificationSender verificationapplication.Sender
+		switch verificationConfig.Sender {
+		case config.VerificationSenderFake:
+			verificationSender = verificationinfrastructure.NewFakeSender()
+		case config.VerificationSenderMailpit:
+			verificationSender, err = verificationinfrastructure.NewSMTPSender(
+				verificationinfrastructure.SMTPOptions{
+					Host:        verificationConfig.SMTPHost,
+					Port:        verificationConfig.SMTPPort,
+					FromAddress: verificationConfig.SMTPFromAddress,
+					FromName:    verificationConfig.SMTPFromName,
+					Timeout:     verificationConfig.SMTPTimeout,
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("create Mailpit SMTP verification sender: %w", err)
+			}
+		default:
+			return fmt.Errorf(
+				"unsupported verification sender %q",
+				verificationConfig.Sender,
+			)
+		}
+
+		verificationService = verificationapplication.NewService(
+			verificationChallengeRepository,
+			verificationinfrastructure.NewRandomCodeGenerator(),
+			verificationCodeHasher,
+			verificationSender,
+			time.Now,
+			verificationapplication.DefaultChallengeTTL,
+			verificationapplication.DefaultResendCooldown,
+		)
+		verificationRequestLimiter, err = ratelimit.NewSlidingWindowLimiter(
+			verificationConfig.RateLimitWindow,
+			verificationConfig.PerClientLimit,
+			verificationConfig.GlobalLimit,
+		)
+		if err != nil {
+			return fmt.Errorf("create verification request limiter: %w", err)
+		}
+
+		passwordHasher, err := passwordinfrastructure.NewArgon2idHasher(
+			passwordinfrastructure.DefaultParameters(),
+		)
+		if err != nil {
+			return fmt.Errorf("create password hasher: %w", err)
+		}
+		// 同一个 TokenGenerator 同时负责创建和校验 Session Token。
+		// 这里显式组装后，Application 不需要知道具体的随机数与摘要算法。
+		sessionTokenManager := sessioninfrastructure.NewTokenGenerator()
+		authRegisterService, err = authapplication.NewRegisterService(
+			authRegistrationRepository,
+			passwordHasher,
+			verificationCodeHasher,
+			sessionTokenManager,
+			time.Now,
+			authConfig.SessionTTL,
+		)
+		if err != nil {
+			return fmt.Errorf("create auth register service: %w", err)
+		}
+		authPasswordResetService, err = authapplication.NewPasswordResetService(
+			authPasswordResetRepository,
+			passwordHasher,
+			verificationCodeHasher,
+			time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create auth password reset service: %w", err)
+		}
+		authLoginService, err = authapplication.NewLoginService(
+			authSessionRepository,
+			passwordHasher,
+			sessionTokenManager,
+			time.Now,
+			authConfig.SessionTTL,
+		)
+		if err != nil {
+			return fmt.Errorf("create auth login service: %w", err)
+		}
+		authSessionService, err = authapplication.NewSessionService(
+			authSessionRepository,
+			sessionTokenManager,
+			time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create auth session service: %w", err)
+		}
+		authRequestLimiter, err = ratelimit.NewSlidingWindowLimiter(
+			authConfig.RateLimitWindow,
+			authConfig.PerClientLimit,
+			authConfig.GlobalLimit,
+		)
+		if err != nil {
+			return fmt.Errorf("create auth request limiter: %w", err)
+		}
 	}
 
 	// 默认不启动远程向量 Worker，避免开发者未明确授权时产生后台 API 调用。
-	var embeddingWorkerLoop *documentapplication.WorkerLoop
-	if embeddingConfig.WorkerEnabled {
+	var embeddingWorkerPool *documentapplication.WorkerPool
+	if rolePlan.runEmbeddingWorker && embeddingConfig.WorkerEnabled {
 
 		retryPolicy, err := embeddingapplication.NewRetryPolicy(
 			embeddingConfig.MaxAttempts,
@@ -497,20 +1228,21 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			return fmt.Errorf("create embedding retry policy: %w", err)
 		}
 
-		embeddingWorker, err := embeddingapplication.NewWorker(
+		embeddingWorker, err := embeddingapplication.NewWorkerWithHeartbeatInterval(
 			embeddingJobRepository,
 			chunkRepository,
-			embedder,
+			workerEmbedder,
 			observability.NewEmbeddingJobLogger(logger),
 			embeddingConfig.BatchSize,
 			embeddingConfig.ProcessingTimeout,
 			retryPolicy,
+			embeddingConfig.JobHeartbeatInterval,
 		)
 		if err != nil {
 			return fmt.Errorf("create embedding worker: %w", err)
 		}
 
-		embeddingWorkerLoop, err = documentapplication.NewWorkerLoop(
+		embeddingWorkerLoop, err := documentapplication.NewWorkerLoop(
 			embeddingWorker,
 			embeddingConfig.PollInterval,
 			func(err error) {
@@ -524,6 +1256,28 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("create embedding worker loop: %w", err)
 		}
+
+		embeddingWorkerPool, err = documentapplication.NewWorkerPool(
+			embeddingWorkerLoop,
+			embeddingConfig.WorkerConcurrency,
+		)
+		if err != nil {
+			return fmt.Errorf("create embedding worker pool: %w", err)
+		}
+
+		logger.Info(
+			"Embedding worker pool configured",
+			"event", "embedding_worker_pool_configured",
+			"concurrency", embeddingConfig.WorkerConcurrency,
+			"owner_in_flight_limit", embeddingConfig.OwnerInFlightLimit,
+			"owner_borrowed_limit", embeddingConfig.OwnerBorrowedLimit,
+			"starvation_threshold_ms",
+			embeddingConfig.StarvationThreshold.Milliseconds(),
+			"worker_id", embeddingConfig.WorkerID,
+			"lease_duration_ms", embeddingConfig.JobLeaseDuration.Milliseconds(),
+			"heartbeat_interval_ms",
+			embeddingConfig.JobHeartbeatInterval.Milliseconds(),
+		)
 	}
 
 	// workerContext 专门控制后台 Worker 的生命周期。
@@ -533,17 +1287,28 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	// WaitGroup 记录仍未退出的 Worker goroutine 数量。
 	var workerGroup sync.WaitGroup
-	startWorkerLoop := func(loop *documentapplication.WorkerLoop) {
+	startBackgroundWorker := func(runWorker func(context.Context)) {
 		workerGroup.Add(1)
 		go func() {
 			defer workerGroup.Done()
-			loop.Run(workerContext)
+			runWorker(workerContext)
 		}()
 	}
 
-	startWorkerLoop(documentWorkerLoop)
-	if embeddingWorkerLoop != nil {
-		startWorkerLoop(embeddingWorkerLoop)
+	if documentWorkerPool != nil {
+		startBackgroundWorker(documentWorkerPool.Run)
+	}
+	if embeddingWorkerPool != nil {
+		startBackgroundWorker(embeddingWorkerPool.Run)
+	}
+	if answerJobWorkerPool != nil {
+		startBackgroundWorker(answerJobWorkerPool.Run)
+	}
+	if agentRuntime.workerPool != nil {
+		startBackgroundWorker(agentRuntime.workerPool.Run)
+	}
+	if answerJobCleanupLoop != nil {
+		startBackgroundWorker(answerJobCleanupLoop.Run)
 	}
 
 	// defer 在 run 返回前执行。
@@ -551,22 +1316,161 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	defer func() {
 		cancelWorker()
 		workerGroup.Wait()
+		if err := closePythonDocumentProcessor(); err != nil {
+			logger.Error(
+				"Close Python document processor",
+				"event", "python_document_processor_close_failed",
+				"error", err,
+			)
+		}
 	}()
+
+	// Worker-only 角色没有 HTTP 监听端口。完成组装后只等待进程退出信号，
+	// 实际任务由上面的后台循环从 PostgreSQL 队列领取。
+	if !rolePlan.serveHTTP {
+		cleanupReadyFile, err := writeApplicationReadyFile(
+			appConfig.ReadyFile,
+			appConfig.Role,
+		)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := cleanupReadyFile(); err != nil {
+				logger.Warn(
+					"Remove application ready file",
+					"event", "application_ready_file_remove_failed",
+					"role", appConfig.Role,
+					"error", err,
+				)
+			}
+		}()
+
+		logger.Info(
+			"Application started",
+			"event", "application_started",
+			"role", appConfig.Role,
+			"http_enabled", false,
+			"ready_file_enabled", appConfig.ReadyFile != "",
+		)
+		<-ctx.Done()
+		logger.Info(
+			"Application shutdown started",
+			"event", "application_shutdown_started",
+			"role", appConfig.Role,
+			"cause", ctx.Err(),
+		)
+		return nil
+	}
+
+	// API 角色创建面向 HTTP 用例的服务。Worker-only 角色不会经过该区块，
+	// 因而不会加载认证、上传、同步检索或任务提交 Handler。
+	documentService := documentapplication.NewService(scopedDocumentRepository)
+	baseDocumentUploadService := documentapplication.NewUploadService(
+		scopedDocumentRepository,
+		fileStorage,
+	)
+	documentUploadService, err := documentapplication.NewConcurrentUploadService(
+		baseDocumentUploadService,
+		observability.NewUploadAdmissionLogger(logger),
+		storageConfig.UploadMaxConcurrencyPerUser,
+		storageConfig.UploadMaxConcurrencyGlobal,
+		storageConfig.UploadQueueWaitTimeout,
+	)
+	if err != nil {
+		return fmt.Errorf("create upload concurrency service: %w", err)
+	}
+	logger.Info(
+		"Upload concurrency configured",
+		"event", "upload_concurrency_configured",
+		"owner_max_concurrency",
+		storageConfig.UploadMaxConcurrencyPerUser,
+		"global_max_concurrency",
+		storageConfig.UploadMaxConcurrencyGlobal,
+		"queue_wait_timeout_ms",
+		storageConfig.UploadQueueWaitTimeout.Milliseconds(),
+	)
+	documentPreflightService := documentapplication.NewPreflightService(
+		scopedDocumentRepository,
+		storageConfig.MaxFileSizeBytes,
+	)
+	documentListService := documentapplication.NewListService(
+		scopedDocumentRepository,
+	)
+	documentChunkListService := documentapplication.NewChunkListService(
+		scopedDocumentRepository,
+		scopedChunkRepository,
+	)
+	documentSearchService := documentapplication.NewSearchService(
+		scopedChunkRepository,
+	)
+	documentDeleteService := documentapplication.NewDeleteService(
+		scopedDocumentRepository,
+		fileStorage,
+	)
+	conversationService := conversationapplication.NewService(conversationRepository)
+	documentProcessingService := documentapplication.NewQueueProcessingService(
+		scopedDocumentRepository,
+		scopedProcessingJobRepository,
+	)
+	processingJobService := documentapplication.NewProcessingJobService(
+		scopedProcessingJobRepository,
+	)
+	processingJobLatestService :=
+		documentapplication.NewProcessingJobLatestService(
+			scopedProcessingJobRepository,
+		)
+	processingJobCancelService :=
+		documentapplication.NewProcessingJobCancelService(
+			scopedProcessingJobRepository,
+		)
+	embeddingQueueService := embeddingapplication.NewQueueService(
+		scopedEmbeddingJobRepository,
+		embeddingConfig.ModelName,
+		embeddingConfig.Dimensions,
+	)
+	embeddingJobQueryService := embeddingapplication.NewJobQueryService(
+		scopedEmbeddingJobRepository,
+	)
+	embeddingJobCancelService := embeddingapplication.NewCancelService(
+		scopedEmbeddingJobRepository,
+	)
 
 	// Handler 负责把 HTTP 请求转换成应用服务调用。
 	documentHandler := api.NewDocumentHandler(documentService, logger)
 	documentUploadHandler := api.NewDocumentUploadHandler(documentUploadService, storageConfig.MaxFileSizeBytes)
+	documentPreflightHandler := api.NewDocumentPreflightHandler(
+		documentPreflightService,
+		logger,
+	)
 	documentListHandler := api.NewDocumentListHandler(documentListService)
 	documentChunkHandler := api.NewDocumentChunkHandler(
 		documentChunkListService,
 	)
 	documentSearchHandler := api.NewDocumentSearchHandler(documentSearchService)
 	documentDeleteHandler := api.NewDocumentDeleteHandler(documentDeleteService)
+	conversationHandler := api.NewConversationHandler(conversationService, logger)
+	var conversationAnswerHandler *api.ConversationAnswerHandler
+	if answerJobService != nil {
+		conversationAnswerHandler = api.NewConversationAnswerHandler(
+			conversationService,
+			answerJobService,
+			logger,
+		)
+	}
 	documentProcessingHandler := api.NewDocumentProcessingHandler(
 		documentProcessingService,
 	)
 	processingJobHandler := api.NewProcessingJobHandler(
 		processingJobService,
+		logger,
+	)
+	processingJobLatestHandler := api.NewProcessingJobLatestHandler(
+		processingJobLatestService,
+		logger,
+	)
+	processingJobCancelHandler := api.NewProcessingJobCancelHandler(
+		processingJobCancelService,
 		logger,
 	)
 	documentEmbeddingHandler := api.NewDocumentEmbeddingHandler(
@@ -591,7 +1495,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	var answerHandler *api.AnswerHandler
 	if answerService != nil {
-		answerHandler = api.NewAnswerHandler(answerService)
+		answerHandler = api.NewAnswerHandler(
+			answerService,
+			generationConfig.QueueWaitTimeout,
+		)
+	}
+	var answerJobHandler *api.AnswerJobHandler
+	if answerJobService != nil {
+		answerJobHandler = api.NewAnswerJobHandler(answerJobService, logger)
 	}
 	verificationHandler := api.NewVerificationHandler(
 		verificationService,
@@ -637,11 +1548,18 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	protectedRoutes.Use(authMiddleware.Require)
 	documentHandler.RegisterRoutes(protectedRoutes)
 	documentUploadHandler.RegisterRoutes(protectedRoutes)
+	documentPreflightHandler.RegisterRoutes(protectedRoutes)
 	documentListHandler.RegisterRoutes(protectedRoutes)
 	documentDeleteHandler.RegisterRoutes(protectedRoutes)
+	conversationHandler.RegisterRoutes(protectedRoutes)
+	if conversationAnswerHandler != nil {
+		conversationAnswerHandler.RegisterRoutes(protectedRoutes)
+	}
 	documentChunkHandler.RegisterRoutes(protectedRoutes)
 	documentProcessingHandler.RegisterRoutes(protectedRoutes)
 	processingJobHandler.RegisterRoutes(protectedRoutes)
+	processingJobLatestHandler.RegisterRoutes(protectedRoutes)
+	processingJobCancelHandler.RegisterRoutes(protectedRoutes)
 	documentEmbeddingHandler.RegisterRoutes(protectedRoutes)
 	documentEmbeddingBatchHandler.RegisterRoutes(protectedRoutes)
 	embeddingJobHandler.RegisterRoutes(protectedRoutes)
@@ -653,6 +1571,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if answerHandler != nil {
 		answerHandler.RegisterRoutes(protectedRoutes)
 	}
+	if answerJobHandler != nil {
+		answerJobHandler.RegisterRoutes(protectedRoutes)
+	}
+	registerAgentRoutes(protectedRoutes, agentRuntime.handler)
 
 	users := protectedRoutes.Group("/users")
 	currentUserHandler.RegisterRoutes(users)
@@ -680,6 +1602,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	logger.Info(
 		"Application started",
 		"event", "application_started",
+		"role", appConfig.Role,
 		"address", appConfig.ServerAddress(),
 	)
 

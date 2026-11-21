@@ -3,6 +3,10 @@ import { defineStore } from 'pinia'
 import type { PublicUser } from '../../../entities/user/model/public-user'
 import { ApiError } from '../../../shared/api/api-error'
 import {
+  clearAllPrivateSessionStorage,
+  clearPrivateSessionStorageExcept,
+} from '../../../shared/storage/private-session-storage'
+import {
   getCurrentUser,
   login as loginRequest,
   logout as logoutRequest,
@@ -25,6 +29,7 @@ export const useAuthStore = defineStore('auth', () => {
   const isAuthenticated = computed(() => status.value === 'authenticated' && user.value !== null)
 
   function markAuthenticated(nextUser: PublicUser, expiresAt: string | null): void {
+    clearPrivateSessionStorageExcept(nextUser.id)
     user.value = nextUser
     sessionExpiresAt.value = expiresAt
     restoreError.value = null
@@ -32,6 +37,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function markAnonymous(): void {
+    clearAllPrivateSessionStorage()
     user.value = null
     sessionExpiresAt.value = null
     status.value = 'anonymous'

@@ -19,6 +19,11 @@
 - [概念词典与多语言检索设想](architecture/concept-retrieval-roadmap.md)
 - [P6 个人用户域后端交接](architecture/personal-user-backend-handoff.md)
 - [向量任务并发、版本与 Redis 演进交接](architecture/document-vectorization-concurrency-handoff.md)
+- [Redis 查询向量与问答结果缓存](architecture/redis-rag-cache.md)
+- [100 人在线并发演进后端交接](architecture/100-user-concurrency-handoff.md)
+- [同一二进制部署角色拆分路线](architecture/deployment-role-roadmap.md)
+- [共享文件存储契约](architecture/shared-file-storage-contract.md)
+- [文档处理并发与 Python 进程复用交接](../shared/architecture/document-processing-concurrency-review.md)
 - [文档文本块浏览接口](architecture/document-chunk-browsing.md)
 - [运行路径与配置契约](development/runtime-path-configuration.md)
 - [日志与请求追踪规范](development/logging-observability.md)
@@ -26,9 +31,12 @@
 - [后端本地集成回归](development/local-integration-regression.md)
 - [后端发布验收与 P5 收尾](development/release-acceptance.md)
 - [后端容器部署指南](deployment/container-deployment.md)
+- [阿里云 OSS 文件存储](deployment/aliyun-oss-storage.md)
+- [2026-08-30 阿里云 OSS 真实验收记录](deployment/aliyun-oss-acceptance-2026-08-30.md)
 - [数据配套备份与恢复指南](deployment/data-backup-and-restore.md)
 - [容器优雅关闭与异常恢复](deployment/container-lifecycle-and-recovery.md)
 - [Embedding 与 Generation 调用成本基线](performance/model-call-cost-baseline.md)
+- [Redis RAG 缓存零费用性能画像](performance/redis-rag-cache-profile-2026-08-25.md)
 
 ## 质量评估入口
 
@@ -48,6 +56,10 @@ P5 不包含用户认证。P6 后端 B1～B5 已交付个人账户、Session 以
 团队工作区和多租户留到 P7。范围见
 [P6 个人用户域与私有数据闭环](../shared/architecture/personal-user-domain.md)，后端实施顺序见
 [P6 个人用户域后端交接](architecture/personal-user-backend-handoff.md)。
+
+当前后端的工程目标已经提升为“高性能、高并发训练型模块化单体”：在保留个人版业务范围的同时，重点验证
+Worker Pool、Python Process Pool、任务背压、资源隔离、指标观测和多实例演进边界。目标、压测口径和阶段验收见
+[高性能与高并发工程目标](../shared/architecture/performance-engineering-goal.md)。
 
 P5.1 已建立统一 `APP_ROOT` 路径基准：本地开发可从项目根目录或 `backend` 目录启动，
 部署环境则必须显式提供绝对应用根目录。文件存储与 Python 源码的相对路径不再依赖偶然的当前工作目录。

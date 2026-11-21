@@ -21,6 +21,11 @@ type embeddingJobQueryService interface {
 		scope accessdomain.OwnerScope,
 		jobID int64,
 	) (embeddingdomain.Job, error)
+	GetLatestByDocumentIDs(
+		ctx context.Context,
+		scope accessdomain.OwnerScope,
+		documentIDs []int64,
+	) (embeddingapplication.LatestJobsOutput, error)
 }
 
 // EmbeddingJobHandler 负责向量任务查询的 HTTP 输入和输出。
@@ -38,6 +43,20 @@ func NewEmbeddingJobHandler(
 // RegisterRoutes 注册按照任务 ID 查询向量任务的路由。
 func (h *EmbeddingJobHandler) RegisterRoutes(router gin.IRoutes) {
 	router.GET("/embedding-jobs/:id", h.GetByID)
+	router.POST("/embedding-jobs/latest", h.GetLatestByDocumentIDs)
+}
+
+type embeddingJobsLatestRequest struct {
+	DocumentIDs []int64 `json:"document_ids"`
+}
+
+type embeddingJobLatestItemResponse struct {
+	DocumentID int64                 `json:"document_id"`
+	Job        *embeddingJobResponse `json:"job"`
+}
+
+type embeddingJobsLatestResponse struct {
+	Items []embeddingJobLatestItemResponse `json:"items"`
 }
 
 // GetByID 处理 GET /embedding-jobs/:id。
@@ -84,4 +103,47 @@ func (h *EmbeddingJobHandler) GetByID(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, newEmbeddingJobResponse(foundJob))
+}
+
+// GetLatestByDocumentIDs 处理 POST /embedding-jobs/latest。
+func (h *EmbeddingJobHandler) GetLatestByDocumentIDs(c *gin.Context) {
+	scope, authenticated := ownerScopeFromContext(c)
+	if !authenticated {
+		writeAuthenticationRequired(c)
+		return
+	}
+
+	var request embeddingJobsLatestRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		writeErrorResponse(c, http.StatusBadRequest, errorCodeInvalidEmbeddingJobLookup, "request body must contain a valid document_ids array")
+		return
+	}
+
+	output, err := h.service.GetLatestByDocumentIDs(c.Request.Context(), scope, request.DocumentIDs)
+	switch {
+	case errors.Is(err, embeddingapplication.ErrEmptyEmbeddingJobLookup):
+		writeErrorResponse(c, http.StatusBadRequest, errorCodeInvalidEmbeddingJobLookup, "document_ids must contain at least one document ID")
+		return
+	case errors.Is(err, embeddingapplication.ErrEmbeddingJobLookupTooLarge):
+		writeErrorResponse(c, http.StatusBadRequest, errorCodeInvalidEmbeddingJobLookup, "document_ids must contain at most 100 document IDs")
+		return
+	case errors.Is(err, embeddingapplication.ErrInvalidDocumentID):
+		writeErrorResponse(c, http.StatusBadRequest, errorCodeInvalidEmbeddingJobLookup, "every document ID must be a positive integer")
+		return
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, errorResponse{Error: "internal server error", Code: errorCodeInternal})
+		return
+	}
+
+	items := make([]embeddingJobLatestItemResponse, 0, len(output.Items))
+	for _, outputItem := range output.Items {
+		item := embeddingJobLatestItemResponse{DocumentID: outputItem.DocumentID}
+		if outputItem.Job != nil {
+			jobResponse := newEmbeddingJobResponse(*outputItem.Job)
+			item.Job = &jobResponse
+		}
+		items = append(items, item)
+	}
+
+	c.JSON(http.StatusOK, embeddingJobsLatestResponse{Items: items})
 }

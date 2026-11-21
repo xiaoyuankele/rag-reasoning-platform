@@ -1,17 +1,28 @@
 import { computed, onScopeDispose, ref, shallowRef } from 'vue'
 import type { ResearchDocument } from '../../../entities/document/model/document'
 import type { ProcessingJob } from '../../../entities/processing-job/model/processing-job'
-import { toApiError } from '../../../shared/api/api-error'
+import { ApiError, toApiError } from '../../../shared/api/api-error'
 import { getDocument, uploadDocument } from '../api/document-api'
+import { preflightDocument } from '../api/document-preflight-api'
 import { getProcessingJob, queueDocumentProcessing } from '../api/processing-api'
+import {
+  createFileHashWorkerClient,
+  type FileHashClient,
+  type FileHashProgress,
+} from './file-hash-worker-client'
 
 export type DocumentImportState =
   | 'waiting'
+  | 'hashing'
+  | 'checking'
+  | 'duplicate'
   | 'uploading'
   | 'queueing'
   | 'queued'
   | 'processing'
   | 'ready'
+  | 'hash-failed'
+  | 'check-failed'
   | 'upload-failed'
   | 'queue-failed'
   | 'process-failed'
@@ -24,8 +35,12 @@ export interface DocumentImportItem {
   document: ResearchDocument | null
   job: ProcessingJob | null
   duplicate: boolean
+  sha256: string | null
+  hashProgress: FileHashProgress | null
   errorMessage: string
   requestId?: string
+  warningMessage: string
+  warningRequestId?: string
 }
 
 export interface DocumentImportSummary {
@@ -51,15 +66,25 @@ interface UseDocumentImportQueueOptions {
   uploadConcurrency?: number
   pollIntervalMs?: number
   pollBatchSize?: number
+  fileHashClient?: FileHashClient
 }
 
 const supportedExtensions = new Set(['pdf', 'md', 'markdown', 'txt'])
 const failedStates = new Set<DocumentImportState>([
+  'hash-failed',
+  'check-failed',
   'upload-failed',
   'queue-failed',
   'process-failed',
 ])
-const activeStates = new Set<DocumentImportState>(['uploading', 'queueing', 'queued', 'processing'])
+const activeStates = new Set<DocumentImportState>([
+  'hashing',
+  'checking',
+  'uploading',
+  'queueing',
+  'queued',
+  'processing',
+])
 
 let importItemSequence = 0
 
@@ -95,6 +120,29 @@ function presentUploadError(error: unknown): { message: string; requestId?: stri
   return { message: apiError.message, requestId: apiError.requestId }
 }
 
+function canFailOpenPreflight(error: unknown): boolean {
+  const apiError = toApiError(error)
+  return (
+    apiError.kind === 'network' ||
+    apiError.kind === 'timeout' ||
+    (apiError.status !== undefined && apiError.status >= 500)
+  )
+}
+
+function presentPreflightError(error: unknown): { message: string; requestId?: string } {
+  const apiError = toApiError(error)
+  if (apiError.status === 413 || apiError.code === 'file_too_large') {
+    return { message: '文件超过服务端允许的上传大小。', requestId: apiError.requestId }
+  }
+  if (apiError.status === 400 || apiError.code === 'invalid_document_preflight') {
+    return {
+      message: '文件摘要或大小未被后端接受，已停止上传。',
+      requestId: apiError.requestId,
+    }
+  }
+  return { message: apiError.message, requestId: apiError.requestId }
+}
+
 /**
  * 用现有单文件接口编排批量导入。
  * 上传使用有限并发；任务状态由一个集中轮询器分批刷新，避免每个队列项各建计时器。
@@ -105,6 +153,7 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
   const uploadConcurrency = Math.max(1, options.uploadConcurrency ?? 2)
   const pollIntervalMs = options.pollIntervalMs ?? 2_000
   const pollBatchSize = Math.max(1, options.pollBatchSize ?? 4)
+  const fileHashClient = options.fileHashClient ?? createFileHashWorkerClient()
   const items = shallowRef<DocumentImportItem[]>([])
   const selectionMessage = ref('')
   const isDispatching = ref(false)
@@ -120,7 +169,8 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
     total: items.value.length,
     waiting: items.value.filter((item) => item.state === 'waiting').length,
     active: items.value.filter((item) => activeStates.has(item.state)).length,
-    ready: items.value.filter((item) => item.state === 'ready').length,
+    ready: items.value.filter((item) => item.state === 'ready' || item.state === 'duplicate')
+      .length,
     failed: items.value.filter((item) => failedStates.has(item.state)).length,
     duplicate: items.value.filter((item) => item.duplicate).length,
     stopped: items.value.filter((item) => item.state === 'stopped').length,
@@ -134,7 +184,9 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
   const canStop = computed(
     () =>
       isDispatching.value ||
-      items.value.some((item) => item.state === 'waiting' || item.state === 'uploading'),
+      items.value.some((item) =>
+        ['waiting', 'hashing', 'checking', 'uploading'].includes(item.state),
+      ),
   )
 
   function findItem(localId: string): DocumentImportItem | undefined {
@@ -175,7 +227,10 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
         document: null,
         job: null,
         duplicate: false,
+        sha256: null,
+        hashProgress: null,
         errorMessage: '',
+        warningMessage: '',
       })
     }
 
@@ -193,6 +248,9 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
   function clearFinished(): void {
     const removableStates = new Set<DocumentImportState>([
       'ready',
+      'duplicate',
+      'hash-failed',
+      'check-failed',
       'upload-failed',
       'queue-failed',
       'process-failed',
@@ -455,6 +513,76 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
     }
   }
 
+  async function continueWithDocument(
+    localId: string,
+    document: ResearchDocument,
+    duplicate: boolean,
+    preflightHit = false,
+  ): Promise<void> {
+    updateItem(localId, {
+      document,
+      duplicate,
+      errorMessage: '',
+      requestId: undefined,
+    })
+
+    if (document.status === 'ready') {
+      updateItem(localId, { state: preflightHit ? 'duplicate' : 'ready' })
+      return
+    }
+
+    if (document.status === 'processing') {
+      updateItem(localId, { state: 'processing' })
+      trackImport(localId, {
+        documentId: document.id,
+        baselineUpdatedAt: document.updatedAt.getTime(),
+        observedProcessing: true,
+      })
+      return
+    }
+
+    await queueItem(localId, document)
+  }
+
+  async function uploadAndContinue(
+    localId: string,
+    file: File,
+    sha256: string,
+    controller: AbortController,
+  ): Promise<void> {
+    updateItem(localId, {
+      state: 'uploading',
+      hashProgress: null,
+      errorMessage: '',
+      requestId: undefined,
+    })
+
+    try {
+      const result = await uploadDocument(file, controller.signal)
+      if (controller.signal.aborted) {
+        updateItem(localId, { state: 'stopped', errorMessage: '上传已停止。' })
+        return
+      }
+
+      if (result.document.sha256 !== sha256 || result.document.sizeBytes !== file.size) {
+        throw new ApiError('invalid-response', '后端上传结果与本地文件摘要不一致。')
+      }
+
+      await continueWithDocument(localId, result.document, result.duplicate)
+    } catch (error) {
+      if (controller.signal.aborted) {
+        updateItem(localId, { state: 'stopped', errorMessage: '上传已停止。' })
+        return
+      }
+      const presentation = presentUploadError(error)
+      updateItem(localId, {
+        state: 'upload-failed',
+        errorMessage: presentation.message,
+        requestId: presentation.requestId,
+      })
+    }
+  }
+
   async function processItem(localId: string): Promise<void> {
     const currentItem = findItem(localId)
     if (!currentItem) return
@@ -467,51 +595,98 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
     const controller = new AbortController()
     activeRequestControllers.set(localId, controller)
     updateItem(localId, {
-      state: 'uploading',
+      state: 'hashing',
+      hashProgress: { processedBytes: 0, totalBytes: currentItem.file.size },
       errorMessage: '',
       requestId: undefined,
+      warningMessage: '',
+      warningRequestId: undefined,
     })
 
     try {
-      const result = await uploadDocument(currentItem.file, controller.signal)
-      if (controller.signal.aborted) {
-        updateItem(localId, { state: 'stopped', errorMessage: '上传已停止。' })
-        return
-      }
-
-      updateItem(localId, {
-        document: result.document,
-        duplicate: result.duplicate,
-        errorMessage: '',
-        requestId: undefined,
-      })
-
-      if (result.document.status === 'ready') {
-        updateItem(localId, { state: 'ready' })
-        return
-      }
-
-      if (result.document.status === 'processing') {
-        updateItem(localId, { state: 'processing' })
-        trackImport(localId, {
-          documentId: result.document.id,
-          baselineUpdatedAt: result.document.updatedAt.getTime(),
-          observedProcessing: true,
+      let sha256: string
+      try {
+        sha256 = await fileHashClient.hash(currentItem.file, {
+          jobId: localId,
+          signal: controller.signal,
+          onProgress: (progress) => {
+            if (findItem(localId)?.state === 'hashing') {
+              updateItem(localId, { hashProgress: progress })
+            }
+          },
+        })
+      } catch (error) {
+        if (controller.signal.aborted) {
+          updateItem(localId, { state: 'stopped', errorMessage: '本地检查已停止。' })
+          return
+        }
+        updateItem(localId, {
+          state: 'hash-failed',
+          errorMessage:
+            error instanceof Error && error.message.trim()
+              ? error.message
+              : '无法计算文件摘要，请重试。',
         })
         return
       }
 
-      await queueItem(localId, result.document)
-    } catch (error) {
       if (controller.signal.aborted) {
-        updateItem(localId, { state: 'stopped', errorMessage: '上传已停止。' })
+        updateItem(localId, { state: 'stopped', errorMessage: '本地检查已停止。' })
         return
       }
-      const presentation = presentUploadError(error)
+
       updateItem(localId, {
-        state: 'upload-failed',
-        errorMessage: presentation.message,
-        requestId: presentation.requestId,
+        state: 'checking',
+        sha256,
+        hashProgress: { processedBytes: currentItem.file.size, totalBytes: currentItem.file.size },
+      })
+
+      try {
+        const preflight = await preflightDocument(
+          { sha256, sizeBytes: currentItem.file.size },
+          controller.signal,
+        )
+        if (controller.signal.aborted) {
+          updateItem(localId, { state: 'stopped', errorMessage: '预检已停止。' })
+          return
+        }
+
+        if (preflight.exists && preflight.document) {
+          await continueWithDocument(localId, preflight.document, true, true)
+          return
+        }
+      } catch (error) {
+        if (controller.signal.aborted) {
+          updateItem(localId, { state: 'stopped', errorMessage: '预检已停止。' })
+          return
+        }
+
+        if (!canFailOpenPreflight(error)) {
+          const presentation = presentPreflightError(error)
+          updateItem(localId, {
+            state: 'check-failed',
+            errorMessage: presentation.message,
+            requestId: presentation.requestId,
+          })
+          return
+        }
+
+        const apiError = toApiError(error)
+        updateItem(localId, {
+          warningMessage: '预检暂时不可用，已改由上传接口完成最终重复检查。',
+          warningRequestId: apiError.requestId,
+        })
+      }
+
+      await uploadAndContinue(localId, currentItem.file, sha256, controller)
+    } catch {
+      if (controller.signal.aborted) {
+        updateItem(localId, { state: 'stopped', errorMessage: '操作已停止。' })
+        return
+      }
+      updateItem(localId, {
+        state: 'hash-failed',
+        errorMessage: '文件预检未能完成，请重试。',
       })
     } finally {
       if (activeRequestControllers.get(localId) === controller) {
@@ -524,7 +699,7 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
     while (!stopRequested && !disposed) {
       const nextItem = items.value.find((item) => item.state === 'waiting')
       if (!nextItem) return
-      updateItem(nextItem.localId, { state: 'uploading' })
+      updateItem(nextItem.localId, { state: 'hashing' })
       await processItem(nextItem.localId)
     }
   }
@@ -560,8 +735,12 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
             ...item,
             state: 'waiting',
             job: null,
+            sha256: null,
+            hashProgress: null,
             errorMessage: '',
             requestId: undefined,
+            warningMessage: '',
+            warningRequestId: undefined,
           }
         : item,
     )
@@ -572,7 +751,16 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
     if (isDispatching.value) return
     items.value = items.value.map((item) =>
       item.state === 'stopped'
-        ? { ...item, state: 'waiting', errorMessage: '', requestId: undefined }
+        ? {
+            ...item,
+            state: 'waiting',
+            sha256: null,
+            hashProgress: null,
+            errorMessage: '',
+            requestId: undefined,
+            warningMessage: '',
+            warningRequestId: undefined,
+          }
         : item,
     )
     await start()
@@ -586,6 +774,7 @@ export function useDocumentImportQueue(options: UseDocumentImportQueueOptions = 
     activeRequestControllers.clear()
     trackingControllers.clear()
     trackedImports.clear()
+    fileHashClient.dispose()
   })
 
   return {

@@ -4,57 +4,43 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	embeddingdomain "rag-reasoning-platform/backend/internal/domain/embedding"
 )
-
-const safeInterruptedEmbeddingMessage = "embedding generation was interrupted"
 
 var ErrEmbeddingRecoveryDependencies = errors.New(
 	"embedding recovery dependencies must be provided",
 )
 
-// InterruptedJobRecoveryService 编排单实例应用启动时的向量任务恢复。
-//
-// 它决定恢复时间和安全错误说明；具体 UPDATE 由任务仓储实现。
-type InterruptedJobRecoveryService struct {
-	jobs embeddingdomain.InterruptedJobRecoverer
-	now  func() time.Time
+// ExpiredJobRecoveryService 编排多实例安全的向量任务租约恢复。
+// 它只决定安全错误说明；是否真正过期由 PostgreSQL 时间判断。
+type ExpiredJobRecoveryService struct {
+	jobs embeddingdomain.ExpiredJobRecoverer
 }
 
-// NewInterruptedJobRecoveryService 创建生产环境使用的向量任务恢复服务。
-func NewInterruptedJobRecoveryService(
-	jobs embeddingdomain.InterruptedJobRecoverer,
-) (*InterruptedJobRecoveryService, error) {
-	return newInterruptedJobRecoveryService(jobs, time.Now)
-}
-
-func newInterruptedJobRecoveryService(
-	jobs embeddingdomain.InterruptedJobRecoverer,
-	now func() time.Time,
-) (*InterruptedJobRecoveryService, error) {
-	if jobs == nil || now == nil {
+// NewExpiredJobRecoveryService 创建生产环境使用的向量任务恢复服务。
+func NewExpiredJobRecoveryService(
+	jobs embeddingdomain.ExpiredJobRecoverer,
+) (*ExpiredJobRecoveryService, error) {
+	if jobs == nil {
 		return nil, ErrEmbeddingRecoveryDependencies
 	}
 
-	return &InterruptedJobRecoveryService{
+	return &ExpiredJobRecoveryService{
 		jobs: jobs,
-		now:  now,
 	}, nil
 }
 
-// Recover 把遗留 processing 任务重新放回立即可执行的 queued 队列。
-func (s *InterruptedJobRecoveryService) Recover(
+// Recover 把真正过期的 processing 任务重新放回 queued 队列。
+func (s *ExpiredJobRecoveryService) Recover(
 	ctx context.Context,
 ) (int64, error) {
-	recoveredCount, err := s.jobs.RequeueInterruptedEmbeddingJobs(
+	recoveredCount, err := s.jobs.RequeueExpiredEmbeddingJobs(
 		ctx,
-		s.now(),
-		safeInterruptedEmbeddingMessage,
+		safeExpiredEmbeddingMessage,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("recover interrupted embedding jobs: %w", err)
+		return 0, fmt.Errorf("recover expired embedding jobs: %w", err)
 	}
 
 	return recoveredCount, nil

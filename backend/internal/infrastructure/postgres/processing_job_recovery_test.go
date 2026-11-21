@@ -93,6 +93,15 @@ func TestProcessingJobRepositoryRecoversInterruptedJobs(t *testing.T) {
 		"interrupted-recovery",
 	)
 	createdDocumentIDs = append(createdDocumentIDs, interruptedDocument.ID)
+	if _, err := pool.Exec(
+		ctx,
+		`UPDATE document_jobs
+		 SET lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
+		 WHERE id = $1`,
+		interruptedJob.ID,
+	); err != nil {
+		t.Fatalf("expire processing job lease: %v", err)
+	}
 
 	uniqueValue := time.Now().UnixNano()
 	queuedDocument, err := documentRepository.Create(
@@ -121,8 +130,8 @@ func TestProcessingJobRepositoryRecoversInterruptedJobs(t *testing.T) {
 		t.Fatalf("create queued recovery test job: %v", err)
 	}
 
-	expectedMessage := "document processing was interrupted"
-	recoveredCount, err := jobRepository.MarkInterruptedProcessingJobsFailed(
+	expectedMessage := "document processing lease expired and was requeued"
+	recoveredCount, err := jobRepository.RequeueExpiredProcessingJobs(
 		ctx,
 		expectedMessage,
 	)
@@ -133,18 +142,23 @@ func TestProcessingJobRepositoryRecoversInterruptedJobs(t *testing.T) {
 		t.Fatalf("recovered count = %d, want 1", recoveredCount)
 	}
 
-	assertFinalizedJobAndDocument(
-		t,
-		ctx,
-		jobRepository,
-		documentRepository,
-		interruptedJob.ID,
-		interruptedDocument.ID,
-		documentdomain.ProcessingJobStatusFailed,
-		documentdomain.StatusFailed,
-		&expectedMessage,
-		nil,
-	)
+	requeuedJob, err := jobRepository.GetProcessingJobByID(ctx, interruptedJob.ID)
+	if err != nil {
+		t.Fatalf("get requeued expired job: %v", err)
+	}
+	if requeuedJob.Status != documentdomain.ProcessingJobStatusQueued {
+		t.Fatalf("requeued job status = %q, want queued", requeuedJob.Status)
+	}
+	if requeuedJob.StartedAt != nil || requeuedJob.CompletedAt != nil {
+		t.Fatal("requeued job must clear started_at and completed_at")
+	}
+	requeuedDocument, err := documentRepository.GetByID(ctx, interruptedDocument.ID)
+	if err != nil {
+		t.Fatalf("get document after lease recovery: %v", err)
+	}
+	if requeuedDocument.Status != documentdomain.StatusFailed {
+		t.Fatalf("requeued document status = %q, want failed", requeuedDocument.Status)
+	}
 
 	foundQueuedJob, err := jobRepository.GetProcessingJobByID(
 		ctx,
@@ -179,7 +193,7 @@ func TestProcessingJobRepositoryRecoversInterruptedJobs(t *testing.T) {
 		)
 	}
 
-	secondRecoveredCount, err := jobRepository.MarkInterruptedProcessingJobsFailed(
+	secondRecoveredCount, err := jobRepository.RequeueExpiredProcessingJobs(
 		ctx,
 		expectedMessage,
 	)

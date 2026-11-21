@@ -151,8 +151,28 @@ Application 只报告任务事实，不依赖具体日志框架；`main.go` 负�
 | `processing_job_failed` | `ERROR` | 处理失败，而且任务已经安全写入 `failed` |
 | `processing_job_unfinished` | `ERROR` | Worker 未能写入终态，任务可能仍停留在 `processing` |
 
-所有任务事件包含 `processing_job_id`、`document_id`、`attempt_count` 和 `status`；终结事件还包含
-`duration_ms`，失败事件在后端日志保留原始 `error`。日志不记录正文、存储路径、密钥或上传内容。
+所有任务事件包含 `processing_job_id`、`document_id`、`attempt_count`、`status` 和
+`queue_wait_ms`。终结事件还包含 `processor_ms`、`total_ms`、`file_bytes` 和
+`chunk_count`。失败事件使用稳定 `error_code` 供数据库统计，同时仅在后端日志保留原始
+`error`。日志和指标表都不记录正文、存储路径、密钥或上传内容。
+
+第一版先测量排队、整个文档处理器调用和 Worker 总执行。第二版继续拆分
+`source_open_ms`、`metadata_read_ms`、`text_extract_ms`、`text_split_ms`、
+`python_total_ms` 和 `chunk_write_ms`，并记录页数、最慢页码和最慢页耗时。
+这些字段持久化在对应 `document_jobs` 记录，历史任务、旧处理器或没有执行的
+阶段保持 `NULL`；真实执行但不足 1ms 的阶段记录为 `0`。
+
+`processor_ms` 仍表示 Go 看到的整个处理器调用，包含 Python 进程池等待、
+协议往返和 JSON 编解码；`python_total_ms` 只表示 Python 应用服务内部的提取、
+规范化和分块。两者的差值可用于定位外围开销。`finalize_ms` 在数据库提交完成后
+才能准确得到，因此只写终结事件日志，不为了持久化它再额外更新一次任务记录。
+
+固定大小 Worker Pool 启动时额外记录 `document_worker_pool_configured`，字段
+`concurrency` 表示同一后端实例内运行的文档 WorkerLoop 数量。Python 处理器组装时记录
+`python_document_processor_configured`，包含 `mode`、`pool_size` 和
+`max_documents_per_process`。默认 `oneshot` 下并发为 2 意味着最多同时启动两个一次性
+Python 子进程；`pool` 模式下实际复杂文档并发受 Go Worker 数和 Python 槽位数共同约束。
+第一版要求池大小不小于 Go Worker 数，避免任务已经变成 `processing` 却只在池入口等待。
 
 当前中断恢复策略是服务启动后将遗留 `processing` 任务标记为失败，并不存在重新排队行为，
 因此这一版没有记录与实际业务不一致的 `requeued` 事件。
@@ -179,6 +199,18 @@ Application 定义事件，`internal/observability` 使用 slog 实现，`main.g
 成本统计遵循“调用已经发生就必须记录”的原则：如果第一批向量成功而第二批失败，第一批产生的 Token、
 远程耗时和调用次数仍然保留在日志中；这些部分向量不会被持久化，只有 `succeeded` 才表示全部向量已经落库。
 
+2026-08-24 在既有重试机制上补充恢复观测，不增加业务表或重复状态字段：
+
+- `retry_count=max(attempt_count-1, 0)`，表示当前任务已经经历的重试次数；
+- `recovered=true` 只出现在“至少重试一次后最终成功”的 `embedding_job_succeeded`；
+- `finalization_duration_ms` 记录数据库收尾耗时。成功时覆盖“替换该文档全部向量 + 更新 Job 为
+  `succeeded`”的原子事务；失败或重排队时覆盖对应的 Job 状态写入；
+- `attempt_count` 继续由 PostgreSQL 在原子领取任务时递增，是恢复判定的事实来源。日志只是投影，不能反向改变任务状态。
+
+因此，一次提供方超时后恢复会形成两条可关联事实：第一次尝试写
+`embedding_job_requeued`，第二次尝试写 `embedding_job_succeeded` 且 `retry_count=1`、
+`recovered=true`。如果数据库收尾本身失败，则事件仍是 `embedding_job_unfinished`，不能误报恢复成功。
+
 ### 7.3 Generation 在线调用与拒答
 
 P5.2.5 在 Answer Application 定义 `GenerationEventObserver`，由 `internal/observability` 的 slog 适配器实现。
@@ -200,17 +232,151 @@ P5.2.5 在 Answer Application 定义 `GenerationEventObserver`，由 `internal/o
 Generation 日志严格禁止记录用户问题、System Instruction、User Prompt、证据正文、生成答案和 API Key。
 HTTP 访问日志负责整次请求的状态与总耗时，Generation 事件只负责远程生成阶段，二者不能混为同一个指标。
 
-### 7.4 可重复成本汇总
+### 7.4 Answer 并发准入
+
+在线问答在原有 Answer Service 外增加进程内并发包装器。一个槽位覆盖问题向量化、数据库语义检索和远程答案
+生成的完整链路，防止大量并发请求同时占满数据库连接、远程 API 配额和本机资源。
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `answer_request_admitted` | `INFO` | 请求取得并发槽位，开始执行完整问答链路 |
+| `answer_request_rejected` | `WARN`/`INFO` | 等待容量超时，或客户端在等待期间取消 |
+| `answer_request_released` | `INFO` | 问答成功或失败，槽位已经通过 `defer` 归还 |
+
+事件记录 `request_id`、`wait_duration_ms`、`in_flight`、`max_concurrency` 和 `outcome`；释放事件额外记录
+`execution_duration_ms`。`outcome` 使用 `succeeded`、`downstream_error`、`capacity_timeout` 或 `canceled`。
+容量超时使用 `WARN`，客户端取消使用 `INFO`。这些日志同样禁止记录问题、Prompt、答案、证据和 API Key。
+
+当前闸门是**单后端进程级**限制：如果未来水平扩容为多个后端副本，总并发约等于“副本数 × 每副本上限”，
+届时若要形成全局配额，需要增加 Redis/数据库等分布式准入能力。
+
+持久化异步问答额外输出以下生命周期事件：
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `answer_job_started` | `INFO` | Worker 已原子领取任务并开始完整问答链路 |
+| `answer_job_succeeded` | `INFO` | 答案、来源和 Token 用量已原子落库 |
+| `answer_job_requeued` | `WARN` | 临时失败后按指数退避重新排队 |
+| `answer_job_failed` | `ERROR` | 永久错误或重试耗尽，任务进入 failed |
+| `answer_job_interrupted` | `ERROR` | shutdown 中断执行，等待下次启动恢复 |
+| `answer_job_unfinished` | `ERROR` | 收尾数据库操作失败，任务仍需恢复 |
+
+事件只记录 `answer_job_id`、状态、尝试/重试次数、耗时、安全错误分类、下一次执行时间和匿名全局队列快照，
+不记录 Owner ID、问题、Prompt、答案或来源正文。HTTP 创建/查询/取消仍由请求日志使用 `request_id` 关联；
+Worker 跨越原始 HTTP 请求，因此使用持久化 `answer_job_id` 作为主关联键。
+
+异步问答耗时采用三个不同口径：
+
+- `queue_wait_ms`：本次任务达到可领取时间到 PostgreSQL 原子领取的等待；重试任务从 `next_attempt_at` 起算，
+  不把主动指数退避伪装成队列拥堵；
+- `execution_duration_ms`：本次 Worker 尝试的实际执行时间；
+- `total_ms`：任务最初创建到当前事件的累计端到端时间，包含历史重试和退避。
+
+队列快照包括 `queued_count`、`ready_queued_count`、`processing_count`、
+`max_owner_processing_count` 和 `oldest_ready_wait_ms`。其中 `ready_queued_count` 排除尚未到达
+`next_attempt_at` 的退避任务。快照查询失败会写 `queue_stats_error` 并提升日志级别，但不会改变任务成功、失败或
+重排结果；可观测性不能成为问答正确性的依赖。
+
+### 7.5 远程 Embedding 分类隔离与全局准入
+
+后台向量 Worker、在线语义检索和问答内部语义检索使用两个不同等待策略的 `GatedEmbedder`，并持有同一个
+包含 Worker、Online、Global 三组槽位的 `EmbeddingProviderGate`。分类槽位隔离后台和在线容量，全局槽位负责
+保证所有远程 Embedding HTTP 调用合计不会超额。
+
+| 事件 | 级别 | 含义 |
+| --- | --- | --- |
+| `embedding_provider_request_admitted` | `INFO` | Worker 或在线请求取得共享槽位 |
+| `embedding_provider_request_rejected` | `WARN`/`INFO` | 在线等待容量超时，或等待中的 context 被取消 |
+| `embedding_provider_request_released` | `INFO` | 远程调用成功、失败或取消后已经归还槽位 |
+
+事件记录 `origin=worker/online`、`request_id`（在线链路存在时）、`wait_duration_ms`、分类容量字段
+`origin_in_flight/origin_max_concurrency`、全局容量字段 `in_flight/max_concurrency` 和 `outcome`；释放事件增加
+`execution_duration_ms`。日志禁止记录输入文本、向量、远程响应正文和 API Key。默认 Worker/Online/Global
+分别为 2/2/4，在线等待 2 秒；后台 Worker 只随任务 context 或 shutdown 取消。
+
+该闸门控制并发数，不控制提供方的 RPM、TPM 或账户配额。分类槽位解决 Worker 饿死在线请求的问题，但在线
+类别内部仍可能出现跨用户饥饿；届时需要再设计用户级公平调度，而不是盲目提高并发数。
+
+### 7.6 可重复成本与问答并发汇总
 
 P5.2.6 第一部分提供 `go run ./cmd/observability-report`。该命令只消费已有 JSONL 日志，不启动服务、
 不访问数据库，也不调用远程模型。它排除 started 事件，按终结事件汇总 Embedding/Generation 的调用次数、
 Token、成功/失败/跳过状态以及平均、P50、P95 耗时。重试前已经发生的 Embedding 调用继续计入成本，
 无证据 Generation `skipped` 不计远程调用。
 
+2026-08-22 报告结构升级为 `schema_version=2`，在原有 `embedding` 和 `generation` 外增加
+`answer_admission`。它汇总 `admitted`、`rejected`、`released` 事件数，按 outcome 区分成功、下游失败、
+容量等待超时和客户端取消，并输出等待耗时、执行耗时和 `max_observed_in_flight`。同一条成功请求会同时写
+`admitted` 与 `released`，所以等待耗时只采用 `released` 或 `rejected` 终结事件，避免重复计算；执行耗时
+只采用 `released`。
+
+2026-08-24 报告结构升级为 `schema_version=3`，Embedding 汇总增加：
+
+- `retried_job_count`：进入 `succeeded` 或 `failed` 终态且至少重试过一次的任务数；
+- `recovered_job_count`：重试后成功的任务数；
+- `retry_exhausted_count`：重试后仍进入 `failed` 的任务数；
+- `recovery_rate=recovered_job_count/retried_job_count`，只使用已经确定的成功/失败终态；
+- `finalization_duration`：数据库原子收尾阶段的 Count、平均值、P50、P95 和最大值。
+
+汇总器能够从旧日志已有的 `attempt_count` 推导重试次数，因此历史结构化日志仍可使用；旧日志没有
+`finalization_duration_ms` 时，该耗时样本为空，不会伪造为 0 毫秒。
+
+2026-08-24 报告结构继续升级为 `schema_version=4`，在同一个离线命令中增加 `document_processing`：
+
+- 同时统计 `queue_wait`、Worker、Processor、Python 内部阶段、chunk 写入、数据库收尾和用户端到端耗时；
+- 默认以 `queue_wait_ms + total_ms >= 60000` 识别长尾，可通过
+  `-processing-slow-threshold` 调整，阈值不是业务状态规则；
+- 按近似互斥阶段给慢任务标记 `queue_wait`、`source_open`、`metadata_read`、`text_extract`、
+  `text_split`、`python_other`、`processor_bridge_overhead`、`processor`、`chunk_write`、
+  `finalization` 或 `worker_other` 瓶颈；
+- `slow_task_count` 统计全部慢任务，`slowest_tasks` 默认只保存最慢 20 条，避免大日志生成无界 JSON；
+- 慢任务明细只含 Job ID、Document ID、状态、规模和耗时，不记录路径、标题或正文。
+
+`processor_bridge_overhead` 是 `processor_ms - python_total_ms` 的非负部分，包含 Python 进程池等待、
+跨进程协议和 JSON 编解码，不能简单解释为网络时间。`slowest_page_ms` 属于 `text_extract_ms` 的内部线索，
+为了避免重复计算，不参与顶层瓶颈之间的竞争。
+
+2026-08-24 报告结构升级为 `schema_version=5`，问答准入汇总增加 Owner 公平容量指标：
+
+- `owner_capacity_count`：同一用户等待预算用尽的拒绝次数，对应公开 `429`；
+- `global_capacity_count`：全局等待区已满的拒绝次数，对应公开 `503`；
+- `capacity_timeout_count`：进入等待区后仍未在时限内取得槽位的次数，对应公开 `503`；
+- `max_observed_waiting`、`max_owner_in_flight`、`max_owner_waiting`：用于判断全局拥塞和单用户挤压。
+
+结构化事件只记录容量与耗时，不记录 Owner ID、问题、Prompt、答案或证据。汇总器仍兼容缺少这些新增字段
+的旧 JSONL 日志，便于继续分析已有压测证据。
+
+同日 `schema_version=6` 增加 `answer_jobs` 汇总：
+
+- 分别汇总每次尝试的排队和执行耗时，以及成功/失败终态的端到端耗时；
+- 统计至少重试一次的终态任务、恢复成功、重试后失败和恢复率；
+- 输出队列快照覆盖数/缺失数，以及 queued、ready queued、processing、单 Owner processing 和最老可领取任务
+  等待时间的观测峰值；
+- `answer_job_requeued` 的 `total_ms` 不加入终态端到端分布，避免同一任务被重复累计；
+- started 事件继续只表示过程开始，不进入报告的终结事件计数。
+
+该版本只读取现有 JSONL，不访问数据库或远程模型。旧日志没有异步问答事件时，`answer_jobs` 保持空汇总；
+同一个 v6 异步事件若只缺失部分队列字段，则报告器会拒绝该损坏样本，避免产生相互矛盾的容量结论。
+
+standalone 异步问答保留期清理成功删除一批数据时输出 `standalone_answer_jobs_cleaned`，字段为
+`retention_scope=standalone`、`deleted_count`、`completed_before`、`batch_size` 和 `duration_ms`。没有过期数据时
+不反复写空日志；数据库清理失败由 WorkerLoop 输出 `standalone_answer_job_retention_error`。这些事件不能解释为
+会话历史被删除；conversation-linked Job 随会话保留。日志禁止记录问题、答案、来源和 Owner ID。
+
+M3.1 的 `answer_generation_*` 事件增加安全上下文预算字段：
+
+- `history_message_count`、`history_turn_count`：本轮实际进入 Prompt 的历史规模；
+- `history_estimated_tokens`、`history_truncated`：Provider 无关估算值和是否因预算裁剪；
+- `candidate_evidence_count`、`evidence_count`、`evidence_budget_truncated`：预算裁剪前后的证据数量；
+- `estimated_input_tokens`：系统规则、历史、当前问题和最终证据的应用侧估算总量。
+
+这些字段只记录数量和预算，不记录历史正文、问题、Prompt、答案或 Owner。真实 Provider 返回的
+`prompt_tokens` 仍是成本与后续校准的最终事实。
+
 完整冻结条件、PowerShell 命令、字段口径和金额换算方法见
 [模型调用成本基线](../performance/model-call-cost-baseline.md)。真实付费批次必须单独获得授权。
 
-### 7.5 应用进程生命周期与启动恢复
+### 7.6 应用进程生命周期与启动恢复
 
 P5.3.3 增加三个进程级事件：`application_started`、`application_shutdown_started` 和
 `application_stopped`。它们由 `main.go` 记录，因为信号、HTTP Server、Worker goroutine 和数据库连接池都在

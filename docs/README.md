@@ -18,11 +18,24 @@ docs/
 - 前后端共同接口：[HTTP API 总览](shared/api/http-api-overview.md)
 - 个人用户主线与隔离契约：[P6 个人用户域与私有数据闭环](shared/architecture/personal-user-domain.md)
 - 工程化、个人用户与团队演进：[产品演进路线](shared/architecture/product-evolution-roadmap.md)
+- 高性能与高并发工程目标：[高性能与高并发工程目标](shared/architecture/performance-engineering-goal.md)
+- 100 人在线架构与阶段计划：
+  [100 人在线并发架构与交付计划](shared/architecture/100-user-concurrency-plan.md)
+- 多轮对话记忆工作区候选的数据边界与演进：
+  [多轮对话记忆：数据边界与演进路线](shared/architecture/conversation-memory-roadmap.md)
+- 多轮会话 M2 第一片工作区候选前端验收：
+  [前端回答任务交互验收](shared/architecture/conversation-memory-m2-frontend-acceptance-20261101.md)
+- 100 人在线后端交接：
+  [后端并发演进交接](backend/architecture/100-user-concurrency-handoff.md)
+- 100 人在线前端交接：
+  [前端背压与交互交接](frontend/architecture/100-user-concurrency-handoff.md)
 - 后端与 AI 架构：[后端正式文档](backend/README.md)
 - 前端开发准备：[前端正式文档](frontend/README.md)
 - 后端认证完成后的前端起点：[P6 个人用户认证前端交接](frontend/architecture/p6-authentication-handoff.md)
 - 后续文档能力与并发演进：
   [文档向量化、在线编辑、并发与缓存设计复盘](shared/architecture/document-vectorization-editing-concurrency-review.md)
+- 文档处理并发与 Python 进程生命周期：
+  [文档处理并发与 Python 进程复用交接](shared/architecture/document-processing-concurrency-review.md)
 
 ## 维护规则
 

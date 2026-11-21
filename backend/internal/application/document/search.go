@@ -15,6 +15,14 @@ const (
 	// MaxSearchQueryRunes 限制一次关键词查询最多包含的 Unicode 字符数。
 	// 使用字符数而不是字节数，避免中文等多字节字符受到不公平限制。
 	MaxSearchQueryRunes = 200
+
+	// MinSearchTermCount 和 MaxSearchTermCount 限制一次多关键词检索的规模。
+	MinSearchTermCount = 2
+	MaxSearchTermCount = 8
+
+	// MaxSearchTermRunes 限制单个关键词长度；全部关键词合计仍受
+	// MaxSearchQueryRunes 保护，避免构造过大的数据库查询条件。
+	MaxSearchTermRunes = 100
 )
 
 var (
@@ -30,11 +38,35 @@ var (
 	ErrSearchQueryTooLong = errors.New(
 		"search query must not exceed 200 characters",
 	)
+
+	// ErrSearchInputConflict 表示完整短语 q 和多关键词 term 同时出现。
+	ErrSearchInputConflict = errors.New("q and term cannot be used together")
+
+	// ErrInvalidSearchTermCount 表示规范化后的关键词数量不在 2～8 个范围内。
+	ErrInvalidSearchTermCount = errors.New("term must contain between 2 and 8 unique keywords")
+
+	// ErrSearchTermInvalidUTF8 表示至少一个关键词不是合法 UTF-8 文本。
+	ErrSearchTermInvalidUTF8 = errors.New("every term must be valid UTF-8")
+
+	// ErrSearchTermTooLong 表示单个关键词超过 100 个 Unicode 字符。
+	ErrSearchTermTooLong = errors.New("each term must not exceed 100 characters")
+
+	// ErrSearchTermsTooLong 表示全部关键词合计超过 200 个 Unicode 字符。
+	ErrSearchTermsTooLong = errors.New("all terms together must not exceed 200 characters")
+
+	// ErrInvalidSearchOperator 表示 operator 不是 all 或 any。
+	ErrInvalidSearchOperator = errors.New("operator must be all or any")
+
+	// ErrInvalidSearchWithin 表示请求了当前版本尚不支持的位置范围。
+	ErrInvalidSearchWithin = errors.New("within must be chunk")
 )
 
 // SearchInput 是上层调用关键词检索用例时提供的数据。
 type SearchInput struct {
 	Query      string
+	Terms      []string
+	Operator   documentdomain.SearchOperator
+	Within     documentdomain.SearchWithin
 	DocumentID *int64
 	Page       int64
 	PageSize   int64
@@ -43,6 +75,9 @@ type SearchInput struct {
 // SearchOutput 是关键词检索用例返回给 HTTP 层的结果。
 type SearchOutput struct {
 	Query      string
+	Terms      []string
+	Operator   documentdomain.SearchOperator
+	Within     documentdomain.SearchWithin
 	Hits       []documentdomain.SearchHit
 	Page       int64
 	PageSize   int64
@@ -74,14 +109,68 @@ func (s *SearchService) Search(
 	input SearchInput,
 ) (SearchOutput, error) {
 	query := strings.TrimSpace(input.Query)
-	if query == "" {
+	if query != "" && len(input.Terms) > 0 {
+		return SearchOutput{}, ErrSearchInputConflict
+	}
+
+	terms := make([]string, 0, len(input.Terms))
+	operator := input.Operator
+	within := input.Within
+
+	if len(input.Terms) > 0 {
+		seen := make(map[string]struct{}, len(input.Terms))
+		totalRunes := 0
+		for _, rawTerm := range input.Terms {
+			term := strings.TrimSpace(rawTerm)
+			if !utf8.ValidString(term) {
+				return SearchOutput{}, ErrSearchTermInvalidUTF8
+			}
+			if term == "" {
+				continue
+			}
+			termRunes := utf8.RuneCountInString(term)
+			if termRunes > MaxSearchTermRunes {
+				return SearchOutput{}, ErrSearchTermTooLong
+			}
+			// PostgreSQL 使用 ILIKE 执行大小写不敏感匹配，因此去重也采用
+			// 小写键；否则 Maglev 与 maglev 会被错误计为两个不同条件。
+			deduplicationKey := strings.ToLower(term)
+			if _, duplicated := seen[deduplicationKey]; duplicated {
+				continue
+			}
+			seen[deduplicationKey] = struct{}{}
+			terms = append(terms, term)
+			totalRunes += termRunes
+		}
+		if len(terms) < MinSearchTermCount || len(terms) > MaxSearchTermCount {
+			return SearchOutput{}, ErrInvalidSearchTermCount
+		}
+		if totalRunes > MaxSearchQueryRunes {
+			return SearchOutput{}, ErrSearchTermsTooLong
+		}
+		if operator == "" {
+			operator = documentdomain.SearchOperatorAll
+		}
+		if !operator.IsValid() {
+			return SearchOutput{}, ErrInvalidSearchOperator
+		}
+		if within == "" {
+			within = documentdomain.SearchWithinChunk
+		}
+		if !within.IsValid() {
+			return SearchOutput{}, ErrInvalidSearchWithin
+		}
+	} else if query == "" {
 		return SearchOutput{}, ErrSearchQueryRequired
-	}
-	if !utf8.ValidString(query) {
-		return SearchOutput{}, ErrSearchQueryInvalidUTF8
-	}
-	if utf8.RuneCountInString(query) > MaxSearchQueryRunes {
-		return SearchOutput{}, ErrSearchQueryTooLong
+	} else {
+		if !utf8.ValidString(query) {
+			return SearchOutput{}, ErrSearchQueryInvalidUTF8
+		}
+		if utf8.RuneCountInString(query) > MaxSearchQueryRunes {
+			return SearchOutput{}, ErrSearchQueryTooLong
+		}
+		terms = []string{query}
+		operator = documentdomain.SearchOperatorAll
 	}
 	if input.DocumentID != nil && *input.DocumentID <= 0 {
 		return SearchOutput{}, ErrInvalidID
@@ -96,11 +185,23 @@ func (s *SearchService) Search(
 	}
 
 	offset := (input.Page - 1) * input.PageSize
+	repositoryTerms := terms
+	repositoryOperator := operator
+	responseTerms := terms
+	responseOperator := operator
+	if query != "" {
+		repositoryTerms = nil
+		repositoryOperator = ""
+		responseTerms = nil
+		responseOperator = ""
+	}
 	result, err := s.searcher.Search(
 		ctx,
 		scope,
 		documentdomain.SearchOptions{
 			Query:      query,
+			Terms:      repositoryTerms,
+			Operator:   repositoryOperator,
 			DocumentID: input.DocumentID,
 			Limit:      input.PageSize,
 			Offset:     offset,
@@ -127,6 +228,9 @@ func (s *SearchService) Search(
 
 	return SearchOutput{
 		Query:      query,
+		Terms:      responseTerms,
+		Operator:   responseOperator,
+		Within:     within,
 		Hits:       hits,
 		Page:       input.Page,
 		PageSize:   input.PageSize,

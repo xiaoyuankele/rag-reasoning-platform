@@ -150,8 +150,72 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 | ConvertFrom-Json
-if ($manifest.format_version -ne 1 -or $manifest.status -ne "complete") {
+$manifestFormatVersion = [int]$manifest.format_version
+if ($manifestFormatVersion -notin @(1, 2, 3) -or $manifest.status -ne "complete") {
     throw "unsupported or incomplete backup manifest"
+}
+
+$manifestSchemaMigrationVersion = $null
+$manifestGitWorktreeDirty = $null
+if ($manifestFormatVersion -eq 3) {
+    $migrationVersionProperty = $manifest.database.PSObject.Properties["schema_migration_version"]
+    if ($null -eq $migrationVersionProperty) {
+        throw "manifest format v3 is missing database.schema_migration_version"
+    }
+    try {
+        $manifestSchemaMigrationVersion = [int64]$migrationVersionProperty.Value
+    }
+    catch {
+        throw "manifest database.schema_migration_version must be an integer"
+    }
+    if ($manifestSchemaMigrationVersion -lt 0) {
+        throw "manifest database.schema_migration_version must not be negative"
+    }
+
+    $dirtyProperty = $manifest.PSObject.Properties["git_worktree_dirty"]
+    if ($null -eq $dirtyProperty -or -not ($dirtyProperty.Value -is [bool])) {
+        throw "manifest format v3 requires boolean git_worktree_dirty"
+    }
+    $manifestGitWorktreeDirty = [bool]$dirtyProperty.Value
+}
+
+$legacyTableNames = @(
+    "documents",
+    "document_jobs",
+    "text_chunks",
+    "embedding_jobs",
+    "chunk_embeddings"
+)
+$longLivedConversationTableNames = @(
+    "users",
+    "user_sessions",
+    "conversations",
+    "conversation_messages",
+    "answer_jobs"
+)
+$tableNamesToVerify = if ($manifestFormatVersion -eq 1) {
+    $legacyTableNames
+}
+else {
+    @($legacyTableNames + $longLivedConversationTableNames)
+}
+
+# 在改变数据库或文件系统之前验证 manifest 包含当前格式要求的全部非负行数。
+foreach ($tableName in $tableNamesToVerify) {
+    $countProperty = $manifest.database.table_counts.PSObject.Properties[$tableName]
+    if ($null -eq $countProperty) {
+        throw "manifest format v$manifestFormatVersion is missing database.table_counts.$tableName"
+    }
+
+    try {
+        $expectedCount = [int64]$countProperty.Value
+    }
+    catch {
+        throw "manifest table count for $tableName must be an integer"
+    }
+    if ($expectedCount -lt 0) {
+        throw "manifest table count for $tableName must not be negative"
+    }
 }
 
 $databaseDumpFile = [string]$manifest.database.dump_file
@@ -296,15 +360,46 @@ try {
         ) `
         -Description "restore PostgreSQL dump"
 
-    $tableCountSQL = @"
+    $restoredSchemaMetadataSQL = @"
 SELECT json_build_object(
-    'documents', (SELECT COUNT(*) FROM documents),
-    'document_jobs', (SELECT COUNT(*) FROM document_jobs),
-    'text_chunks', (SELECT COUNT(*) FROM text_chunks),
-    'embedding_jobs', (SELECT COUNT(*) FROM embedding_jobs),
-    'chunk_embeddings', (SELECT COUNT(*) FROM chunk_embeddings)
+    'schema_migration_version', (
+        SELECT COALESCE(MAX(version), 0)
+        FROM schema_migrations
+    ),
+    'requested_document_id_available', EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'answer_jobs'
+          AND column_name = 'requested_document_id'
+    )
 )::text;
 "@
+    $restoredSchemaMetadataJSON = Get-NativeText -FilePath "docker" `
+        -ArgumentList @(
+            "compose", "exec", "-T", "postgres",
+            "psql",
+            "--username", $databaseUser,
+            "--dbname", $TargetDatabase,
+            "--tuples-only",
+            "--no-align",
+            "--command", $restoredSchemaMetadataSQL
+        ) `
+        -Description "read restored schema metadata"
+    $restoredSchemaMetadata = $restoredSchemaMetadataJSON | ConvertFrom-Json
+    $restoredSchemaMigrationVersion = [int64]$restoredSchemaMetadata.schema_migration_version
+    $requestedDocumentIDAvailable = [bool]$restoredSchemaMetadata.requested_document_id_available
+
+    if ($manifestFormatVersion -eq 3 -and
+        $restoredSchemaMigrationVersion -ne $manifestSchemaMigrationVersion) {
+        throw "restored schema migration version is $restoredSchemaMigrationVersion; expected $manifestSchemaMigrationVersion"
+    }
+
+    $tableCountPairs = @(
+        $tableNamesToVerify |
+            ForEach-Object { "    '$_', (SELECT COUNT(*) FROM $_)" }
+    )
+    $tableCountSQL = "SELECT json_build_object(`n{0}`n)::text;" -f ($tableCountPairs -join ",`n")
     $restoredCountsJSON = Get-NativeText -FilePath "docker" `
         -ArgumentList @(
             "compose", "exec", "-T", "postgres",
@@ -318,7 +413,7 @@ SELECT json_build_object(
         -Description "read restored table counts"
     $restoredCounts = $restoredCountsJSON | ConvertFrom-Json
 
-    foreach ($tableName in @("documents", "document_jobs", "text_chunks", "embedding_jobs", "chunk_embeddings")) {
+    foreach ($tableName in $tableNamesToVerify) {
         $expectedCount = [int64]$manifest.database.table_counts.PSObject.Properties[$tableName].Value
         $actualCount = [int64]$restoredCounts.PSObject.Properties[$tableName].Value
         if ($actualCount -ne $expectedCount) {
@@ -326,13 +421,317 @@ SELECT json_build_object(
         }
     }
 
+    $conversationIntegrity = [ordered]@{
+        status = "not_checked_manifest_v1"
+        standalone_source_privacy = [ordered]@{
+            status = "not_checked_manifest_v1"
+        }
+    }
+    if ($manifestFormatVersion -ge 2) {
+        # 只返回计数和索引门禁，不读取或输出消息正文、查询、答案、来源内容或 Owner 标识。
+        $conversationIntegritySQL = @"
+SELECT json_build_object(
+    'linked_answer_jobs', (
+        SELECT COUNT(*)
+        FROM answer_jobs
+        WHERE conversation_id IS NOT NULL
+          AND user_message_id IS NOT NULL
+          AND assistant_message_id IS NOT NULL
+    ),
+    'partially_linked_answer_jobs', (
+        SELECT COUNT(*)
+        FROM answer_jobs
+        WHERE num_nonnulls(conversation_id, user_message_id, assistant_message_id) NOT IN (0, 3)
+    ),
+    'invalid_linked_message_relations', (
+        SELECT COUNT(*)
+        FROM answer_jobs AS job
+        LEFT JOIN conversations AS conversation
+          ON conversation.id = job.conversation_id
+        LEFT JOIN conversation_messages AS user_message
+          ON user_message.id = job.user_message_id
+        LEFT JOIN conversation_messages AS assistant_message
+          ON assistant_message.id = job.assistant_message_id
+        WHERE num_nonnulls(job.conversation_id, job.user_message_id, job.assistant_message_id) = 3
+          AND (
+              conversation.id IS NULL
+              OR conversation.owner_user_id IS DISTINCT FROM job.owner_user_id
+              OR user_message.id IS NULL
+              OR user_message.conversation_id IS DISTINCT FROM job.conversation_id
+              OR user_message.role IS DISTINCT FROM 'user'
+              OR assistant_message.id IS NULL
+              OR assistant_message.conversation_id IS DISTINCT FROM job.conversation_id
+              OR assistant_message.role IS DISTINCT FROM 'assistant'
+          )
+    ),
+    'orphan_conversation_messages', (
+        SELECT COUNT(*)
+        FROM conversation_messages AS message
+        LEFT JOIN conversations AS conversation
+          ON conversation.id = message.conversation_id
+        WHERE conversation.id IS NULL
+    ),
+    'incomplete_succeeded_results', (
+        SELECT COUNT(*)
+        FROM answer_jobs
+        WHERE status = 'succeeded'
+          AND (
+              answer_text IS NULL
+              OR LENGTH(BTRIM(answer_text)) = 0
+              OR resolved_response_language IS NULL
+              OR sources IS NULL
+              OR jsonb_typeof(sources) IS DISTINCT FROM 'array'
+              OR prompt_tokens IS NULL
+              OR completion_tokens IS NULL
+              OR total_tokens IS NULL
+              OR prompt_tokens < 0
+              OR completion_tokens < 0
+              OR total_tokens < 0
+              OR prompt_tokens + completion_tokens IS DISTINCT FROM total_tokens
+          )
+    ),
+    'unique_user_message_index_count', (
+        SELECT COUNT(*)
+        FROM pg_catalog.pg_index AS index_metadata
+        JOIN pg_catalog.pg_class AS index_relation
+          ON index_relation.oid = index_metadata.indexrelid
+        JOIN pg_catalog.pg_class AS table_relation
+          ON table_relation.oid = index_metadata.indrelid
+        JOIN pg_catalog.pg_namespace AS table_namespace
+          ON table_namespace.oid = table_relation.relnamespace
+        WHERE table_namespace.nspname = 'public'
+          AND table_relation.relname = 'answer_jobs'
+          AND index_relation.relname = 'uq_answer_jobs_user_message'
+          AND index_metadata.indisunique
+          AND pg_get_indexdef(index_metadata.indexrelid) LIKE '%(user_message_id)%'
+    )
+)::text;
+"@
+        $conversationIntegrityJSON = Get-NativeText -FilePath "docker" `
+            -ArgumentList @(
+                "compose", "exec", "-T", "postgres",
+                "psql",
+                "--username", $databaseUser,
+                "--dbname", $TargetDatabase,
+                "--tuples-only",
+                "--no-align",
+                "--command", $conversationIntegritySQL
+            ) `
+            -Description "verify restored conversation relationships"
+        $conversationIntegrityData = $conversationIntegrityJSON | ConvertFrom-Json
+        $requestedDocumentSnapshot = [ordered]@{
+            status = "not_available"
+            mismatch_count = $null
+        }
+        if ($requestedDocumentIDAvailable) {
+            $requestedDocumentMismatchText = Get-NativeText -FilePath "docker" `
+                -ArgumentList @(
+                    "compose", "exec", "-T", "postgres",
+                    "psql",
+                    "--username", $databaseUser,
+                    "--dbname", $TargetDatabase,
+                    "--tuples-only",
+                    "--no-align",
+                    "--command", "SELECT COUNT(*) FROM answer_jobs WHERE document_id IS NOT NULL AND requested_document_id IS DISTINCT FROM document_id;"
+                ) `
+                -Description "verify requested document snapshots"
+            [int64]$requestedDocumentMismatchCount = 0
+            if (-not [int64]::TryParse($requestedDocumentMismatchText, [ref]$requestedDocumentMismatchCount) -or
+                $requestedDocumentMismatchCount -lt 0) {
+                throw "requested document snapshot mismatch count must be a non-negative integer"
+            }
+            $requestedDocumentSnapshot = [ordered]@{
+                status = "verified"
+                mismatch_count = $requestedDocumentMismatchCount
+            }
+        }
+        elseif ($restoredSchemaMigrationVersion -ge 35) {
+            throw "restored schema version $restoredSchemaMigrationVersion is missing answer_jobs.requested_document_id"
+        }
+
+        # standalone succeeded Job 的 sources 属于用户私有恢复边界。先按 JSON 类型、正整数格式和
+        # BIGINT 上界分类，再用 documents.id::text 关联；不对不可信 JSON 文本执行 BIGINT cast。
+        $standaloneSourcePrivacySQL = @"
+WITH standalone_source_entries AS MATERIALIZED (
+    SELECT
+        job.id AS job_id,
+        job.owner_user_id,
+        source_entry.value -> 'document_id' AS snake_document_id,
+        source_entry.value -> 'DocumentID' AS camel_document_id
+    FROM answer_jobs AS job
+    CROSS JOIN LATERAL jsonb_array_elements(
+        CASE
+            WHEN jsonb_typeof(job.sources) = 'array' THEN job.sources
+            ELSE '[]'::jsonb
+        END
+    ) WITH ORDINALITY AS source_entry(value, ordinal)
+    WHERE job.conversation_id IS NULL
+      AND job.status = 'succeeded'
+),
+source_document_values AS MATERIALIZED (
+    SELECT
+        job_id,
+        owner_user_id,
+        snake_document_id,
+        camel_document_id,
+        CASE
+            WHEN snake_document_id IS NULL THEN NULL
+            ELSE snake_document_id #>> '{}'
+        END AS snake_document_id_text,
+        CASE
+            WHEN camel_document_id IS NULL THEN NULL
+            ELSE camel_document_id #>> '{}'
+        END AS camel_document_id_text
+    FROM standalone_source_entries
+),
+classified_sources AS MATERIALIZED (
+    SELECT
+        job_id,
+        owner_user_id,
+        COALESCE(snake_document_id_text, camel_document_id_text) AS document_id_text,
+        (
+            (snake_document_id IS NULL AND camel_document_id IS NULL)
+            OR (
+                snake_document_id IS NOT NULL
+                AND (
+                    jsonb_typeof(snake_document_id) <> 'number'
+                    OR snake_document_id_text !~ '^[1-9][0-9]*$'
+                    OR LENGTH(snake_document_id_text) > 19
+                    OR (
+                        LENGTH(snake_document_id_text) = 19
+                        AND snake_document_id_text > '9223372036854775807'
+                    )
+                )
+            )
+            OR (
+                camel_document_id IS NOT NULL
+                AND (
+                    jsonb_typeof(camel_document_id) <> 'number'
+                    OR camel_document_id_text !~ '^[1-9][0-9]*$'
+                    OR LENGTH(camel_document_id_text) > 19
+                    OR (
+                        LENGTH(camel_document_id_text) = 19
+                        AND camel_document_id_text > '9223372036854775807'
+                    )
+                )
+            )
+            OR (
+                snake_document_id IS NOT NULL
+                AND camel_document_id IS NOT NULL
+                AND snake_document_id_text IS DISTINCT FROM camel_document_id_text
+            )
+        ) AS invalid_document_id
+    FROM source_document_values
+)
+SELECT json_build_object(
+    'source_entry_count', COUNT(*),
+    'invalid_document_id_count', COUNT(*) FILTER (
+        WHERE source.invalid_document_id
+    ),
+    'missing_document_count', COUNT(*) FILTER (
+        WHERE NOT source.invalid_document_id
+          AND document.id IS NULL
+    ),
+    'owner_mismatch_count', COUNT(*) FILTER (
+        WHERE NOT source.invalid_document_id
+          AND document.id IS NOT NULL
+          AND document.owner_user_id IS DISTINCT FROM source.owner_user_id
+    )
+)::text
+FROM classified_sources AS source
+LEFT JOIN documents AS document
+  ON NOT source.invalid_document_id
+ AND document.id::text = source.document_id_text;
+"@
+        $standaloneSourcePrivacyJSON = Get-NativeText -FilePath "docker" `
+            -ArgumentList @(
+                "compose", "exec", "-T", "postgres",
+                "psql",
+                "--username", $databaseUser,
+                "--dbname", $TargetDatabase,
+                "--tuples-only",
+                "--no-align",
+                "--command", $standaloneSourcePrivacySQL
+            ) `
+            -Description "verify restored standalone answer source privacy"
+        $standaloneSourcePrivacyData = $standaloneSourcePrivacyJSON | ConvertFrom-Json
+        $standaloneSourcePrivacy = [ordered]@{
+            status = "verified"
+            source_entry_count = [int64]$standaloneSourcePrivacyData.source_entry_count
+            invalid_document_id_count = [int64]$standaloneSourcePrivacyData.invalid_document_id_count
+            missing_document_count = [int64]$standaloneSourcePrivacyData.missing_document_count
+            owner_mismatch_count = [int64]$standaloneSourcePrivacyData.owner_mismatch_count
+        }
+
+        $conversationIntegrity = [ordered]@{
+            status = "verified"
+            linked_answer_jobs = [int64]$conversationIntegrityData.linked_answer_jobs
+            partially_linked_answer_jobs = [int64]$conversationIntegrityData.partially_linked_answer_jobs
+            invalid_linked_message_relations = [int64]$conversationIntegrityData.invalid_linked_message_relations
+            orphan_conversation_messages = [int64]$conversationIntegrityData.orphan_conversation_messages
+            incomplete_succeeded_results = [int64]$conversationIntegrityData.incomplete_succeeded_results
+            unique_user_message_index_count = [int64]$conversationIntegrityData.unique_user_message_index_count
+            requested_document_snapshot = $requestedDocumentSnapshot
+            standalone_source_privacy = $standaloneSourcePrivacy
+        }
+
+        if ($conversationIntegrity.partially_linked_answer_jobs -ne 0) {
+            throw "restored answer jobs contain incomplete conversation link IDs"
+        }
+        if ($conversationIntegrity.invalid_linked_message_relations -ne 0) {
+            throw "restored answer jobs contain invalid conversation message ownership or roles"
+        }
+        if ($conversationIntegrity.orphan_conversation_messages -ne 0) {
+            throw "restored conversation messages contain missing conversation parents"
+        }
+        if ($conversationIntegrity.incomplete_succeeded_results -ne 0) {
+            throw "restored succeeded answer jobs contain incomplete sources or token fields"
+        }
+        if ($conversationIntegrity.unique_user_message_index_count -ne 1) {
+            throw "restored database is missing the unique answer-job user-message index"
+        }
+        if ($requestedDocumentSnapshot.status -eq "verified" -and
+            $requestedDocumentSnapshot.mismatch_count -ne 0) {
+            throw "restored answer jobs contain mismatched requested document snapshots"
+        }
+        if ($standaloneSourcePrivacy.invalid_document_id_count -ne 0) {
+            throw "restored standalone answer sources contain invalid document IDs"
+        }
+        if ($standaloneSourcePrivacy.missing_document_count -ne 0) {
+            throw "restored standalone answer sources reference missing documents"
+        }
+        if ($standaloneSourcePrivacy.owner_mismatch_count -ne 0) {
+            throw "restored standalone answer sources reference documents owned by another user"
+        }
+
+        Write-Host (
+            "Conversation integrity counts: linked_jobs={0}, partial_links={1}, invalid_message_links={2}, orphan_messages={3}, incomplete_succeeded={4}, unique_user_message_indexes={5}, requested_document_snapshot={6}, requested_document_mismatches={7}, standalone_source_entries={8}, invalid_source_document_ids={9}, missing_source_documents={10}, source_owner_mismatches={11}" -f
+                $conversationIntegrity.linked_answer_jobs,
+                $conversationIntegrity.partially_linked_answer_jobs,
+                $conversationIntegrity.invalid_linked_message_relations,
+                $conversationIntegrity.orphan_conversation_messages,
+                $conversationIntegrity.incomplete_succeeded_results,
+                $conversationIntegrity.unique_user_message_index_count,
+                $requestedDocumentSnapshot.status,
+                $requestedDocumentSnapshot.mismatch_count,
+                $standaloneSourcePrivacy.source_entry_count,
+                $standaloneSourcePrivacy.invalid_document_id_count,
+                $standaloneSourcePrivacy.missing_document_count,
+                $standaloneSourcePrivacy.owner_mismatch_count
+        )
+    }
+
     $result = [ordered]@{
         status = "verified"
+        manifest_format_version = $manifestFormatVersion
+        source_git_worktree_dirty = $manifestGitWorktreeDirty
+        restored_schema_migration_version = $restoredSchemaMigrationVersion
         restored_at_utc = [DateTime]::UtcNow.ToString("o")
         source_backup = $backupDirectoryPath
         target_database = $TargetDatabase
         target_storage = $restoredStoragePath
         database_table_counts = $restoredCounts
+        conversation_integrity = $conversationIntegrity
         storage_file_count = [int64]$restoredStorageFiles.Count
         storage_size_bytes = $restoredStorageBytes
     }

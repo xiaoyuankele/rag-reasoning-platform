@@ -78,7 +78,7 @@ describe('DocumentScopePicker', () => {
     })
     await flushPromises()
 
-    expect(wrapper.get('[role="alert"]').text()).toContain('文档 #99 当前不可用于关键词检索')
+    expect(wrapper.get('[role="alert"]').text()).toContain('文档 #99 当前不可用于检索或问答')
     await wrapper.get('[role="alert"] button').trigger('click')
     expect(wrapper.emitted('update:modelValue')).toEqual([[{ kind: 'all' }]])
     wrapper.unmount()
@@ -106,6 +106,30 @@ describe('DocumentScopePicker', () => {
     await flushPromises()
     expect(listDocumentsMock).toHaveBeenCalledTimes(2)
     expect(wrapper.text()).toContain('当前没有解析完成的文档')
+    wrapper.unmount()
+  })
+
+  it('disabled 时锁定范围选择、重试和回到全部文档操作', async () => {
+    listDocumentsMock.mockRejectedValue(
+      new ApiError('network', '无法连接后端服务，请确认服务已经启动。'),
+    )
+    const wrapper = mount(DocumentScopePicker, {
+      props: {
+        modelValue: { kind: 'single', documentId: 99 },
+        invalidSelection: true,
+        disabled: true,
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('select').attributes('disabled')).toBeDefined()
+    const actionButtons = wrapper.findAll('.scope-notice button')
+    expect(actionButtons).toHaveLength(2)
+    expect(actionButtons.every((button) => button.attributes('disabled') !== undefined)).toBe(true)
+
+    await wrapper.get('select').trigger('change')
+    await actionButtons[1].trigger('click')
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
     wrapper.unmount()
   })
 })

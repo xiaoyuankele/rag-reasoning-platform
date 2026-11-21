@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ApiError, toApiError } from './api-error'
+import { ApiError, readApiResponseMetadata, toApiError } from './api-error'
 
 describe('toApiError', () => {
   it('把无响应的 Axios 异常转换为网络错误', () => {
@@ -72,5 +72,14 @@ describe('toApiError', () => {
       status: 401,
       code: 'authentication_required',
     })
+  })
+
+  it('也能从成功响应头读取批量结果需要的请求编号和等待时间', () => {
+    expect(
+      readApiResponseMetadata({
+        'x-request-id': 'batch-capacity-1',
+        'retry-after': '5',
+      }),
+    ).toEqual({ requestId: 'batch-capacity-1', retryAfterSeconds: 5 })
   })
 })

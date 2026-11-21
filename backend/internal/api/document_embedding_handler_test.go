@@ -146,6 +146,64 @@ func TestDocumentEmbeddingHandlerMapsServiceErrors(t *testing.T) {
 	}
 }
 
+func TestDocumentEmbeddingHandlerMapsAdmissionCapacityErrors(t *testing.T) {
+	testCases := []struct {
+		name       string
+		serviceErr error
+		statusCode int
+		code       string
+		message    string
+	}{
+		{
+			name:       "owner limit",
+			serviceErr: embeddingdomain.ErrOwnerActiveJobLimitExceeded,
+			statusCode: http.StatusTooManyRequests,
+			code:       errorCodeEmbeddingOwnerJobLimit,
+			message:    "too many active embedding jobs for this user",
+		},
+		{
+			name:       "global capacity",
+			serviceErr: embeddingdomain.ErrGlobalActiveJobLimitExceeded,
+			statusCode: http.StatusServiceUnavailable,
+			code:       errorCodeEmbeddingQueueCapacity,
+			message:    "embedding queue is temporarily full",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			service := &fakeEmbeddingQueueService{
+				queueFunc: func(
+					context.Context,
+					accessdomain.OwnerScope,
+					int64,
+				) (embeddingdomain.JobRequestResult, error) {
+					return embeddingdomain.JobRequestResult{}, testCase.serviceErr
+				},
+			}
+			response := httptest.NewRecorder()
+			newTestEmbeddingRouter(service).ServeHTTP(
+				response,
+				httptest.NewRequest(http.MethodPost, "/documents/7/embeddings", nil),
+			)
+
+			if response.Code != testCase.statusCode {
+				t.Fatalf("status = %d, want %d", response.Code, testCase.statusCode)
+			}
+			if response.Header().Get("Retry-After") != "5" {
+				t.Fatalf("Retry-After = %q, want 5", response.Header().Get("Retry-After"))
+			}
+			var actual errorResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &actual); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if actual.Code != testCase.code || actual.Error != testCase.message {
+				t.Fatalf("error response = %+v, want code=%q message=%q", actual, testCase.code, testCase.message)
+			}
+		})
+	}
+}
+
 func TestDocumentEmbeddingHandlerReturnsRequestedJob(t *testing.T) {
 	expectedJob := embeddingdomain.Job{
 		ID:           17,

@@ -56,9 +56,12 @@ type searchHitResponse struct {
 
 // documentSearchResponse 是文档关键词搜索成功时的 HTTP 响应结构。
 type documentSearchResponse struct {
-	Query      string              `json:"query"`
-	Results    []searchHitResponse `json:"results"`
-	Pagination paginationResponse  `json:"pagination"`
+	Query      string                        `json:"query"`
+	Terms      []string                      `json:"terms,omitempty"`
+	Operator   documentdomain.SearchOperator `json:"operator,omitempty"`
+	Within     documentdomain.SearchWithin   `json:"within,omitempty"`
+	Results    []searchHitResponse           `json:"results"`
+	Pagination paginationResponse            `json:"pagination"`
 }
 
 // Search 读取 HTTP 查询参数，调用应用服务，并把结果转换成 HTTP 响应。
@@ -69,8 +72,13 @@ func (h *DocumentSearchHandler) Search(c *gin.Context) {
 		return
 	}
 
-	// Handler 负责读取 HTTP 参数；查询词的业务合法性由 Application 层校验。
-	rawQuery := c.Query("q")
+	// Handler 只负责解析 HTTP 形状；词项数量、长度和匹配模式由 Application 校验。
+	rawQuery, queryProvided := c.GetQuery("q")
+	rawTerms, termsProvided := c.GetQueryArray("term")
+	if queryProvided && termsProvided {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: "q and term cannot be used together"})
+		return
+	}
 
 	// GetQuery 能区分“没有提供过滤条件”和“显式提供了空值”。
 	var documentID *int64
@@ -115,6 +123,9 @@ func (h *DocumentSearchHandler) Search(c *gin.Context) {
 		scope,
 		applicationdocument.SearchInput{
 			Query:      rawQuery,
+			Terms:      rawTerms,
+			Operator:   documentdomain.SearchOperator(c.Query("operator")),
+			Within:     documentdomain.SearchWithin(c.Query("within")),
 			DocumentID: documentID,
 			Page:       page,
 			PageSize:   pageSize,
@@ -156,6 +167,34 @@ func (h *DocumentSearchHandler) Search(c *gin.Context) {
 		})
 		return
 	}
+	if errors.Is(err, applicationdocument.ErrSearchInputConflict) {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: "q and term cannot be used together"})
+		return
+	}
+	if errors.Is(err, applicationdocument.ErrInvalidSearchTermCount) {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: "term must contain between 2 and 8 unique keywords"})
+		return
+	}
+	if errors.Is(err, applicationdocument.ErrSearchTermInvalidUTF8) {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: "every term must be valid UTF-8"})
+		return
+	}
+	if errors.Is(err, applicationdocument.ErrSearchTermTooLong) {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: "each term must not exceed 100 characters"})
+		return
+	}
+	if errors.Is(err, applicationdocument.ErrSearchTermsTooLong) {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: "all terms together must not exceed 200 characters"})
+		return
+	}
+	if errors.Is(err, applicationdocument.ErrInvalidSearchOperator) {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: "operator must be all or any"})
+		return
+	}
+	if errors.Is(err, applicationdocument.ErrInvalidSearchWithin) {
+		c.JSON(http.StatusBadRequest, errorResponse{Error: "within must be chunk"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errorResponse{
 			Error: "internal server error",
@@ -169,8 +208,11 @@ func (h *DocumentSearchHandler) Search(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, documentSearchResponse{
-		Query:   result.Query,
-		Results: hits,
+		Query:    result.Query,
+		Terms:    result.Terms,
+		Operator: result.Operator,
+		Within:   result.Within,
+		Results:  hits,
 		Pagination: paginationResponse{
 			Page:       result.Page,
 			PageSize:   result.PageSize,

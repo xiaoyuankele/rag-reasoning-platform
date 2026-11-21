@@ -226,6 +226,40 @@ func TestChunkRepositorySearch(t *testing.T) {
 		}
 	})
 
+	t.Run("requires all terms in the same chunk", func(t *testing.T) {
+		result, err := chunkRepository.Search(
+			ctx,
+			documentdomain.SearchOptions{
+				Terms:    []string{"磁悬浮", "control"},
+				Operator: documentdomain.SearchOperatorAll,
+				Limit:    10,
+			},
+		)
+		if err != nil {
+			t.Fatalf("Search() all terms error = %v", err)
+		}
+		if result.Total != 1 || len(result.Hits) != 1 || result.Hits[0].ChunkIndex != 0 {
+			t.Fatalf("Search() all terms result = %+v, want Chinese chunk 0", result)
+		}
+	})
+
+	t.Run("matches any term in the same chunk", func(t *testing.T) {
+		result, err := chunkRepository.Search(
+			ctx,
+			documentdomain.SearchOptions{
+				Terms:    []string{"磁悬浮", "stability"},
+				Operator: documentdomain.SearchOperatorAny,
+				Limit:    10,
+			},
+		)
+		if err != nil {
+			t.Fatalf("Search() any terms error = %v", err)
+		}
+		if result.Total != 2 || len(result.Hits) != 2 {
+			t.Fatalf("Search() any terms result = total %d hits %d, want 2/2", result.Total, len(result.Hits))
+		}
+	})
+
 	t.Run("treats SQL wildcard characters literally", func(t *testing.T) {
 		result, err := chunkRepository.Search(
 			ctx,

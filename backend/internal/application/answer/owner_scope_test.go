@@ -11,7 +11,16 @@ const testAnswerOwnerUserID int64 = 42
 // testAnswerOwnerScope 创建问答 Application 测试共用的可信用户作用域。
 func testAnswerOwnerScope(t *testing.T) accessdomain.OwnerScope {
 	t.Helper()
-	scope, err := accessdomain.NewOwnerScope(testAnswerOwnerUserID)
+	return testAnswerOwnerScopeForID(t, testAnswerOwnerUserID)
+}
+
+// testAnswerOwnerScopeForID 为并发测试创建相互隔离的用户作用域。
+func testAnswerOwnerScopeForID(
+	t *testing.T,
+	ownerUserID int64,
+) accessdomain.OwnerScope {
+	t.Helper()
+	scope, err := accessdomain.NewOwnerScope(ownerUserID)
 	if err != nil {
 		t.Fatalf("create test answer owner scope: %v", err)
 	}

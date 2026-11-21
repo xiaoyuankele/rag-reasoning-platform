@@ -259,6 +259,41 @@ func TestSemanticSearchHandlerMapsServiceErrors(t *testing.T) {
 	}
 }
 
+func TestSemanticSearchHandlerReturnsStableProviderCapacityError(t *testing.T) {
+	service := &fakeSemanticSearchService{
+		err: errors.Join(
+			errors.New("semantic search admission failed"),
+			embeddingapplication.ErrEmbeddingProviderCapacityExhausted,
+		),
+	}
+	recorder := performSemanticSearchRequest(
+		t,
+		service,
+		`{"query":"control","top_k":5}`,
+	)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf(
+			"status = %d, want %d; body = %s",
+			recorder.Code,
+			http.StatusServiceUnavailable,
+			recorder.Body.String(),
+		)
+	}
+	if retryAfter := recorder.Header().Get("Retry-After"); retryAfter != "2" {
+		t.Fatalf("Retry-After = %q, want 2", retryAfter)
+	}
+
+	var response errorResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode capacity response: %v", err)
+	}
+	if response.Code != errorCodeEmbeddingProviderCapacity ||
+		response.Error != "embedding service is busy; try again later" {
+		t.Fatalf("capacity response = %+v", response)
+	}
+}
+
 func performSemanticSearchRequest(
 	t *testing.T,
 	service semanticSearchService,

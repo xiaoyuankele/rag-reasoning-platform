@@ -128,17 +128,12 @@ function Write-Utf8Text {
 $scriptDirectory = Split-Path -Parent $PSCommandPath
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDirectory "..\.."))
 $originalLocation = Get-Location
-$marker = "lifecycle-$([Guid]::NewGuid().ToString('N'))"
-$documentStoragePath = "lifecycle-verification/$marker-document.md"
-$embeddingStoragePath = "lifecycle-verification/$marker-embedding.md"
-$fixturesCreated = $false
 $backendCreated = $false
 $operationError = $null
 $logs = ""
 $gracefulStopMilliseconds = 0L
 $gracefulExitCode = $null
 $forcedExitCode = $null
-$recoveryState = $null
 $testedAt = [DateTime]::UtcNow
 $resultDirectory = Join-Path $projectRoot "chatgpt\运行产物\临时"
 $logDirectory = Join-Path $projectRoot "chatgpt\运行产物\日志"
@@ -210,6 +205,7 @@ SELECT json_build_object(
     $env:EMBEDDING_WORKER_ENABLED = "false"
     $env:SEMANTIC_SEARCH_ENABLED = "false"
     $env:ANSWER_ENABLED = "false"
+    $env:ANSWER_JOBS_ENABLED = "false"
 
     # 验收的正是当前工作区代码和 Dockerfile，不能复用可能过期的本地镜像。
     Write-Host "Starting isolated backend container..."
@@ -253,72 +249,6 @@ SELECT json_build_object(
         -Description "restart backend"
     $backendContainerID = Wait-BackendHealthy -Port $HostPort
 
-    # 创建两条只用于恢复验收的 processing 任务。Worker 不会领取 processing，
-    # 因此它们会一直保留到强制终止后的下一次启动恢复。
-    $fixtureSQL = @"
-WITH document_fixture AS (
-    INSERT INTO documents (
-        original_name, storage_path, mime_type, size_bytes, sha256, status
-    )
-    VALUES (
-        '$marker-document.md',
-        '$documentStoragePath',
-        'text/markdown',
-        0,
-        repeat('d', 64),
-        'processing'
-    )
-    RETURNING id
-),
-document_job_fixture AS (
-    INSERT INTO document_jobs (
-        document_id, status, attempt_count, started_at
-    )
-    SELECT id, 'processing', 1, CURRENT_TIMESTAMP
-    FROM document_fixture
-    RETURNING id, document_id
-),
-embedding_document_fixture AS (
-    INSERT INTO documents (
-        original_name, storage_path, mime_type, size_bytes, sha256, status
-    )
-    VALUES (
-        '$marker-embedding.md',
-        '$embeddingStoragePath',
-        'text/markdown',
-        0,
-        repeat('e', 64),
-        'ready'
-    )
-    RETURNING id
-),
-embedding_job_fixture AS (
-    INSERT INTO embedding_jobs (
-        document_id, model_name, dimensions, status, attempt_count, started_at
-    )
-    SELECT id, 'lifecycle-verification', 1536, 'processing', 1, CURRENT_TIMESTAMP
-    FROM embedding_document_fixture
-    RETURNING id, document_id
-)
-SELECT json_build_object(
-    'document_job_id', document_job_fixture.id,
-    'document_id', document_job_fixture.document_id,
-    'embedding_job_id', embedding_job_fixture.id,
-    'embedding_document_id', embedding_job_fixture.document_id
-)::text
-FROM document_job_fixture
-CROSS JOIN embedding_job_fixture;
-"@
-    $fixtureJSON = Get-NativeText -FilePath "docker" `
-        -ArgumentList @(
-            "compose", "exec", "-T", "postgres",
-            "psql", "--username", $databaseUser, "--dbname", $databaseName,
-            "--tuples-only", "--no-align", "--command", $fixtureSQL
-        ) `
-        -Description "create lifecycle verification fixtures"
-    $fixture = $fixtureJSON | ConvertFrom-Json
-    $fixturesCreated = $true
-
     Write-Host "Forcing SIGKILL to simulate an abnormal process death..."
     Invoke-NativeCommand -FilePath "docker" `
         -ArgumentList @("kill", "--signal", "KILL", "rag_reasoning_backend") `
@@ -330,83 +260,17 @@ CROSS JOIN embedding_job_fixture;
         throw "forced stop exit code is $forcedExitCode; expected 137"
     }
 
-    Write-Host "Starting the same container to trigger startup recovery..."
+    Write-Host "Starting the same API container after forced termination..."
     Invoke-NativeCommand -FilePath "docker" `
         -ArgumentList @("compose", "start", "backend") `
         -Description "start backend after forced termination"
     $backendContainerID = Wait-BackendHealthy -Port $HostPort
 
-    $recoverySQL = @"
-SELECT json_build_object(
-    'document_status', (
-        SELECT status FROM documents WHERE storage_path = '$documentStoragePath'
-    ),
-    'document_error', (
-        SELECT error_message FROM documents WHERE storage_path = '$documentStoragePath'
-    ),
-    'document_job_status', (
-        SELECT j.status
-        FROM document_jobs AS j
-        JOIN documents AS d ON d.id = j.document_id
-        WHERE d.storage_path = '$documentStoragePath'
-    ),
-    'document_job_error', (
-        SELECT j.error_message
-        FROM document_jobs AS j
-        JOIN documents AS d ON d.id = j.document_id
-        WHERE d.storage_path = '$documentStoragePath'
-    ),
-    'embedding_document_status', (
-        SELECT status FROM documents WHERE storage_path = '$embeddingStoragePath'
-    ),
-    'embedding_job_status', (
-        SELECT j.status
-        FROM embedding_jobs AS j
-        JOIN documents AS d ON d.id = j.document_id
-        WHERE d.storage_path = '$embeddingStoragePath'
-    ),
-    'embedding_job_error', (
-        SELECT j.error_message
-        FROM embedding_jobs AS j
-        JOIN documents AS d ON d.id = j.document_id
-        WHERE d.storage_path = '$embeddingStoragePath'
-    ),
-    'embedding_started_at_is_null', (
-        SELECT j.started_at IS NULL
-        FROM embedding_jobs AS j
-        JOIN documents AS d ON d.id = j.document_id
-        WHERE d.storage_path = '$embeddingStoragePath'
-    )
-)::text;
-"@
-    $recoveryJSON = Get-NativeText -FilePath "docker" `
-        -ArgumentList @(
-            "compose", "exec", "-T", "postgres",
-            "psql", "--username", $databaseUser, "--dbname", $databaseName,
-            "--tuples-only", "--no-align", "--command", $recoverySQL
-        ) `
-        -Description "read recovered lifecycle state"
-    $recoveryState = $recoveryJSON | ConvertFrom-Json
-
-    if ($recoveryState.document_status -ne "failed" -or
-        $recoveryState.document_job_status -ne "failed" -or
-        $recoveryState.document_error -ne "document processing was interrupted" -or
-        $recoveryState.document_job_error -ne "document processing was interrupted") {
-        throw "document processing recovery did not produce the expected failed state"
-    }
-    if ($recoveryState.embedding_document_status -ne "ready" -or
-        $recoveryState.embedding_job_status -ne "queued" -or
-        $recoveryState.embedding_job_error -ne "embedding generation was interrupted" -or
-        -not [bool]$recoveryState.embedding_started_at_is_null) {
-        throw "embedding recovery did not produce the expected queued state"
-    }
-
     $logs = Get-NativeText -FilePath "docker" `
         -ArgumentList @("compose", "logs", "--no-color", "backend") `
         -Description "read lifecycle verification logs"
-    if (-not $logs.Contains('"event":"processing_jobs_recovered"') -or
-        -not $logs.Contains('"event":"embedding_jobs_requeued"')) {
-        throw "startup recovery lifecycle events were not found in logs"
+    if (-not $logs.Contains('"event":"application_started"')) {
+        throw "application start lifecycle event was not found after forced restart"
     }
 
     $result = [ordered]@{
@@ -424,13 +288,9 @@ SELECT json_build_object(
             signal = "SIGKILL"
             exit_code = $forcedExitCode
         }
-        recovery = [ordered]@{
-            document_job_id = [int64]$fixture.document_job_id
-            embedding_job_id = [int64]$fixture.embedding_job_id
-            document_status = [string]$recoveryState.document_status
-            document_job_status = [string]$recoveryState.document_job_status
-            embedding_document_status = [string]$recoveryState.embedding_document_status
-            embedding_job_status = [string]$recoveryState.embedding_job_status
+        restart_after_abnormal_shutdown = [ordered]@{
+            healthy = $true
+            task_recovery_gate = "verify-worker-fault-recovery.ps1"
         }
     }
 
@@ -448,26 +308,6 @@ finally {
         }
         New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
         Write-Utf8Text -LiteralPath $logPath -Value ($logs + [Environment]::NewLine)
-    }
-
-    if ($fixturesCreated) {
-        $cleanupSQL = @"
-WITH deleted AS (
-    DELETE FROM documents
-    WHERE storage_path IN ('$documentStoragePath', '$embeddingStoragePath')
-    RETURNING id
-)
-SELECT COUNT(*) FROM deleted;
-"@
-        $deletedCount = (& docker compose exec -T postgres psql `
-            --username $databaseUser `
-            --dbname $databaseName `
-            --tuples-only `
-            --no-align `
-            --command $cleanupSQL 2>$null).Trim()
-        if ($LASTEXITCODE -ne 0 -or $deletedCount -ne "2") {
-            Write-Warning "could not fully remove lifecycle fixtures; marker: $marker"
-        }
     }
 
     if ($backendCreated) {
@@ -495,8 +335,8 @@ if ($null -ne $operationError) {
 Write-Host "Container lifecycle verification passed."
 Write-Host "Graceful exit code: $gracefulExitCode ($gracefulStopMilliseconds ms)"
 Write-Host "Forced exit code: $forcedExitCode"
-Write-Host "Document recovery: processing -> failed"
-Write-Host "Embedding recovery: processing -> queued"
+Write-Host "Restart after SIGKILL: healthy"
+Write-Host "Task lease recovery: delegated to verify-worker-fault-recovery.ps1"
 Write-Host "Result: $resultPath"
 Write-Host "Log: $logPath"
 Write-Output $resultPath

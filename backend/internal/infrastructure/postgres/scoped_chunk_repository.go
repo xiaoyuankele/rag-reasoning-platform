@@ -133,27 +133,31 @@ func (r *ScopedChunkRepository) Search(
 		return documentdomain.SearchResult{}, accessdomain.ErrInvalidOwnerScope
 	}
 
-	queryPattern := literalSubstringPattern(options.Query)
+	matchClause, matchArguments, err := keywordMatchClause(options, 3)
+	if err != nil {
+		return documentdomain.SearchResult{}, fmt.Errorf("build scoped keyword match clause: %w", err)
+	}
+	documentIDPlaceholder := 3 + len(matchArguments)
 
-	const countQuery = `
+	countQuery := fmt.Sprintf(`
 		SELECT COUNT(*)
 		FROM text_chunks AS chunk
 		JOIN documents AS source_document
 		  ON source_document.id = chunk.document_id
 		WHERE source_document.owner_user_id = $1
 		  AND source_document.status = $2
-		  AND chunk.content ILIKE $3 ESCAPE E'\\'
-		  AND ($4::BIGINT IS NULL OR chunk.document_id = $4)
-	`
+		  AND %s
+		  AND ($%d::BIGINT IS NULL OR chunk.document_id = $%d)
+	`, matchClause, documentIDPlaceholder, documentIDPlaceholder)
+	countArguments := []any{scope.OwnerUserID(), documentdomain.StatusReady}
+	countArguments = append(countArguments, matchArguments...)
+	countArguments = append(countArguments, options.DocumentID)
 
 	var total int64
 	if err := r.pool.QueryRow(
 		ctx,
 		countQuery,
-		scope.OwnerUserID(),
-		documentdomain.StatusReady,
-		queryPattern,
-		options.DocumentID,
+		countArguments...,
 	).Scan(&total); err != nil {
 		return documentdomain.SearchResult{}, fmt.Errorf(
 			"count scoped matching document chunks: %w",
@@ -166,7 +170,9 @@ func (r *ScopedChunkRepository) Search(
 		return documentdomain.SearchResult{Hits: hits, Total: 0}, nil
 	}
 
-	const searchQuery = `
+	limitPlaceholder := documentIDPlaceholder + 1
+	offsetPlaceholder := documentIDPlaceholder + 2
+	searchQuery := fmt.Sprintf(`
 		SELECT
 			chunk.id,
 			chunk.document_id,
@@ -182,26 +188,23 @@ func (r *ScopedChunkRepository) Search(
 		  ON source_document.id = chunk.document_id
 		WHERE source_document.owner_user_id = $1
 		  AND source_document.status = $2
-		  AND chunk.content ILIKE $3 ESCAPE E'\\'
-		  AND ($4::BIGINT IS NULL OR chunk.document_id = $4)
+		  AND %s
+		  AND ($%d::BIGINT IS NULL OR chunk.document_id = $%d)
 		ORDER BY
 			source_document.created_at DESC,
 			source_document.id DESC,
 			chunk.chunk_index ASC,
 			chunk.id ASC
-		LIMIT $5
-		OFFSET $6
-	`
+		LIMIT $%d
+		OFFSET $%d
+	`, matchClause, documentIDPlaceholder, documentIDPlaceholder, limitPlaceholder, offsetPlaceholder)
+	searchArguments := append([]any(nil), countArguments...)
+	searchArguments = append(searchArguments, options.Limit, options.Offset)
 
 	rows, err := r.pool.Query(
 		ctx,
 		searchQuery,
-		scope.OwnerUserID(),
-		documentdomain.StatusReady,
-		queryPattern,
-		options.DocumentID,
-		options.Limit,
-		options.Offset,
+		searchArguments...,
 	)
 	if err != nil {
 		return documentdomain.SearchResult{}, fmt.Errorf(

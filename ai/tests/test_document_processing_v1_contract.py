@@ -20,6 +20,7 @@ from rag_ai.contracts.document_processing_v1 import (  # noqa: E402
     CONTRACT_VERSION,
     ContractError,
     ProcessingChunk,
+    ProcessingMetrics,
     parse_request,
     success_response,
 )
@@ -169,12 +170,63 @@ class ProcessingContractTests(unittest.TestCase):
 
                 self.assertEqual(raised.exception.code, "internal_error")
 
+    def test_success_response_preserves_processing_metrics(self) -> None:
+        metrics = ProcessingMetrics(
+            python_total_ms=75,
+            source_open_ms=5,
+            metadata_read_ms=1,
+            text_extract_ms=60,
+            text_split_ms=4,
+            page_count=3,
+            slowest_page_number=2,
+            slowest_page_ms=30,
+        )
+
+        response = success_response(
+            "job-123",
+            [ProcessingChunk(index=0, content="content")],
+            metrics=metrics,
+        )
+
+        self.assertEqual(
+            response["metrics"],
+            {
+                "python_total_ms": 75,
+                "source_open_ms": 5,
+                "metadata_read_ms": 1,
+                "text_extract_ms": 60,
+                "text_split_ms": 4,
+                "page_count": 3,
+                "slowest_page_number": 2,
+                "slowest_page_ms": 30,
+            },
+        )
+
+    def test_success_response_rejects_invalid_processing_metrics(self) -> None:
+        invalid_metrics = [
+            ProcessingMetrics(-1, 0, 0, 0, 0, 1, 1, 0),
+            ProcessingMetrics(1, 0, 0, 0, 0, 0, 1, 0),
+            ProcessingMetrics(1, 0, 0, 0, 0, 2, 3, 0),
+        ]
+
+        for metrics in invalid_metrics:
+            with self.subTest(metrics=metrics):
+                with self.assertRaises(ContractError) as raised:
+                    success_response(
+                        "job-123",
+                        [ProcessingChunk(index=0, content="content")],
+                        metrics=metrics,
+                    )
+
+                self.assertEqual(raised.exception.code, "internal_error")
+
 
 class ProcessorCLITests(unittest.TestCase):
     def run_cli(
         self,
         input_text: str,
         *,
+        arguments: tuple[str, ...] = (),
         python_io_encoding: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """以明确 UTF-8 字节启动真实 CLI，并允许模拟错误系统代码页。"""
@@ -188,6 +240,7 @@ class ProcessorCLITests(unittest.TestCase):
                 sys.executable,
                 "-m",
                 "rag_ai.entrypoints.document_processing_cli",
+                *arguments,
             ],
             input=input_text,
             text=True,
@@ -249,6 +302,37 @@ class ProcessorCLITests(unittest.TestCase):
         self.assertEqual(response["request_id"], "invalid-request")
         self.assertEqual(response["status"], "failed")
         self.assertEqual(response["error"]["code"], "invalid_request")
+
+    def test_stream_cli_processes_multiple_lines_after_invalid_request(self) -> None:
+        """常驻模式必须逐行响应，并在坏请求后继续处理下一份文档。"""
+
+        with tempfile.TemporaryDirectory() as directory:
+            payload = valid_payload(Path(directory) / "research.docx")
+            document = payload["document"]
+            assert isinstance(document, dict)
+            document["mime_type"] = (
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            )
+            input_text = "not-json\n" + json.dumps(payload) + "\n"
+
+            completed = self.run_cli(
+                input_text,
+                arguments=("--stream",),
+            )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stderr, "")
+        response_lines = completed.stdout.splitlines()
+        self.assertEqual(len(response_lines), 2)
+
+        invalid_response = json.loads(response_lines[0])
+        self.assertEqual(invalid_response["request_id"], "invalid-request")
+        self.assertEqual(invalid_response["error"]["code"], "invalid_request")
+
+        unsupported_response = json.loads(response_lines[1])
+        self.assertEqual(unsupported_response["request_id"], "job-123")
+        self.assertEqual(unsupported_response["error"]["code"], "unsupported_format")
 
     def test_cli_returns_invalid_content_for_fake_pdf(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -39,16 +39,23 @@ func TestGenerationCallLoggerWritesRequestCostAndScopeFields(t *testing.T) {
 	observer.ObserveGenerationEvent(
 		ctx,
 		answerapplication.GenerationEvent{
-			Type:             answerapplication.GenerationEventSucceeded,
-			ModelName:        "qwen3.6-flash",
-			ResponseLanguage: answerapplication.ResponseLanguageChinese,
-			DocumentID:       &documentID,
-			RequestedTopK:    5,
-			EvidenceCount:    4,
-			ProviderDuration: 1250 * time.Millisecond,
-			PromptTokens:     800,
-			CompletionTokens: 120,
-			TotalTokens:      920,
+			Type:                    answerapplication.GenerationEventSucceeded,
+			ModelName:               "qwen3.6-flash",
+			ResponseLanguage:        answerapplication.ResponseLanguageChinese,
+			DocumentID:              &documentID,
+			RequestedTopK:           5,
+			CandidateEvidenceCount:  6,
+			EvidenceCount:           4,
+			EvidenceBudgetTruncated: true,
+			HistoryMessageCount:     6,
+			HistoryTurnCount:        3,
+			HistoryEstimatedTokens:  900,
+			HistoryTruncated:        true,
+			EstimatedInputTokens:    4200,
+			ProviderDuration:        1250 * time.Millisecond,
+			PromptTokens:            800,
+			CompletionTokens:        120,
+			TotalTokens:             920,
 		},
 	)
 
@@ -64,7 +71,18 @@ func TestGenerationCallLoggerWritesRequestCostAndScopeFields(t *testing.T) {
 	assertStringLogField(t, entry, "response_language", "zh")
 	assertNumericLogField(t, entry, "document_id", 72)
 	assertNumericLogField(t, entry, "requested_top_k", 5)
+	assertNumericLogField(t, entry, "candidate_evidence_count", 6)
 	assertNumericLogField(t, entry, "evidence_count", 4)
+	if entry["evidence_budget_truncated"] != true {
+		t.Fatalf("evidence_budget_truncated = %#v, want true", entry["evidence_budget_truncated"])
+	}
+	assertNumericLogField(t, entry, "history_message_count", 6)
+	assertNumericLogField(t, entry, "history_turn_count", 3)
+	assertNumericLogField(t, entry, "history_estimated_tokens", 900)
+	if entry["history_truncated"] != true {
+		t.Fatalf("history_truncated = %#v, want true", entry["history_truncated"])
+	}
+	assertNumericLogField(t, entry, "estimated_input_tokens", 4200)
 	assertNumericLogField(t, entry, "provider_duration_ms", 1250)
 	assertNumericLogField(t, entry, "prompt_tokens", 800)
 	assertNumericLogField(t, entry, "completion_tokens", 120)

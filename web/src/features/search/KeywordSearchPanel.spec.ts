@@ -14,6 +14,9 @@ const searchKeywordsMock = vi.mocked(searchKeywords)
 
 const firstPage: KeywordSearchPage = {
   query: 'bridge',
+  terms: [],
+  operator: null,
+  within: null,
   results: [
     {
       chunkId: 11,
@@ -77,6 +80,7 @@ describe('KeywordSearchPanel', () => {
     })
     expect(searchKeywordsMock).toHaveBeenCalledWith(
       {
+        mode: 'phrase',
         query: 'bridge',
         documentId: 7,
         page: 1,
@@ -97,6 +101,7 @@ describe('KeywordSearchPanel', () => {
 
     expect(searchKeywordsMock).toHaveBeenCalledWith(
       {
+        mode: 'phrase',
         query: 'bridge',
         documentId: undefined,
         page: 1,
@@ -155,6 +160,9 @@ describe('KeywordSearchPanel', () => {
   it('明确区分后端零结果与连接失败', async () => {
     searchKeywordsMock.mockResolvedValue({
       query: 'maglev vibration',
+      terms: [],
+      operator: null,
+      within: null,
       results: [],
       pagination: {
         page: 1,
@@ -167,8 +175,77 @@ describe('KeywordSearchPanel', () => {
 
     expect(searchKeywordsMock).toHaveBeenCalledOnce()
     expect(wrapper.text()).toContain('后端检索已完成')
-    expect(wrapper.text()).toContain('连续字面片段匹配')
+    expect(wrapper.text()).toContain('连续完整短语匹配')
     expect(wrapper.text()).not.toContain('检索没有完成')
+    wrapper.unmount()
+  })
+
+  it('从 URL 恢复同一文本块多关键词检索并高亮全部关键词', async () => {
+    searchKeywordsMock.mockResolvedValue({
+      ...firstPage,
+      query: '',
+      terms: ['maglev', 'vibration'],
+      operator: 'all',
+      within: 'chunk',
+      results: [
+        {
+          ...firstPage.results[0]!,
+          content: 'maglev vehicle vibration response',
+        },
+      ],
+    })
+
+    const { wrapper } = await mountPanel(
+      '/search?term=maglev&term=vibration&operator=all&within=chunk&document_id=7',
+    )
+
+    expect(searchKeywordsMock).toHaveBeenCalledWith(
+      {
+        mode: 'terms',
+        terms: ['maglev', 'vibration'],
+        operator: 'all',
+        within: 'chunk',
+        documentId: 7,
+        page: 1,
+        pageSize: 10,
+      },
+      expect.any(AbortSignal),
+    )
+    expect(wrapper.text()).toContain('同一文本块同时包含全部关键词')
+    expect(wrapper.findAll('mark').map((mark) => mark.text())).toEqual(['maglev', 'vibration'])
+    wrapper.unmount()
+  })
+
+  it('添加多个关键词后把重复 term、operator 和 within 写入 URL', async () => {
+    searchKeywordsMock.mockResolvedValue({
+      ...firstPage,
+      query: '',
+      terms: ['maglev', 'vibration'],
+      operator: 'any',
+      within: 'chunk',
+    })
+    const { router, wrapper } = await mountPanel('/search')
+
+    await wrapper.get('input[value="terms"]').setValue(true)
+    await wrapper.get('#keyword-term-input').setValue('maglev，vibration')
+    await wrapper.get('.operator-field select').setValue('any')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toEqual({
+      term: ['maglev', 'vibration'],
+      operator: 'any',
+      within: 'chunk',
+    })
+    expect(searchKeywordsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mode: 'terms',
+        terms: ['maglev', 'vibration'],
+        operator: 'any',
+        within: 'chunk',
+      }),
+      expect.any(AbortSignal),
+    )
     wrapper.unmount()
   })
 })
