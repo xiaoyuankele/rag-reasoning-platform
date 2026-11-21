@@ -210,11 +210,16 @@ func TestDedicatedAgentWorkerRejectsConfiguredAnswerCapacityMismatch(t *testing.
 func TestRegisterAgentRoutesDisabled404EnabledUnauthenticated401(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	disabled := gin.New()
-	registerAgentRoutes(disabled.Group(""), nil)
+	disabledComponents, err := newAgentComponents(agentComponentInputs{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registerAgentRoutes(disabled.Group(""), disabledComponents.handler)
+	const latestPath = "/conversations/5/agent-runs/latest"
 	disabledResponse := httptest.NewRecorder()
-	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodGet, "/agent-runs/1", nil))
-	if disabledResponse.Code != http.StatusNotFound {
-		t.Fatalf("disabled route status = %d", disabledResponse.Code)
+	disabled.ServeHTTP(disabledResponse, httptest.NewRequest(http.MethodGet, latestPath, nil))
+	if disabledResponse.Code != http.StatusNotFound || len(disabled.Routes()) != 0 {
+		t.Fatalf("disabled route status = %d, registered routes = %d", disabledResponse.Code, len(disabled.Routes()))
 	}
 
 	components, err := newAgentComponents(agentComponentInputs{
@@ -228,7 +233,7 @@ func TestRegisterAgentRoutesDisabled404EnabledUnauthenticated401(t *testing.T) {
 	enabled := gin.New()
 	registerAgentRoutes(enabled.Group(""), components.handler)
 	enabledResponse := httptest.NewRecorder()
-	enabled.ServeHTTP(enabledResponse, httptest.NewRequest(http.MethodGet, "/agent-runs/1", nil))
+	enabled.ServeHTTP(enabledResponse, httptest.NewRequest(http.MethodGet, latestPath, nil))
 	if enabledResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("enabled unauthenticated status = %d body=%s", enabledResponse.Code, enabledResponse.Body.String())
 	}

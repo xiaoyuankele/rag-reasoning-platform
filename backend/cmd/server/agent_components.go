@@ -222,11 +222,7 @@ func validateSharedAnswerAgentCapacity(
 	return nil
 }
 
-type agentRouteRegistrar interface {
-	RegisterRoutes(gin.IRoutes)
-}
-
-func registerAgentRoutes(routes gin.IRoutes, handler agentRouteRegistrar) {
+func registerAgentRoutes(routes gin.IRoutes, handler *api.AgentRunHandler) {
 	if handler != nil {
 		handler.RegisterRoutes(routes)
 	}
